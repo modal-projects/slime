@@ -96,7 +96,13 @@ def get_model_provider_func(
         if getattr(args, "decoder_last_pipeline_num_layers", None) is not None:
             provider.num_layers_in_last_pipeline_stage = args.decoder_last_pipeline_num_layers
         provider.finalize()
-        return provider.provide
+
+        # Apply PEFT transformation if enabled
+        model_provider_func = provider.provide
+        if getattr(args, "peft_type", "none") != "none":
+            model_provider_func = wrap_model_provider_with_peft(model_provider_func, args)
+
+        return model_provider_func
 
     def model_provider(pre_process: bool = True, post_process: bool = True, vp_stage: int | None = None) -> GPTModel:
         """Builds the model.
@@ -238,3 +244,126 @@ def freeze_model_params(model: GPTModel, args: argparse.Namespace):
                 if re.search(pattern, name):
                     param.requires_grad = False
                     break
+
+
+def _freeze_non_lora_params(model, peft_type):
+    """Freeze all parameters except LoRA adapter weights.
+
+    ParallelLinearAdapter uses linear_in/linear_out for LoRA weights.
+    LinearAdapter uses lora_a/lora_b for LoRA weights.
+
+    We freeze everything except parameters whose names contain these LoRA-specific substrings.
+    """
+    # LoRA adapter parameter name patterns
+    lora_param_patterns = [
+        ".linear_in.",  # ParallelLinearAdapter A matrix
+        ".linear_out.",  # ParallelLinearAdapter B matrix
+        ".lora_a.",  # LinearAdapter A matrix
+        ".lora_b.",  # LinearAdapter B matrix
+    ]
+
+    frozen_count = 0
+    trainable_count = 0
+
+    for name, param in model.named_parameters():
+        is_lora_param = any(pattern in name for pattern in lora_param_patterns)
+        if is_lora_param:
+            param.requires_grad = True
+            trainable_count += 1
+        else:
+            param.requires_grad = False
+            frozen_count += 1
+
+    print(f"PEFT freeze: {frozen_count} params frozen, {trainable_count} LoRA params trainable")
+
+
+def wrap_model_provider_with_peft(original_provider, args):
+    """Wrap model provider to apply PEFT (LoRA/DoRA) transformation.
+
+    This wrapper:
+    1. Creates the base model using the original provider
+    2. Applies PEFT transformation recursively (injects LoRA/DoRA adapters)
+    3. Freezes base model parameters (only adapters are trainable)
+
+    Args:
+        original_provider: The original model provider function
+        args: Argument namespace with PEFT configuration
+
+    Returns:
+        Wrapped provider function that returns PEFT-transformed model
+    """
+    if args.peft_type == "none":
+        return original_provider
+
+    # Import PEFT classes from Megatron-Bridge
+    from megatron.bridge.peft.lora import LoRA
+    from megatron.bridge.peft.dora import DoRA
+    try:
+        from megatron.bridge.peft.canonical_lora import CanonicalLoRA
+    except ImportError:
+        # CanonicalLoRA may not be available in all versions
+        CanonicalLoRA = None
+
+    peft_classes = {
+        "lora": LoRA,
+        "dora": DoRA,
+        "canonical_lora": CanonicalLoRA,
+    }
+
+    peft_cls = peft_classes.get(args.peft_type)
+    if peft_cls is None:
+        raise ValueError(f"Unknown or unavailable PEFT type: {args.peft_type}")
+
+    # Create PEFT configuration
+    peft_config = peft_cls(
+        target_modules=args.lora_target_modules,
+        dim=args.lora_rank,
+        alpha=args.lora_alpha,
+        dropout=args.lora_dropout,
+    )
+
+    def wrapped_provider(pre_process=True, post_process=True, vp_stage=None):
+        sig = inspect.signature(original_provider)
+        if "vp_stage" in sig.parameters:
+            model = original_provider(pre_process=pre_process, post_process=post_process, vp_stage=vp_stage)
+        else:
+            model = original_provider(pre_process=pre_process, post_process=post_process)
+
+        # Apply PEFT transformation recursively using megatron-bridge's walk_utils
+        # This properly traverses the model tree and applies transform to each module
+        from megatron.bridge.peft.walk_utils import map as peft_map
+
+        peft_map(model, peft_config.transform)
+
+        # Count transformed modules for logging
+        # Note: Megatron parallel models use ParallelLinearAdapter, not LinearAdapter
+        adapter_count = 0
+        try:
+            from megatron.bridge.peft.lora import LinearAdapter, ParallelLinearAdapter
+            adapter_count = sum(
+                1 for _, m in model.named_modules()
+                if isinstance(m, (LinearAdapter, ParallelLinearAdapter))
+            )
+            if adapter_count > 0:
+                print(f"PEFT: Transformed {adapter_count} modules with LoRA adapters")
+            else:
+                print("PEFT Warning: No modules were transformed. Check target_modules config.")
+        except ImportError:
+            pass
+
+        # Freeze base model parameters - only LoRA adapter weights should be trainable
+        # ParallelLinearAdapter (unlike LinearAdapter) doesn't auto-freeze base weights
+        if adapter_count > 0:
+            _freeze_non_lora_params(model, args.peft_type)
+
+        # Log trainable parameters
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(
+            f"PEFT ({args.peft_type}): {trainable_params:,} trainable params / {total_params:,} total params "
+            f"({100 * trainable_params / total_params:.2f}%)"
+        )
+
+        return model
+
+    return wrapped_provider

@@ -190,7 +190,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                             --only-train-params-name-list self_attention.wq_b self_attention.wk self_attention.k_norm self_attention.weights_proj
 
                         3. Train ONLY Layer 20 to 23:
-                            --only-train-params-name-list layers\.2[0-3]\.
+                            --only-train-params-name-list layers\\.2[0-3]\\.
                         """,
             )
 
@@ -211,6 +211,54 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
 
                         3. Freeze specific projection layers (e.g., all Gate/Up projections):
                             --freeze-params-name-list linear_fc1
+                        """,
+            )
+
+            # PEFT (Parameter-Efficient Fine-Tuning) arguments
+            parser.add_argument(
+                "--peft-type",
+                type=str,
+                choices=["none", "lora", "dora", "canonical_lora"],
+                default="none",
+                help="""PEFT method to use for training. Options:
+                        - none: Full fine-tuning (default)
+                        - lora: Low-Rank Adaptation (performant variant for fused QKV)
+                        - dora: Weight-Decomposed Low-Rank Adaptation
+                        - canonical_lora: Standard LoRA with separate Q/K/V adapters
+
+                        Requires --megatron-to-hf-mode bridge.
+                        """,
+            )
+            parser.add_argument(
+                "--lora-rank",
+                type=int,
+                default=32,
+                help="LoRA rank (low-rank dimension). Higher = more parameters but better expressivity. Default: 32",
+            )
+            parser.add_argument(
+                "--lora-alpha",
+                type=int,
+                default=32,
+                help="LoRA alpha (scaling factor). Often set equal to rank. Default: 32",
+            )
+            parser.add_argument(
+                "--lora-dropout",
+                type=float,
+                default=0.0,
+                help="LoRA dropout rate for regularization. Default: 0.0",
+            )
+            parser.add_argument(
+                "--lora-target-modules",
+                type=str,
+                nargs="+",
+                default=["linear_qkv", "linear_proj", "linear_fc1", "linear_fc2"],
+                help="""Target modules for LoRA adaptation. Default: linear_qkv linear_proj linear_fc1 linear_fc2
+
+                        Available modules (Megatron naming):
+                        - linear_qkv: Fused QKV projection
+                        - linear_proj: Output projection
+                        - linear_fc1: MLP up/gate projection
+                        - linear_fc2: MLP down projection
                         """,
             )
 
@@ -1055,7 +1103,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help=(
                     "Log statistics of the category of reward, such as why the reward function considers it as failed. "
-                    "Specify the key in the reward dict using this argument.",
+                    "Specify the key in the reward dict using this argument."
                 ),
             )
             parser.add_argument(
@@ -1448,7 +1496,10 @@ def parse_args(add_custom_arguments=None):
 
         args = megatron_parse_args(extra_args_provider=add_slime_arguments)
         if args.hf_checkpoint and not args.debug_rollout_only:
-            hf_config = AutoConfig.from_pretrained(args.hf_checkpoint, trust_remote_code=True)
+            # Detect local paths to avoid HuggingFace Hub validation errors in transformers 5.x
+            import os
+            is_local_path = args.hf_checkpoint.startswith("/") or os.path.isdir(args.hf_checkpoint)
+            hf_config = AutoConfig.from_pretrained(args.hf_checkpoint, trust_remote_code=True, local_files_only=is_local_path)
             hf_validate_args(args, hf_config)
 
         args.rank = 0
@@ -1756,6 +1807,28 @@ def slime_validate_args(args):
 
     if args.only_train_params_name_list and args.freeze_params_name_list:
         raise ValueError("You can only specify ONE of: --only-train-params-name-list, or --freeze-params-name-list.")
+
+    # PEFT validation
+    if args.peft_type != "none":
+        if args.megatron_to_hf_mode != "bridge":
+            raise ValueError(
+                f"PEFT (--peft-type {args.peft_type}) requires --megatron-to-hf-mode bridge. "
+                f"Current mode: {args.megatron_to_hf_mode}"
+            )
+        if args.train_backend != "megatron":
+            raise ValueError(
+                f"PEFT (--peft-type {args.peft_type}) currently only supports --train-backend megatron. "
+                f"Current backend: {args.train_backend}"
+            )
+        if args.only_train_params_name_list or args.freeze_params_name_list:
+            logger.warning(
+                "PEFT is enabled with --only-train-params-name-list or --freeze-params-name-list. "
+                "PEFT automatically freezes base model parameters, so these options may be redundant."
+            )
+        logger.info(
+            f"PEFT enabled: type={args.peft_type}, rank={args.lora_rank}, alpha={args.lora_alpha}, "
+            f"target_modules={args.lora_target_modules}"
+        )
 
 
 def hf_validate_args(args, hf_config):
