@@ -1,6 +1,7 @@
 import dataclasses
 
 import torch
+import torch.distributed as dist
 
 from slime.utils import megatron_bridge_utils
 from slime.utils.misc import chunk_named_params_by_size
@@ -19,45 +20,41 @@ class HfWeightIteratorBridge(HfWeightIteratorBase):
         import slime_plugins.megatron_bridge  # noqa: F401
 
         self._bridge = AutoBridge.from_hf_pretrained(self.args.hf_checkpoint, trust_remote_code=True)
-        self._lora_module_map = None  # Lazily built map of param_name -> LoRALinear module
+        self._lora_tensor_map = None  # Lazily built map of id(tensor) -> (adapter_type, module)
 
-    def _build_lora_module_map(self):
-        """Build a map from parameter names to their LoRA adapter wrapper modules.
+    def _build_lora_tensor_map(self):
+        """Build a map from base weight tensor identity to LoRA adapter modules.
 
-        This enables on-the-fly merging of LoRA weights during export without
-        permanently modifying the model structure.
+        Uses id(tensor) for matching instead of parameter name normalization,
+        making it immune to internal naming conventions of adapter wrappers.
 
-        Two adapter types are supported:
-        1. LinearAdapter (for simple nn.Linear):
-           - adapter.weight: base weight (frozen)
-           - adapter.lora_a.weight: A matrix (trainable)
-           - adapter.lora_b.weight: B matrix (trainable)
-           - adapter.scale: alpha / rank
+        The PEFT transform wraps each target linear module with a LoRALinear that
+        has two children:
+          - "to_wrap": the original parallel linear module (holds the base weight)
+          - "adapter": the ParallelLinearAdapter (holds LoRA A/B matrices)
 
-        2. ParallelLinearAdapter (for Megatron parallel linear):
-           - Uses the base weight from the wrapped module
-           - adapter.linear_in: A matrix (RowParallelLinear, trainable)
-           - adapter.linear_out: B matrix (ColumnParallelLinear, trainable)
-           - adapter.alpha, adapter.dim for scaling
+        The bridge's conversion tasks reference the to_wrap module's weight tensor,
+        so we find LoRALinear wrappers (modules with both a ParallelLinearAdapter
+        child and a weight-bearing child) and map id(base_weight) -> adapter.
         """
-        if self._lora_module_map is not None:
+        if self._lora_tensor_map is not None:
             return
 
-        if getattr(self.args, "peft_type", "none") == "none":
-            self._lora_module_map = {}
+        peft_type = getattr(self.args, "peft_type", "none")
+        if peft_type == "none":
+            self._lora_tensor_map = {}
             return
 
         try:
             from megatron.bridge.peft.lora import LinearAdapter, ParallelLinearAdapter
         except ImportError:
             print("Warning: LinearAdapter/ParallelLinearAdapter not available, skipping LoRA merge")
-            self._lora_module_map = {}
+            self._lora_tensor_map = {}
             return
 
-        self._lora_module_map = {}
+        self._lora_tensor_map = {}
 
         # Handle model being a list (pipeline parallelism / virtual pipeline)
-        # or a single model wrapped in various ways
         models = self.model if isinstance(self.model, (list, tuple)) else [self.model]
 
         linear_adapter_count = 0
@@ -66,45 +63,50 @@ class HfWeightIteratorBridge(HfWeightIteratorBase):
         for model in models:
             for name, module in model.named_modules():
                 if isinstance(module, LinearAdapter):
-                    # Normalize the key to match task.param_name format
-                    base_param_name = self._normalize_lora_key(name)
-                    self._lora_module_map[base_param_name] = ("linear", module)
+                    # LinearAdapter.weight IS the base weight tensor
+                    self._lora_tensor_map[id(module.weight)] = ("linear", module, module.weight.shape)
                     linear_adapter_count += 1
-                elif isinstance(module, ParallelLinearAdapter):
-                    # Normalize the key to match task.param_name format
-                    base_param_name = self._normalize_lora_key(name)
-                    self._lora_module_map[base_param_name] = ("parallel", module)
+                    continue
+
+                # The PEFT transform wraps each target linear module with a LoRALinear
+                # that has two children:
+                #   - "to_wrap": the original linear module (holds the base weight)
+                #   - "adapter": the ParallelLinearAdapter (holds LoRA A/B matrices)
+                # The bridge's conversion tasks reference to_wrap.weight, so we use
+                # its tensor identity as the map key.
+                adapter_child = None
+                base_weight_child = None
+                for child_name, child in module.named_children():
+                    if isinstance(child, ParallelLinearAdapter):
+                        adapter_child = child
+                    elif hasattr(child, "weight") and child.weight is not None:
+                        base_weight_child = child
+
+                if adapter_child is not None and base_weight_child is not None:
+                    base_shape = base_weight_child.weight.shape
+                    self._lora_tensor_map[id(base_weight_child.weight)] = ("parallel", adapter_child, base_shape)
                     parallel_adapter_count += 1
 
-        if self._lora_module_map:
+        if self._lora_tensor_map:
             print(f"LoRA weight sync: Found {linear_adapter_count} LinearAdapter + {parallel_adapter_count} ParallelLinearAdapter layers")
-
-    def _normalize_lora_key(self, module_name: str) -> str:
-        """Normalize module name to match task.param_name format.
-
-        Transforms: module.module.decoder.layers.0.self_attention.linear_qkv.adapter
-        To:         decoder.layers.0.self_attention.linear_qkv.weight
-        """
-        key = module_name
-        # Strip common prefixes (module.module., module.)
-        while key.startswith("module."):
-            key = key[7:]  # len("module.") = 7
-        # Strip .adapter suffix (ParallelLinearAdapter replaces the original layer)
-        if key.endswith(".adapter"):
-            key = key[:-8]  # len(".adapter") = 8
-        # Add .weight suffix to match task.param_name format
-        return f"{key}.weight"
+        elif peft_type != "none":
+            print(f"LoRA weight sync WARNING: peft_type={peft_type} but no adapter tensor mappings found")
 
     def get_hf_weight_chunks(self, megatron_local_weights):
-        # Build LoRA module map for on-the-fly merging (lazy, only once)
-        self._build_lora_module_map()
+        # Build LoRA tensor map for on-the-fly merging (lazy, only once)
+        self._build_lora_tensor_map()
+
+        # Pre-compute LoRA deltas BEFORE entering the bridge's export flow.
+        # This is necessary because the bridge uses NCCL internally for TP gathering,
+        # and we cannot interleave our own all_gather calls inside the per-task iteration.
+        lora_delta_map = _precompute_lora_deltas(self._lora_tensor_map)
 
         # TODO support quantization (e.g. modify megatron-bridge to provide megatron param name)
         renamed_megatron_local_weights = {strip_param_name_prefix(k): v for k, v in megatron_local_weights.items()}
         with megatron_bridge_utils.patch_megatron_model(self.model):
             conversion_tasks = self._bridge.get_conversion_tasks(self.model)
             conversion_tasks = _process_conversion_tasks(
-                conversion_tasks, renamed_megatron_local_weights, self._lora_module_map
+                conversion_tasks, renamed_megatron_local_weights, lora_delta_map
             )
 
             named_weights = self._bridge.export_hf_weights(self.model, cpu=False, conversion_tasks=conversion_tasks)
@@ -125,33 +127,116 @@ class HfWeightIteratorBridge(HfWeightIteratorBase):
             yield from chunk_named_params_by_size(named_weights, chunk_size=self.args.update_weight_buffer_size)
 
 
-def _process_conversion_tasks(vanilla_conversion_tasks, new_weight_dict, lora_module_map=None):
-    """Process conversion tasks, optionally merging LoRA weights on-the-fly.
+@torch.no_grad()
+def _precompute_lora_deltas(lora_tensor_map):
+    """Pre-compute LoRA weight deltas for all adapters.
 
-    For LoRA layers, computes: merged_weight = base_weight + B @ A * (alpha / rank)
-    This enables weight sync to SGLang without permanently modifying the model.
+    For each adapter, computes: delta = B @ A * scale
+
+    For ParallelLinearAdapter with tensor parallelism, the LoRA matrices may be
+    sharded across TP ranks. We selectively gather only the dimensions needed so
+    that the resulting delta matches the per-rank base weight shape directly:
+
+      - ColumnParallel base (linear_qkv, linear_fc1): A has rank dim sharded on
+        dim 0, B has output dim sharded on dim 0. Gathering A on dim 0 fixes the
+        matmul inner dims, producing delta (out/TP, in) matching the base.
+      - RowParallel base (linear_proj, linear_fc2): inner dims already match.
+        Gathering B on dim 0 produces delta (out, in/TP) matching the base.
+
+    The base weight shape (stored in the tensor map) determines which gathers are
+    needed. This must happen BEFORE the bridge's export_hf_weights flow to avoid
+    NCCL collective conflicts with the bridge's internal TP communication.
+
+    Note: The model may be offloaded to CPU via torch_memory_saver at this point,
+    so we must use _get_safe_tensor() to access weights from CPU backups.
+
+    Returns:
+        dict mapping id(base_weight_tensor) -> pre-computed delta tensor
+    """
+    if not lora_tensor_map:
+        return {}
+
+    delta_map = {}
+
+    for tensor_id, (adapter_type, lora_module, base_shape) in lora_tensor_map.items():
+        if adapter_type == "linear":
+            lora_a = _get_safe_tensor(lora_module.lora_a.weight).cuda()
+            lora_b = _get_safe_tensor(lora_module.lora_b.weight).cuda()
+            scale = lora_module.scale
+        elif adapter_type == "parallel":
+            lora_a = _get_safe_tensor(lora_module.linear_in.weight).cuda()
+            lora_b = _get_safe_tensor(lora_module.linear_out.weight).cuda()
+            scale = lora_module.alpha / lora_module.dim
+
+            # Selectively gather LoRA matrices so that B @ A produces a delta
+            # matching the per-rank base weight shape.
+            # Fix inner dims first: if B.shape[1] != A.shape[0], A's rank dim
+            # is sharded (ColumnParallel base) → gather A on dim 0.
+            if lora_b.shape[1] != lora_a.shape[0]:
+                lora_a = _all_gather_tp(lora_a, dim=0)
+            # Fix outer dims: if B.shape[0] != base_shape[0], B's output dim
+            # is sharded (RowParallel base) → gather B on dim 0.
+            if lora_b.shape[0] != base_shape[0]:
+                lora_b = _all_gather_tp(lora_b, dim=0)
+            # If A's input dim doesn't match base → gather A on dim 1.
+            if lora_a.shape[1] != base_shape[1]:
+                lora_a = _all_gather_tp(lora_a, dim=1)
+        else:
+            continue
+
+        delta_map[tensor_id] = (lora_b @ lora_a) * scale
+
+    print(f"LoRA weight sync: Pre-computed {len(delta_map)} merge deltas")
+    return delta_map
+
+
+def _get_safe_tensor(tensor):
+    """Get a valid tensor, handling the case where GPU storage has been freed by torch_memory_saver.
+
+    When the model is offloaded during colocate mode, torch_memory_saver frees
+    the GPU storage but keeps a CPU backup. The tensor object still reports as
+    CUDA but accessing its data causes an illegal memory error. This function
+    retrieves the CPU backup when available.
+    """
+    try:
+        from torch_memory_saver import torch_memory_saver
+        cpu_backup = torch_memory_saver.get_cpu_backup(tensor)
+        if cpu_backup is not None:
+            return cpu_backup
+    except ImportError:
+        pass
+    return tensor
+
+
+def _all_gather_tp(tensor, dim=0):
+    """All-gather a tensor across the tensor-model-parallel group along the given dimension."""
+    from megatron.core import mpu
+
+    tp_size = mpu.get_tensor_model_parallel_world_size()
+    if tp_size <= 1:
+        return tensor
+
+    tensor = tensor.contiguous()
+    partitions = [torch.empty_like(tensor) for _ in range(tp_size)]
+    dist.all_gather(partitions, tensor, group=mpu.get_tensor_model_parallel_group())
+    return torch.cat(partitions, dim=dim)
+
+
+def _process_conversion_tasks(vanilla_conversion_tasks, new_weight_dict, lora_delta_map=None):
+    """Process conversion tasks, optionally adding pre-computed LoRA deltas.
+
+    Uses tensor identity (id(task.param_weight)) to match conversion tasks with
+    pre-computed LoRA deltas, avoiding fragile parameter name normalization.
 
     Args:
         vanilla_conversion_tasks: Original conversion tasks from bridge
         new_weight_dict: Dictionary of new weight tensors
-        lora_module_map: Map of param_name -> (adapter_type, module) tuples
-            adapter_type is "linear" for LinearAdapter or "parallel" for ParallelLinearAdapter
+        lora_delta_map: Map of id(param_tensor) -> pre-computed delta tensors
     """
-    if lora_module_map is None:
-        lora_module_map = {}
+    if lora_delta_map is None:
+        lora_delta_map = {}
 
-    # Build alternate lookup keys for LoRA modules
-    # For adapters, the base weight path is "{module_name}.weight"
-    # task.param_name should match this format
-    lora_lookup = {}
-    for key, (adapter_type, module) in lora_module_map.items():
-        lora_lookup[key] = (adapter_type, module)
-        # Also add without ".weight" suffix for flexibility
-        if key.endswith(".weight"):
-            lora_lookup[key[:-7]] = (adapter_type, module)
-
-    _merge_count = [0]  # Track number of LoRA merges per sync
-    _logged_first = [False]  # Use list to allow mutation in closure
+    _merge_count = [0]
 
     def _handle_one(task):
         if task.param_weight is None:
@@ -163,23 +248,13 @@ def _process_conversion_tasks(vanilla_conversion_tasks, new_weight_dict, lora_mo
         new_param_weight = new_weight_dict[weight_dict_key]
         new_param_weight = new_param_weight.cuda()
 
-        # Debug: log first param name to help debug key matching
-        if lora_module_map and not _logged_first[0]:
-            sample_lora_keys = list(lora_module_map.keys())[:3]
-            sample_lookup_keys = list(lora_lookup.keys())[:6]
-            print(f"LoRA merge debug: task.param_name={task.param_name}")
-            print(f"  sample lora_module_map keys: {sample_lora_keys}")
-            print(f"  sample lora_lookup keys: {sample_lookup_keys}")
-            _logged_first[0] = True
-
-        # Check if this is a LoRA layer that needs on-the-fly merging
-        if task.param_name in lora_lookup:
-            adapter_type, lora_module = lora_lookup[task.param_name]
-            new_param_weight = _merge_lora_weight(new_param_weight, lora_module, adapter_type)
+        # Add pre-computed LoRA delta if this is an adapted layer
+        if id(task.param_weight) in lora_delta_map:
+            delta = lora_delta_map[id(task.param_weight)]
+            new_param_weight = new_param_weight + delta.to(new_param_weight.device, dtype=new_param_weight.dtype)
             _merge_count[0] += 1
-            # Log first merge to confirm key matching works
             if _merge_count[0] == 1:
-                print(f"LoRA merge: First merge for {task.param_name} ({adapter_type})")
+                print(f"LoRA merge: First merge for {task.param_name}")
 
         return dataclasses.replace(task, param_weight=new_param_weight)
 
@@ -189,56 +264,10 @@ def _process_conversion_tasks(vanilla_conversion_tasks, new_weight_dict, lora_mo
             _merge_count[0] = 0
             for x in self.xs:
                 yield self.fn(x)
-            if lora_module_map:
-                print(f"LoRA weight sync: Merged {_merge_count[0]} layers on-the-fly (expected ~{len(lora_module_map)})")
+            if lora_delta_map:
+                print(f"LoRA weight sync: Merged {_merge_count[0]} layers on-the-fly")
 
     return _MapWithLenAndLogging(_handle_one, vanilla_conversion_tasks)
-
-
-@torch.no_grad()
-def _merge_lora_weight(base_weight, lora_module, adapter_type):
-    """Compute merged weight for a LoRA adapter without modifying the module.
-
-    Supports two adapter types:
-
-    1. LinearAdapter (adapter_type="linear"):
-       - lora_module.lora_a.weight: A matrix (rank x in_features)
-       - lora_module.lora_b.weight: B matrix (out_features x rank)
-       - lora_module.scale: alpha / rank
-
-    2. ParallelLinearAdapter (adapter_type="parallel"):
-       - lora_module.linear_in.weight: A matrix (RowParallelLinear)
-       - lora_module.linear_out.weight: B matrix (ColumnParallelLinear)
-       - lora_module.alpha / lora_module.dim for scaling
-
-    Args:
-        base_weight: The base model weight tensor (from megatron_local_weights)
-        lora_module: The adapter module containing LoRA weights
-        adapter_type: "linear" for LinearAdapter, "parallel" for ParallelLinearAdapter
-
-    Returns:
-        Merged weight: base + B @ A * scale
-    """
-    base_device = base_weight.device
-    base_dtype = base_weight.dtype
-
-    if adapter_type == "linear":
-        # LinearAdapter: uses lora_a and lora_b sub-modules
-        lora_a = lora_module.lora_a.weight.to(base_device, dtype=base_dtype)  # (rank, in_features)
-        lora_b = lora_module.lora_b.weight.to(base_device, dtype=base_dtype)  # (out_features, rank)
-        scale = lora_module.scale  # alpha / rank
-    elif adapter_type == "parallel":
-        # ParallelLinearAdapter: uses linear_in and linear_out sub-modules
-        lora_a = lora_module.linear_in.weight.to(base_device, dtype=base_dtype)  # (rank, in_features)
-        lora_b = lora_module.linear_out.weight.to(base_device, dtype=base_dtype)  # (out_features, rank)
-        scale = lora_module.alpha / lora_module.dim
-    else:
-        raise ValueError(f"Unknown adapter type: {adapter_type}")
-
-    # LoRA merge: W_merged = W_base + B @ A * scale
-    merged_weight = base_weight + (lora_b @ lora_a) * scale
-
-    return merged_weight
 
 
 class _MapWithLen:
