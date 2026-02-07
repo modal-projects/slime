@@ -445,6 +445,12 @@ def train_one_step(
 
         check_mtp_only_grad(model, step_id)
 
+    # CI check: verify PEFT gradient flow (adapters get grads, frozen params don't)
+    if args.ci_test and getattr(args, "peft_type", "none") != "none":
+        from slime.backends.megatron_utils.ci_utils import check_peft_grad_flow
+
+        check_peft_grad_flow(model, step_id)
+
     if valid_step:
         # Update parameters.
         update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
@@ -836,6 +842,11 @@ def initialize_model_and_optimizer(
         # corrected weight_magnitude, so it still has the default init values.
         # Re-sync so optimizer.step() won't overwrite the corrected magnitudes.
         optimizer.reload_model_params()
+
+    if args.ci_test and getattr(args, "peft_type", "none") != "none":
+        from slime.backends.megatron_utils.ci_utils import check_peft_model_setup
+
+        check_peft_model_setup(model, args.peft_type)
 
     opt_param_scheduler.step(increment=iteration * args.global_batch_size)
 

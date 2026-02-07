@@ -68,6 +68,91 @@ def check_mtp_only_grad(model: Sequence[DDP], step_id: int) -> None:
     )
 
 
+def check_peft_model_setup(model, peft_type: str) -> None:
+    """Verify PEFT model has correct adapter structure and freeze pattern.
+
+    Called once after model initialization when ``args.ci_test`` is True and a
+    PEFT method is active. Checks that:
+      - At least 100 adapter modules were injected.
+      - Trainable parameter ratio is below 2%.
+
+    Args:
+        model: Model or list of DDP-wrapped model chunks.
+        peft_type: The PEFT type string (e.g., "lora", "dora").
+
+    Raises:
+        AssertionError: If adapter count or trainable ratio is out of bounds.
+    """
+    from megatron.bridge.peft.lora import LinearAdapter, ParallelLinearAdapter
+
+    models = model if isinstance(model, (list, tuple)) else [model]
+    adapter_count = sum(
+        1 for m in models for _, mod in m.named_modules()
+        if isinstance(mod, (LinearAdapter, ParallelLinearAdapter))
+    )
+    assert adapter_count >= 100, f"Expected >= 100 adapters, got {adapter_count}"
+
+    total = sum(p.numel() for m in models for p in m.parameters())
+    trainable = sum(p.numel() for m in models for p in m.parameters() if p.requires_grad)
+    ratio = trainable / total
+    assert ratio < 0.02, f"Expected trainable ratio < 2%, got {ratio:.4f} ({ratio*100:.2f}%)"
+
+    logger.info(f"[CI PEFT Setup] {adapter_count} adapters, {ratio*100:.2f}% trainable")
+
+
+def check_peft_grad_flow(model, step_id: int) -> None:
+    """Verify gradients flow correctly through PEFT adapters.
+
+    Called after the backward pass (same location as ``check_mtp_only_grad``)
+    when ``args.ci_test`` is True and a PEFT method is active. Checks that:
+      - At least one adapter (trainable) parameter received a non-zero gradient.
+      - No frozen parameter has a non-zero gradient.
+
+    Args:
+        model: Model or list of DDP-wrapped model chunks.
+        step_id: Current step index for logging.
+
+    Raises:
+        AssertionError: If gradient flow is incorrect.
+    """
+    models = model if isinstance(model, (list, tuple)) else [model]
+    adapter_with_grad = 0
+    frozen_with_grad = 0
+    for m in models:
+        for name, param in m.named_parameters():
+            grad = getattr(param, "main_grad", param.grad)
+            if grad is None:
+                continue
+            grad_max = grad.abs().max().item()
+            if param.requires_grad:
+                if grad_max > 0:
+                    adapter_with_grad += 1
+            else:
+                if grad_max > 0:
+                    frozen_with_grad += 1
+
+    assert adapter_with_grad > 0, f"Step {step_id}: No adapter params received gradients"
+    assert frozen_with_grad == 0, f"Step {step_id}: {frozen_with_grad} frozen params have non-zero grad"
+    logger.info(f"[CI PEFT Grad] Step {step_id}: {adapter_with_grad} adapter params with grad")
+
+
+def check_peft_weight_merge(merge_count: int, total_tasks: int) -> None:
+    """Verify LoRA/DoRA deltas were merged during weight sync.
+
+    Called from ``_MapWithLenAndMergeCount.__iter__`` after iteration completes
+    when ``ci_test`` is enabled. Checks that at least one layer was merged.
+
+    Args:
+        merge_count: Number of layers that had LoRA deltas merged.
+        total_tasks: Total number of conversion tasks iterated.
+
+    Raises:
+        AssertionError: If no layers were merged.
+    """
+    assert merge_count > 0, f"Expected merged layers > 0, got {merge_count}"
+    logger.info(f"[CI PEFT Merge] Merged {merge_count}/{total_tasks} tasks")
+
+
 def check_mtp_loss(mtp_loss: float, max_mtp_loss: float = 1.0) -> None:
     """Check that MTP loss is within expected bounds.
 

@@ -123,7 +123,8 @@ class HfWeightIteratorBridge(HfWeightIteratorBase):
         with megatron_bridge_utils.patch_megatron_model(self.model):
             conversion_tasks = self._bridge.get_conversion_tasks(self.model)
             conversion_tasks = _process_conversion_tasks(
-                conversion_tasks, renamed_megatron_local_weights, lora_delta_map
+                conversion_tasks, renamed_megatron_local_weights, lora_delta_map,
+                ci_test=getattr(self.args, "ci_test", False),
             )
 
             named_weights = self._bridge.export_hf_weights(self.model, cpu=False, conversion_tasks=conversion_tasks)
@@ -304,7 +305,7 @@ def _all_gather_tp(tensor, dim=0):
     return torch.cat(partitions, dim=dim)
 
 
-def _process_conversion_tasks(vanilla_conversion_tasks, new_weight_dict, lora_delta_map=None):
+def _process_conversion_tasks(vanilla_conversion_tasks, new_weight_dict, lora_delta_map=None, ci_test=False):
     """Process conversion tasks, optionally adding pre-computed LoRA deltas.
 
     Uses tensor identity (id(task.param_weight)) to match conversion tasks with
@@ -314,6 +315,7 @@ def _process_conversion_tasks(vanilla_conversion_tasks, new_weight_dict, lora_de
         vanilla_conversion_tasks: Original conversion tasks from bridge
         new_weight_dict: Dictionary of new weight tensors
         lora_delta_map: Map of id(param_tensor) -> pre-computed delta tensors
+        ci_test: Whether CI assertions are enabled
     """
     if lora_delta_map is None:
         lora_delta_map = {}
@@ -348,16 +350,18 @@ def _process_conversion_tasks(vanilla_conversion_tasks, new_weight_dict, lora_de
         return dataclasses.replace(task, param_weight=new_param_weight)
 
     return _MapWithLenAndMergeCount(
-        _handle_one, vanilla_conversion_tasks, merge_count, log=bool(lora_delta_map)
+        _handle_one, vanilla_conversion_tasks, merge_count, log=bool(lora_delta_map),
+        ci_test=ci_test,
     )
 
 
 class _MapWithLenAndMergeCount:
-    def __init__(self, fn, xs, merge_count, log=False):
+    def __init__(self, fn, xs, merge_count, log=False, ci_test=False):
         self.fn = fn
         self.xs = xs
         self.merge_count = merge_count
         self.log = log
+        self.ci_test = ci_test
 
     def __len__(self):
         return len(self.xs)
@@ -368,3 +372,7 @@ class _MapWithLenAndMergeCount:
             yield self.fn(x)
         if self.log:
             print(f"LoRA weight sync: Merged {self.merge_count[0]} layers on-the-fly")
+        if self.ci_test and self.log:
+            from slime.backends.megatron_utils.ci_utils import check_peft_weight_merge
+
+            check_peft_weight_merge(self.merge_count[0], len(self.xs))
