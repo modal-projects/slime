@@ -254,12 +254,13 @@ def _freeze_non_lora_params(model, peft_type):
 
     We freeze everything except parameters whose names contain these LoRA-specific substrings.
     """
-    # LoRA adapter parameter name patterns
+    # LoRA/DoRA adapter parameter name patterns
     lora_param_patterns = [
         ".linear_in.",  # ParallelLinearAdapter A matrix
         ".linear_out.",  # ParallelLinearAdapter B matrix
         ".lora_a.",  # LinearAdapter A matrix
         ".lora_b.",  # LinearAdapter B matrix
+        ".weight_magnitude",  # DoRA per-row magnitude vector
     ]
 
     frozen_count = 0

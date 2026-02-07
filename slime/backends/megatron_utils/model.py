@@ -750,6 +750,54 @@ def save_hf_model(args, rollout_id: int, model: Sequence[DDP]) -> None:
             logger.error(f"Failed to save HuggingFace format: {e}")
 
 
+@torch.no_grad()
+def _reinit_dora_magnitudes(model):
+    """Reinitialize DoRA weight_magnitude after checkpoint loading if needed.
+
+    The PEFT transform runs before checkpoint loading, so weight_magnitude is
+    initialized from random weights. For fresh training runs (starting from a
+    base model checkpoint without DoRA state), we must recompute it from the
+    loaded pretrained base weights to match DoRALinear._get_weight_norm().
+
+    For resumed DoRA training, the checkpoint already contains correct
+    weight_magnitude values, so no reinitialization is needed. We detect fresh
+    starts by checking if LoRA B (linear_out) is all zeros, which is the
+    standard zero-initialization for LoRA output matrices.
+
+    Returns:
+        True if any magnitudes were reinitialized, False otherwise.
+    """
+    try:
+        from megatron.bridge.peft.dora_layers import ParallelLinearDoRAAdapter
+    except ImportError:
+        return False
+
+    count = 0
+    models = model if isinstance(model, (list, tuple)) else [model]
+    for m in models:
+        for _name, module in m.named_modules():
+            adapter_child = None
+            base_weight_child = None
+            for _child_name, child in module.named_children():
+                if isinstance(child, ParallelLinearDoRAAdapter):
+                    adapter_child = child
+                elif hasattr(child, "weight") and child.weight is not None:
+                    base_weight_child = child
+
+            if adapter_child is not None and base_weight_child is not None:
+                # Only reinitialize for fresh adapters (B is zero-initialized)
+                if adapter_child.linear_out.weight.data.abs().max().item() == 0:
+                    row_norms = torch.linalg.norm(
+                        base_weight_child.weight.data.float(), dim=1
+                    ).to(adapter_child.weight_magnitude.dtype)
+                    adapter_child.weight_magnitude.data.copy_(row_norms)
+                    count += 1
+
+    if count > 0:
+        print(f"DoRA: Reinitialized weight_magnitude for {count} layers from loaded checkpoint weights")
+    return count > 0
+
+
 def initialize_model_and_optimizer(
     args: Namespace, role: str = "actor"
 ) -> tuple[list[DDP], MegatronOptimizer, OptimizerParamScheduler, int]:
@@ -782,6 +830,12 @@ def initialize_model_and_optimizer(
         skip_load_to_model_and_opt=False,
     )
     clear_memory()
+
+    if _reinit_dora_magnitudes(model):
+        # The optimizer's FP32 master copy was created before _reinit_dora_magnitudes
+        # corrected weight_magnitude, so it still has the default init values.
+        # Re-sync so optimizer.step() won't overwrite the corrected magnitudes.
+        optimizer.reload_model_params()
 
     opt_param_scheduler.step(increment=iteration * args.global_batch_size)
 

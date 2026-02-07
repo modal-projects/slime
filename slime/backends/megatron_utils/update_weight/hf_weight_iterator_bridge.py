@@ -52,6 +52,11 @@ class HfWeightIteratorBridge(HfWeightIteratorBase):
             self._lora_tensor_map = {}
             return
 
+        try:
+            from megatron.bridge.peft.dora_layers import ParallelLinearDoRAAdapter
+        except ImportError:
+            ParallelLinearDoRAAdapter = None
+
         self._lora_tensor_map = {}
 
         # Handle model being a list (pipeline parallelism / virtual pipeline)
@@ -59,6 +64,7 @@ class HfWeightIteratorBridge(HfWeightIteratorBase):
 
         linear_adapter_count = 0
         parallel_adapter_count = 0
+        dora_adapter_count = 0
 
         for model in models:
             for name, module in model.named_modules():
@@ -69,26 +75,37 @@ class HfWeightIteratorBridge(HfWeightIteratorBase):
                     continue
 
                 # The PEFT transform wraps each target linear module with a LoRALinear
-                # that has two children:
+                # (or DoRALinear) that has two children:
                 #   - "to_wrap": the original linear module (holds the base weight)
-                #   - "adapter": the ParallelLinearAdapter (holds LoRA A/B matrices)
+                #   - "adapter": the ParallelLinearAdapter/DoRA adapter (holds LoRA A/B matrices)
                 # The bridge's conversion tasks reference to_wrap.weight, so we use
                 # its tensor identity as the map key.
                 adapter_child = None
                 base_weight_child = None
                 for child_name, child in module.named_children():
-                    if isinstance(child, ParallelLinearAdapter):
+                    # Check DoRA before LoRA since ParallelLinearDoRAAdapter
+                    # is a subclass of ParallelLinearAdapter
+                    if ParallelLinearDoRAAdapter is not None and isinstance(child, ParallelLinearDoRAAdapter):
+                        adapter_child = child
+                    elif isinstance(child, ParallelLinearAdapter):
                         adapter_child = child
                     elif hasattr(child, "weight") and child.weight is not None:
                         base_weight_child = child
 
                 if adapter_child is not None and base_weight_child is not None:
                     base_shape = base_weight_child.weight.shape
-                    self._lora_tensor_map[id(base_weight_child.weight)] = ("parallel", adapter_child, base_shape)
-                    parallel_adapter_count += 1
+                    if ParallelLinearDoRAAdapter is not None and isinstance(adapter_child, ParallelLinearDoRAAdapter):
+                        self._lora_tensor_map[id(base_weight_child.weight)] = (
+                            "dora", adapter_child, base_shape, base_weight_child.weight
+                        )
+                        dora_adapter_count += 1
+                    else:
+                        self._lora_tensor_map[id(base_weight_child.weight)] = ("parallel", adapter_child, base_shape)
+                        parallel_adapter_count += 1
 
         if self._lora_tensor_map:
-            print(f"LoRA weight sync: Found {linear_adapter_count} LinearAdapter + {parallel_adapter_count} ParallelLinearAdapter layers")
+            counts = f"{linear_adapter_count} LinearAdapter + {parallel_adapter_count} ParallelLinearAdapter + {dora_adapter_count} DoRA"
+            print(f"LoRA weight sync: Found {counts} layers")
         elif peft_type != "none":
             print(f"LoRA weight sync WARNING: peft_type={peft_type} but no adapter tensor mappings found")
 
@@ -129,7 +146,7 @@ class HfWeightIteratorBridge(HfWeightIteratorBase):
 
 @torch.no_grad()
 def _precompute_lora_deltas(lora_tensor_map):
-    """Pre-compute LoRA weight deltas for all adapters.
+    """Pre-compute LoRA/DoRA weight deltas for all adapters.
 
     For each adapter, computes: delta = B @ A * scale
 
@@ -143,6 +160,10 @@ def _precompute_lora_deltas(lora_tensor_map):
       - RowParallel base (linear_proj, linear_fc2): inner dims already match.
         Gathering B on dim 0 produces delta (out, in/TP) matching the base.
 
+    For DoRA adapters, additionally computes a per-row magnitude scale:
+      dora_scale = weight_magnitude / ||base_weight + delta||_rows
+    The merged weight is then: dora_scale * (base_weight + delta).
+
     The base weight shape (stored in the tensor map) determines which gathers are
     needed. This must happen BEFORE the bridge's export_hf_weights flow to avoid
     NCCL collective conflicts with the bridge's internal TP communication.
@@ -151,43 +172,104 @@ def _precompute_lora_deltas(lora_tensor_map):
     so we must use _get_safe_tensor() to access weights from CPU backups.
 
     Returns:
-        dict mapping id(base_weight_tensor) -> pre-computed delta tensor
+        dict mapping id(base_weight_tensor) -> pre-computed delta tensor (LoRA)
+              or (delta, dora_column_scale) tuple (DoRA)
     """
     if not lora_tensor_map:
         return {}
 
     delta_map = {}
 
-    for tensor_id, (adapter_type, lora_module, base_shape) in lora_tensor_map.items():
+    for tensor_id, entry in lora_tensor_map.items():
+        adapter_type = entry[0]
         if adapter_type == "linear":
-            lora_a = _get_safe_tensor(lora_module.lora_a.weight).cuda()
-            lora_b = _get_safe_tensor(lora_module.lora_b.weight).cuda()
+            _, lora_module, base_shape = entry
+            lora_a = _get_safe_tensor(lora_module.lora_a.weight)
+            lora_b = _get_safe_tensor(lora_module.lora_b.weight)
             scale = lora_module.scale
+            delta_map[tensor_id] = _compute_lora_delta(lora_b, lora_a, scale)
         elif adapter_type == "parallel":
-            lora_a = _get_safe_tensor(lora_module.linear_in.weight).cuda()
-            lora_b = _get_safe_tensor(lora_module.linear_out.weight).cuda()
+            _, lora_module, base_shape = entry
+            lora_a, lora_b = _get_parallel_lora_ab(lora_module, base_shape)
+            scale = lora_module.alpha / lora_module.dim
+            delta_map[tensor_id] = _compute_lora_delta(lora_b, lora_a, scale)
+        elif adapter_type == "dora":
+            _, lora_module, base_shape, base_weight_ref = entry
+            lora_a, lora_b = _get_parallel_lora_ab(lora_module, base_shape)
             scale = lora_module.alpha / lora_module.dim
 
-            # Selectively gather LoRA matrices so that B @ A produces a delta
-            # matching the per-rank base weight shape.
-            # Fix inner dims first: if B.shape[1] != A.shape[0], A's rank dim
-            # is sharded (ColumnParallel base) → gather A on dim 0.
-            if lora_b.shape[1] != lora_a.shape[0]:
-                lora_a = _all_gather_tp(lora_a, dim=0)
-            # Fix outer dims: if B.shape[0] != base_shape[0], B's output dim
-            # is sharded (RowParallel base) → gather B on dim 0.
-            if lora_b.shape[0] != base_shape[0]:
-                lora_b = _all_gather_tp(lora_b, dim=0)
-            # If A's input dim doesn't match base → gather A on dim 1.
-            if lora_a.shape[1] != base_shape[1]:
-                lora_a = _all_gather_tp(lora_a, dim=1)
+            delta = _compute_lora_delta(lora_b, lora_a, scale)
+
+            # Compute DoRA magnitude scaling: m / ||W_0 + delta||_rows
+            #
+            # The DoRA forward pass computes per-rank partial norms
+            # (using local weight shard) and applies the scale before
+            # all_reduce. Our merge must match this: each rank applies
+            # its own dora_scale to its weight shard, and the bridge
+            # then TP-gathers the scaled shards into the full HF weight.
+            # Using per-rank partial norms for both magnitude and weight_norm
+            # ensures the scale is consistent with the forward pass.
+            base_weight = _get_safe_tensor(base_weight_ref).cuda()
+            combined = base_weight + delta.to(base_weight.dtype)
+            row_norms = torch.linalg.norm(combined.float(), dim=1)
+
+            magnitude = _get_safe_tensor(lora_module.weight_magnitude).cuda()
+            dora_scale = (magnitude / row_norms).to(delta.dtype)
+
+            delta_map[tensor_id] = (delta, dora_scale)
         else:
             continue
 
-        delta_map[tensor_id] = (lora_b @ lora_a) * scale
-
     print(f"LoRA weight sync: Pre-computed {len(delta_map)} merge deltas")
     return delta_map
+
+
+def _compute_lora_delta(lora_b, lora_a, scale):
+    """Compute delta = (B @ A) * scale using rank-1 outer product accumulation.
+
+    Uses iterative outer products instead of a single matmul to avoid cuBLAS,
+    whose workspace memory may be freed after torch_memory_saver.pause().
+    Since LoRA rank is small (typically 8-64), this requires few iterations
+    of element-wise CUDA ops and avoids any CPU<->GPU data transfer.
+    """
+    dtype = lora_b.dtype
+    rank = lora_b.shape[1]
+    b_f = lora_b.float()
+    a_f = lora_a.float()
+    delta = torch.zeros(lora_b.shape[0], lora_a.shape[1],
+                        device=lora_b.device, dtype=torch.float32)
+    for r in range(rank):
+        delta += b_f[:, r:r+1] * a_f[r:r+1, :]
+    delta *= scale
+    return delta.to(dtype=dtype)
+
+
+def _get_parallel_lora_ab(lora_module, base_shape):
+    """Extract and gather LoRA A/B matrices for a ParallelLinearAdapter.
+
+    Selectively gathers LoRA matrices so that B @ A produces a delta
+    matching the per-rank base weight shape.
+    """
+    lora_a = _get_safe_tensor(lora_module.linear_in.weight).cuda()
+    lora_b = _get_safe_tensor(lora_module.linear_out.weight).cuda()
+
+    # Fix inner dims: if B.shape[1] != A.shape[0], A's rank dim
+    # is sharded (ColumnParallel base) → gather A on dim 0.
+    if lora_b.shape[1] != lora_a.shape[0]:
+        lora_a = _all_gather_tp(lora_a, dim=0)
+    # Fix outer dims: if B.shape[0] != base_shape[0], B's output dim
+    # is sharded (RowParallel base) → gather B on dim 0.
+    if lora_b.shape[0] != base_shape[0]:
+        lora_b = _all_gather_tp(lora_b, dim=0)
+    # If A's input dim doesn't match base → gather A on dim 1.
+    if lora_a.shape[1] != base_shape[1]:
+        lora_a = _all_gather_tp(lora_a, dim=1)
+
+    # Ensure tensors are valid before returning (catches freed-memory issues early)
+    lora_a = lora_a.contiguous()
+    lora_b = lora_b.contiguous()
+
+    return lora_a, lora_b
 
 
 def _get_safe_tensor(tensor):
@@ -236,7 +318,7 @@ def _process_conversion_tasks(vanilla_conversion_tasks, new_weight_dict, lora_de
     if lora_delta_map is None:
         lora_delta_map = {}
 
-    _merge_count = [0]
+    merge_count = [0]
 
     def _handle_one(task):
         if task.param_weight is None:
@@ -248,36 +330,41 @@ def _process_conversion_tasks(vanilla_conversion_tasks, new_weight_dict, lora_de
         new_param_weight = new_weight_dict[weight_dict_key]
         new_param_weight = new_param_weight.cuda()
 
-        # Add pre-computed LoRA delta if this is an adapted layer
+        # Add pre-computed LoRA/DoRA delta if this is an adapted layer
         if id(task.param_weight) in lora_delta_map:
-            delta = lora_delta_map[id(task.param_weight)]
-            new_param_weight = new_param_weight + delta.to(new_param_weight.device, dtype=new_param_weight.dtype)
-            _merge_count[0] += 1
-            if _merge_count[0] == 1:
-                print(f"LoRA merge: First merge for {task.param_name}")
+            entry = lora_delta_map[id(task.param_weight)]
+            if isinstance(entry, tuple):
+                # DoRA: entry is (delta, dora_column_scale)
+                delta, dora_scale = entry
+                new_param_weight = dora_scale.unsqueeze(-1) * (
+                    new_param_weight + delta.to(new_param_weight.device, dtype=new_param_weight.dtype)
+                )
+            else:
+                # LoRA: entry is a bare delta tensor
+                delta = entry
+                new_param_weight = new_param_weight + delta.to(new_param_weight.device, dtype=new_param_weight.dtype)
+            merge_count[0] += 1
 
         return dataclasses.replace(task, param_weight=new_param_weight)
 
-    class _MapWithLenAndLogging(_MapWithLen):
-        """MapWithLen that logs merge count after iteration completes."""
-        def __iter__(self):
-            _merge_count[0] = 0
-            for x in self.xs:
-                yield self.fn(x)
-            if lora_delta_map:
-                print(f"LoRA weight sync: Merged {_merge_count[0]} layers on-the-fly")
-
-    return _MapWithLenAndLogging(_handle_one, vanilla_conversion_tasks)
+    return _MapWithLenAndMergeCount(
+        _handle_one, vanilla_conversion_tasks, merge_count, log=bool(lora_delta_map)
+    )
 
 
-class _MapWithLen:
-    def __init__(self, fn, xs):
+class _MapWithLenAndMergeCount:
+    def __init__(self, fn, xs, merge_count, log=False):
         self.fn = fn
         self.xs = xs
+        self.merge_count = merge_count
+        self.log = log
 
     def __len__(self):
         return len(self.xs)
 
     def __iter__(self):
+        self.merge_count[0] = 0
         for x in self.xs:
             yield self.fn(x)
+        if self.log:
+            print(f"LoRA weight sync: Merged {self.merge_count[0]} layers on-the-fly")
