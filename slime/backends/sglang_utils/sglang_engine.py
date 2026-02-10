@@ -1,4 +1,5 @@
 import dataclasses
+import hashlib
 import ipaddress
 import logging
 import multiprocessing
@@ -17,6 +18,11 @@ from slime.ray.ray_actor import RayActor
 from slime.utils.http_utils import get_host_info
 
 logger = logging.getLogger(__name__)
+
+
+def _hash_serialized_tensor_payload(payload: str) -> str:
+    """Deterministic hash for serialized tensor payload integrity checks."""
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def get_base_gpu_id(args, rank):
@@ -253,6 +259,7 @@ class SGLangEngine(RayActor):
         load_format: str | None = None,
         flush_cache: bool = False,
         weight_version: str | None = None,
+        expected_payload_hashes: list[str] | None = None,
     ):
         """
         Update model weights from tensor data. The HTTP server will only post meta data, and the real weights will be copied directly from GPUs.
@@ -260,6 +267,20 @@ class SGLangEngine(RayActor):
         Note: The model should be on GPUs rather than CPU for this functionality to work properly.
         If you encounter issues, ensure your model is loaded on GPU devices rather than CPU.
         """
+        if expected_payload_hashes is not None:
+            actual_hashes = [_hash_serialized_tensor_payload(x) for x in serialized_named_tensors]
+            if actual_hashes != expected_payload_hashes:
+                mismatches = [
+                    (idx, actual_hashes[idx], expected_payload_hashes[idx])
+                    for idx in range(min(len(actual_hashes), len(expected_payload_hashes)))
+                    if actual_hashes[idx] != expected_payload_hashes[idx]
+                ]
+                raise RuntimeError(
+                    "[CI PEFT Hash] Serialized payload hash mismatch before weight update. "
+                    f"count(actual)={len(actual_hashes)} count(expected)={len(expected_payload_hashes)} "
+                    f"examples={mismatches[:4]}"
+                )
+
         payload = {
             "serialized_named_tensors": serialized_named_tensors,
             "load_format": load_format,

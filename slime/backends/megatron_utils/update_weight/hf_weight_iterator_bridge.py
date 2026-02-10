@@ -21,6 +21,8 @@ class HfWeightIteratorBridge(HfWeightIteratorBase):
 
         self._bridge = AutoBridge.from_hf_pretrained(self.args.hf_checkpoint, trust_remote_code=True)
         self._lora_tensor_map = None  # Lazily built map of id(tensor) -> (adapter_type, module)
+        self._ci_prev_merged_by_task = None
+        self._ci_sync_round = 0
 
     def _build_lora_tensor_map(self):
         """Build a map from base weight tensor identity to LoRA adapter modules.
@@ -117,14 +119,20 @@ class HfWeightIteratorBridge(HfWeightIteratorBase):
         # This is necessary because the bridge uses NCCL internally for TP gathering,
         # and we cannot interleave our own all_gather calls inside the per-task iteration.
         lora_delta_map = _precompute_lora_deltas(self._lora_tensor_map)
+        ci_peft_exact = getattr(self.args, "ci_peft_exact", False)
 
         # TODO support quantization (e.g. modify megatron-bridge to provide megatron param name)
         renamed_megatron_local_weights = {strip_param_name_prefix(k): v for k, v in megatron_local_weights.items()}
+        exact_state = {}
         with megatron_bridge_utils.patch_megatron_model(self.model):
             conversion_tasks = self._bridge.get_conversion_tasks(self.model)
             conversion_tasks = _process_conversion_tasks(
                 conversion_tasks, renamed_megatron_local_weights, lora_delta_map,
                 ci_test=getattr(self.args, "ci_test", False),
+                ci_peft_exact=ci_peft_exact,
+                prev_merged_by_task=self._ci_prev_merged_by_task,
+                sync_round=self._ci_sync_round,
+                exact_state=exact_state,
             )
 
             named_weights = self._bridge.export_hf_weights(self.model, cpu=False, conversion_tasks=conversion_tasks)
@@ -143,6 +151,10 @@ class HfWeightIteratorBridge(HfWeightIteratorBase):
             )
 
             yield from chunk_named_params_by_size(named_weights, chunk_size=self.args.update_weight_buffer_size)
+
+        if ci_peft_exact:
+            self._ci_prev_merged_by_task = exact_state.get("current_merged_by_task")
+            self._ci_sync_round += 1
 
 
 @torch.no_grad()
@@ -253,18 +265,19 @@ def _get_parallel_lora_ab(lora_module, base_shape):
     """
     lora_a = _get_safe_tensor(lora_module.linear_in.weight).cuda()
     lora_b = _get_safe_tensor(lora_module.linear_out.weight).cuda()
+    is_expert = bool(getattr(lora_module, "is_expert", False))
 
     # Fix inner dims: if B.shape[1] != A.shape[0], A's rank dim
     # is sharded (ColumnParallel base) → gather A on dim 0.
     if lora_b.shape[1] != lora_a.shape[0]:
-        lora_a = _all_gather_tp(lora_a, dim=0)
+        lora_a = _all_gather_tp(lora_a, dim=0, is_expert=is_expert)
     # Fix outer dims: if B.shape[0] != base_shape[0], B's output dim
     # is sharded (RowParallel base) → gather B on dim 0.
     if lora_b.shape[0] != base_shape[0]:
-        lora_b = _all_gather_tp(lora_b, dim=0)
+        lora_b = _all_gather_tp(lora_b, dim=0, is_expert=is_expert)
     # If A's input dim doesn't match base → gather A on dim 1.
     if lora_a.shape[1] != base_shape[1]:
-        lora_a = _all_gather_tp(lora_a, dim=1)
+        lora_a = _all_gather_tp(lora_a, dim=1, is_expert=is_expert)
 
     # Ensure tensors are valid before returning (catches freed-memory issues early)
     lora_a = lora_a.contiguous()
@@ -291,21 +304,52 @@ def _get_safe_tensor(tensor):
     return tensor
 
 
-def _all_gather_tp(tensor, dim=0):
-    """All-gather a tensor across the tensor-model-parallel group along the given dimension."""
+def _all_gather_tp(tensor, dim=0, is_expert=False):
+    """All-gather a tensor on the adapter's TP group along the given dimension."""
     from megatron.core import mpu
 
-    tp_size = mpu.get_tensor_model_parallel_world_size()
+    if is_expert and hasattr(mpu, "get_expert_tensor_parallel_world_size"):
+        tp_size = mpu.get_expert_tensor_parallel_world_size()
+        tp_group = mpu.get_expert_tensor_parallel_group()
+    else:
+        tp_size = mpu.get_tensor_model_parallel_world_size()
+        tp_group = mpu.get_tensor_model_parallel_group()
+
     if tp_size <= 1:
         return tensor
 
     tensor = tensor.contiguous()
     partitions = [torch.empty_like(tensor) for _ in range(tp_size)]
-    dist.all_gather(partitions, tensor, group=mpu.get_tensor_model_parallel_group())
+    dist.all_gather(partitions, tensor, group=tp_group)
     return torch.cat(partitions, dim=dim)
 
 
-def _process_conversion_tasks(vanilla_conversion_tasks, new_weight_dict, lora_delta_map=None, ci_test=False):
+def _merge_base_weight_with_peft_entry(base_weight: torch.Tensor, entry):
+    """Apply LoRA/DoRA merge entry to a base Megatron weight tensor."""
+    merged = base_weight
+    if isinstance(entry, tuple):
+        # DoRA: entry is (delta, dora_column_scale)
+        delta, dora_scale = entry
+        merged = dora_scale.unsqueeze(-1) * (
+            merged + delta.to(merged.device, dtype=merged.dtype)
+        )
+    else:
+        # LoRA: entry is a bare delta tensor
+        delta = entry
+        merged = merged + delta.to(merged.device, dtype=merged.dtype)
+    return merged
+
+
+def _process_conversion_tasks(
+    vanilla_conversion_tasks,
+    new_weight_dict,
+    lora_delta_map=None,
+    ci_test=False,
+    ci_peft_exact=False,
+    prev_merged_by_task=None,
+    sync_round=0,
+    exact_state=None,
+):
     """Process conversion tasks, optionally adding pre-computed LoRA deltas.
 
     Uses tensor identity (id(task.param_weight)) to match conversion tasks with
@@ -321,6 +365,14 @@ def _process_conversion_tasks(vanilla_conversion_tasks, new_weight_dict, lora_de
         lora_delta_map = {}
 
     merge_count = [0]
+    expected_merge_count = len(lora_delta_map)
+    expected_tensor_ids = set(lora_delta_map.keys())
+    matched_tensor_ids = set()
+    duplicate_tensor_id_count = [0]
+    current_merged_by_task = {} if ci_peft_exact else None
+
+    if exact_state is None:
+        exact_state = {}
 
     def _handle_one(task):
         if task.param_weight is None:
@@ -329,39 +381,70 @@ def _process_conversion_tasks(vanilla_conversion_tasks, new_weight_dict, lora_de
         weight_dict_key = f"vp_stages.{task.vp_stage}.{task.param_name}"
         assert weight_dict_key in new_weight_dict, f"{weight_dict_key=} not in new_weight_dict ({task.vp_stage=}, {task.param_name=}, {list(new_weight_dict)=})"
 
-        new_param_weight = new_weight_dict[weight_dict_key]
-        new_param_weight = new_param_weight.cuda()
+        base_weight = new_weight_dict[weight_dict_key].cuda()
+        new_param_weight = base_weight
 
         # Add pre-computed LoRA/DoRA delta if this is an adapted layer
         if id(task.param_weight) in lora_delta_map:
             entry = lora_delta_map[id(task.param_weight)]
-            if isinstance(entry, tuple):
-                # DoRA: entry is (delta, dora_column_scale)
-                delta, dora_scale = entry
-                new_param_weight = dora_scale.unsqueeze(-1) * (
-                    new_param_weight + delta.to(new_param_weight.device, dtype=new_param_weight.dtype)
-                )
-            else:
-                # LoRA: entry is a bare delta tensor
-                delta = entry
-                new_param_weight = new_param_weight + delta.to(new_param_weight.device, dtype=new_param_weight.dtype)
+            new_param_weight = _merge_base_weight_with_peft_entry(new_param_weight, entry)
             merge_count[0] += 1
+            if id(task.param_weight) in matched_tensor_ids:
+                duplicate_tensor_id_count[0] += 1
+            matched_tensor_ids.add(id(task.param_weight))
+
+            if ci_peft_exact:
+                # Snapshot merged tensors on CPU so we can validate cross-sync deltas.
+                current_merged_by_task[weight_dict_key] = new_param_weight.detach().cpu().clone()
 
         return dataclasses.replace(task, param_weight=new_param_weight)
 
     return _MapWithLenAndMergeCount(
         _handle_one, vanilla_conversion_tasks, merge_count, log=bool(lora_delta_map),
-        ci_test=ci_test,
+        ci_test=ci_test, expected_merge_count=expected_merge_count,
+        ci_peft_exact=ci_peft_exact,
+        expected_tensor_ids=expected_tensor_ids,
+        matched_tensor_ids=matched_tensor_ids,
+        duplicate_tensor_id_count=duplicate_tensor_id_count,
+        current_merged_by_task=current_merged_by_task,
+        prev_merged_by_task=prev_merged_by_task,
+        sync_round=sync_round,
+        exact_state=exact_state,
     )
 
 
 class _MapWithLenAndMergeCount:
-    def __init__(self, fn, xs, merge_count, log=False, ci_test=False):
+    def __init__(
+        self,
+        fn,
+        xs,
+        merge_count,
+        log=False,
+        ci_test=False,
+        expected_merge_count=0,
+        ci_peft_exact=False,
+        expected_tensor_ids=None,
+        matched_tensor_ids=None,
+        duplicate_tensor_id_count=None,
+        current_merged_by_task=None,
+        prev_merged_by_task=None,
+        sync_round=0,
+        exact_state=None,
+    ):
         self.fn = fn
         self.xs = xs
         self.merge_count = merge_count
         self.log = log
         self.ci_test = ci_test
+        self.expected_merge_count = expected_merge_count
+        self.ci_peft_exact = ci_peft_exact
+        self.expected_tensor_ids = expected_tensor_ids if expected_tensor_ids is not None else set()
+        self.matched_tensor_ids = matched_tensor_ids if matched_tensor_ids is not None else set()
+        self.duplicate_tensor_id_count = duplicate_tensor_id_count if duplicate_tensor_id_count is not None else [0]
+        self.current_merged_by_task = current_merged_by_task if current_merged_by_task is not None else {}
+        self.prev_merged_by_task = prev_merged_by_task
+        self.sync_round = sync_round
+        self.exact_state = exact_state if exact_state is not None else {}
 
     def __len__(self):
         return len(self.xs)
@@ -375,4 +458,18 @@ class _MapWithLenAndMergeCount:
         if self.ci_test and self.log:
             from slime.backends.megatron_utils.ci_utils import check_peft_weight_merge
 
-            check_peft_weight_merge(self.merge_count[0], len(self.xs))
+            check_peft_weight_merge(self.merge_count[0], len(self.xs), self.expected_merge_count)
+        if self.ci_test and self.ci_peft_exact:
+            from slime.backends.megatron_utils.ci_utils import check_peft_exact_weight_sync
+
+            check_peft_exact_weight_sync(
+                sync_round=self.sync_round,
+                expected_merge_count=self.expected_merge_count,
+                expected_tensor_ids=self.expected_tensor_ids,
+                matched_tensor_ids=self.matched_tensor_ids,
+                duplicate_tensor_id_count=self.duplicate_tensor_id_count[0],
+                current_merged_by_task=self.current_merged_by_task,
+                prev_merged_by_task=self.prev_merged_by_task,
+            )
+        if self.ci_peft_exact:
+            self.exact_state["current_merged_by_task"] = self.current_merged_by_task

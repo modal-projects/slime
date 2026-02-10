@@ -449,7 +449,13 @@ def train_one_step(
     if args.ci_test and getattr(args, "peft_type", "none") != "none":
         from slime.backends.megatron_utils.ci_utils import check_peft_grad_flow
 
-        check_peft_grad_flow(model, step_id)
+        check_peft_grad_flow(
+            model,
+            step_id,
+            args.peft_type,
+            exact=getattr(args, "ci_peft_exact", False),
+            rollout_id=rollout_id,
+        )
 
     if valid_step:
         # Update parameters.
@@ -846,7 +852,12 @@ def initialize_model_and_optimizer(
     if args.ci_test and getattr(args, "peft_type", "none") != "none":
         from slime.backends.megatron_utils.ci_utils import check_peft_model_setup
 
-        check_peft_model_setup(model, args.peft_type)
+        check_peft_model_setup(
+            model,
+            args.peft_type,
+            target_modules=getattr(args, "lora_target_modules", None),
+            exact=getattr(args, "ci_peft_exact", False),
+        )
 
     opt_param_scheduler.step(increment=iteration * args.global_batch_size)
 

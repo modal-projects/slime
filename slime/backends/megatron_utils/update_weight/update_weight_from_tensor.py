@@ -1,3 +1,5 @@
+import hashlib
+import logging
 from argparse import Namespace
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
@@ -19,6 +21,8 @@ from .update_weight_from_distributed import (
     post_process_weights,
     update_weights_from_distributed,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class UpdateWeightFromTensor:
@@ -110,6 +114,13 @@ class UpdateWeightFromTensor:
         """
         self.weight_version += 1
 
+        if getattr(self.args, "ci_peft_exact", False) and self.use_distribute:
+            # Distributed rollout update bypasses Python tensor payload transport,
+            # so transport-hash validation is only available for colocated path.
+            logger.warning(
+                "[CI PEFT Hash] Distributed rollout engines detected; transport hash checks apply only to colocated engines."
+            )
+
         rank = dist.get_rank()
         if rank == 0:
             ray.get([engine.pause_generation.remote() for engine in self.rollout_engines])
@@ -151,6 +162,7 @@ class UpdateWeightFromTensor:
             ipc_gather_src=self._ipc_gather_src,
             ipc_gather_group=self._ipc_gather_group,
             weight_version=self.weight_version,
+            ci_peft_exact=getattr(self.args, "ci_peft_exact", False),
         )
         all_refs.extend(refs_colocated)
 
@@ -175,6 +187,7 @@ def _send_to_colocated_engine(
     ipc_gather_src,
     ipc_gather_group,
     weight_version,
+    ci_peft_exact: bool = False,
 ) -> tuple[list[ObjectRef], Any]:
     # TODO improve
     long_live_tensors = []
@@ -220,6 +233,14 @@ def _send_to_colocated_engine(
                 "load_format": "flattened_bucket",
                 "weight_version": str(weight_version),
             }
+            if ci_peft_exact:
+                kwargs["expected_payload_hashes"] = [
+                    _hash_serialized_payload(x) for x in kwargs["serialized_named_tensors"]
+                ]
             refs.append(ipc_engine.update_weights_from_tensor.remote(**kwargs))
 
     return refs, long_live_tensors
+
+
+def _hash_serialized_payload(payload: str) -> str:
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()

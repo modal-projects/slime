@@ -1406,6 +1406,14 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 action="store_true",
             )
             parser.add_argument(
+                "--ci-peft-exact",
+                action="store_true",
+                help=(
+                    "Enable strict PEFT CI checks (exact adapter structure/grad semantics and "
+                    "exact merge key coverage with cross-sync delta validation)."
+                ),
+            )
+            parser.add_argument(
                 "--ci-disable-kl-checker",
                 action="store_true",
             )
@@ -1829,6 +1837,11 @@ def slime_validate_args(args):
             f"PEFT enabled: type={args.peft_type}, rank={args.lora_rank}, alpha={args.lora_alpha}, "
             f"target_modules={args.lora_target_modules}"
         )
+    elif args.ci_peft_exact:
+        raise ValueError("--ci-peft-exact requires PEFT to be enabled (--peft-type != none)")
+
+    if args.ci_peft_exact and not args.ci_test:
+        raise ValueError("--ci-peft-exact requires --ci-test")
 
 
 def hf_validate_args(args, hf_config):

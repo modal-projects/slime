@@ -246,6 +246,22 @@ def freeze_model_params(model: GPTModel, args: argparse.Namespace):
                     break
 
 
+def _count_peft_target_modules(model: GPTModel, target_modules: list[str] | tuple[str, ...]) -> tuple[int, list[str]]:
+    """Count target modules before PEFT transform for exact CI assertions."""
+    target_set = set(target_modules)
+    names = []
+    for name, module in model.named_modules():
+        if not name:
+            continue
+        leaf = name.rsplit(".", 1)[-1]
+        if leaf not in target_set:
+            continue
+        weight = getattr(module, "weight", None)
+        if weight is not None:
+            names.append(name)
+    return len(names), names
+
+
 def _freeze_non_lora_params(model, peft_type):
     """Freeze all parameters except LoRA adapter weights.
 
@@ -330,6 +346,8 @@ def wrap_model_provider_with_peft(original_provider, args):
         else:
             model = original_provider(pre_process=pre_process, post_process=post_process)
 
+        expected_target_count, expected_target_names = _count_peft_target_modules(model, args.lora_target_modules)
+
         # Apply PEFT transformation recursively using megatron-bridge's walk_utils
         # This properly traverses the model tree and applies transform to each module
         from megatron.bridge.peft.walk_utils import map as peft_map
@@ -356,6 +374,11 @@ def wrap_model_provider_with_peft(original_provider, args):
         # ParallelLinearAdapter (unlike LinearAdapter) doesn't auto-freeze base weights
         if adapter_count > 0:
             _freeze_non_lora_params(model, args.peft_type)
+
+        # Metadata consumed by strict CI checks for exact target-module coverage.
+        model._ci_peft_expected_target_count = expected_target_count
+        model._ci_peft_expected_target_names = tuple(expected_target_names)
+        model._ci_peft_target_modules = tuple(args.lora_target_modules)
 
         # Log trainable parameters
         total_params = sum(p.numel() for p in model.parameters())
