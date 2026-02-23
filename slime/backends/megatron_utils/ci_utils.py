@@ -421,24 +421,24 @@ def check_peft_exact_weight_sync(
     *,
     sync_round: int,
     expected_merge_count: int,
-    expected_tensor_ids: set[int],
-    matched_tensor_ids: set[int],
-    duplicate_tensor_id_count: int,
+    expected_keys: set[str],
+    matched_keys: set[str],
+    duplicate_key_count: int,
     current_merged_by_task: dict[str, "object"],
     prev_merged_by_task: dict[str, "object"] | None,
 ) -> None:
     """Strict PEFT merge checks with exact key coverage and cross-sync delta sanity."""
     assert expected_merge_count > 0, "Strict PEFT merge CI expected at least one adapted layer, got 0"
-    assert len(expected_tensor_ids) == expected_merge_count, (
-        f"Expected tensor-id map size {expected_merge_count}, got {len(expected_tensor_ids)}"
+    assert len(expected_keys) == expected_merge_count, (
+        f"Expected key map size {expected_merge_count}, got {len(expected_keys)}"
     )
-    assert duplicate_tensor_id_count == 0, (
-        f"Expected each adapted tensor id to be merged once, found {duplicate_tensor_id_count} duplicates"
+    assert duplicate_key_count == 0, (
+        f"Expected each adapted key to be merged once, found {duplicate_key_count} duplicates"
     )
-    assert matched_tensor_ids == expected_tensor_ids, (
-        f"Merged tensor-id set mismatch. "
-        f"Missing={len(expected_tensor_ids - matched_tensor_ids)} "
-        f"Extra={len(matched_tensor_ids - expected_tensor_ids)}"
+    assert matched_keys == expected_keys, (
+        f"Merged key set mismatch. "
+        f"Missing={len(expected_keys - matched_keys)} "
+        f"Extra={len(matched_keys - expected_keys)}"
     )
     assert len(current_merged_by_task) == expected_merge_count, (
         f"Expected {expected_merge_count} merged task keys, got {len(current_merged_by_task)}"

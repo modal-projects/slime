@@ -262,63 +262,18 @@ def _count_peft_target_modules(model: GPTModel, target_modules: list[str] | tupl
     return len(names), names
 
 
-def _freeze_non_lora_params(model, peft_type):
-    """Freeze all parameters except LoRA adapter weights.
 
-    ParallelLinearAdapter uses linear_in/linear_out for LoRA weights.
-    LinearAdapter uses lora_a/lora_b for LoRA weights.
-
-    We freeze everything except parameters whose names contain these LoRA-specific substrings.
-    """
-    # LoRA/DoRA adapter parameter name patterns
-    lora_param_patterns = [
-        ".linear_in.",  # ParallelLinearAdapter A matrix
-        ".linear_out.",  # ParallelLinearAdapter B matrix
-        ".lora_a.",  # LinearAdapter A matrix
-        ".lora_b.",  # LinearAdapter B matrix
-        ".weight_magnitude",  # DoRA per-row magnitude vector
-    ]
-
-    frozen_count = 0
-    trainable_count = 0
-
-    for name, param in model.named_parameters():
-        is_lora_param = any(pattern in name for pattern in lora_param_patterns)
-        if is_lora_param:
-            param.requires_grad = True
-            trainable_count += 1
-        else:
-            param.requires_grad = False
-            frozen_count += 1
-
-    print(f"PEFT freeze: {frozen_count} params frozen, {trainable_count} LoRA params trainable")
-
-
-def wrap_model_provider_with_peft(original_provider, args):
-    """Wrap model provider to apply PEFT (LoRA/DoRA) transformation.
-
-    This wrapper:
-    1. Creates the base model using the original provider
-    2. Applies PEFT transformation recursively (injects LoRA/DoRA adapters)
-    3. Freezes base model parameters (only adapters are trainable)
-
-    Args:
-        original_provider: The original model provider function
-        args: Argument namespace with PEFT configuration
+def _create_peft_config(args):
+    """Create a Bridge PEFT config object from Slime CLI arguments.
 
     Returns:
-        Wrapped provider function that returns PEFT-transformed model
+        A Bridge PEFT dataclass instance (LoRA, DoRA, or CanonicalLoRA).
     """
-    if args.peft_type == "none":
-        return original_provider
-
-    # Import PEFT classes from Megatron-Bridge
     from megatron.bridge.peft.lora import LoRA
     from megatron.bridge.peft.dora import DoRA
     try:
         from megatron.bridge.peft.canonical_lora import CanonicalLoRA
     except ImportError:
-        # CanonicalLoRA may not be available in all versions
         CanonicalLoRA = None
 
     peft_classes = {
@@ -331,13 +286,33 @@ def wrap_model_provider_with_peft(original_provider, args):
     if peft_cls is None:
         raise ValueError(f"Unknown or unavailable PEFT type: {args.peft_type}")
 
-    # Create PEFT configuration
-    peft_config = peft_cls(
+    return peft_cls(
         target_modules=args.lora_target_modules,
         dim=args.lora_rank,
         alpha=args.lora_alpha,
         dropout=args.lora_dropout,
     )
+
+
+def wrap_model_provider_with_peft(original_provider, args):
+    """Wrap model provider to apply PEFT (LoRA/DoRA) transformation.
+
+    Uses Bridge's canonical ``PEFT.__call__`` entrypoint which properly handles:
+    freeze → transform → recompute-inputs-grad hook → train mode.
+
+    Args:
+        original_provider: The original model provider function
+        args: Argument namespace with PEFT configuration
+
+    Returns:
+        Wrapped provider function that returns PEFT-transformed model
+    """
+    if args.peft_type == "none":
+        return original_provider
+
+    peft_config = _create_peft_config(args)
+    # Initialize params_to_save once; each PP chunk will accumulate into it.
+    peft_config.params_to_save = set()
 
     def wrapped_provider(pre_process=True, post_process=True, vp_stage=None):
         sig = inspect.signature(original_provider)
@@ -348,14 +323,21 @@ def wrap_model_provider_with_peft(original_provider, args):
 
         expected_target_count, expected_target_names = _count_peft_target_modules(model, args.lora_target_modules)
 
-        # Apply PEFT transformation recursively using megatron-bridge's walk_utils
-        # This properly traverses the model tree and applies transform to each module
-        from megatron.bridge.peft.walk_utils import map as peft_map
+        # Apply PEFT using Bridge's canonical entrypoint.
+        # This properly handles: freeze all → transform (add adapters) →
+        # recompute-inputs-grad hook → train mode.  Adapter parameters are
+        # created with requires_grad=True by the transform, so only they
+        # remain trainable after the blanket freeze.
+        peft_config(model, training=True)
 
-        peft_map(model, peft_config.transform)
+        # Accumulate adapter param names for checkpoint filtering (Phase B.2).
+        # We accumulate rather than calling set_params_to_save() because the
+        # provider is invoked per-PP-chunk and set_params_to_save resets the set.
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                peft_config.params_to_save.add(name)
 
         # Count transformed modules for logging
-        # Note: Megatron parallel models use ParallelLinearAdapter, not LinearAdapter
         adapter_count = 0
         try:
             from megatron.bridge.peft.lora import LinearAdapter, ParallelLinearAdapter
@@ -370,15 +352,13 @@ def wrap_model_provider_with_peft(original_provider, args):
         except ImportError:
             pass
 
-        # Freeze base model parameters - only LoRA adapter weights should be trainable
-        # ParallelLinearAdapter (unlike LinearAdapter) doesn't auto-freeze base weights
-        if adapter_count > 0:
-            _freeze_non_lora_params(model, args.peft_type)
-
         # Metadata consumed by strict CI checks for exact target-module coverage.
         model._ci_peft_expected_target_count = expected_target_count
         model._ci_peft_expected_target_names = tuple(expected_target_names)
         model._ci_peft_target_modules = tuple(args.lora_target_modules)
+
+        # Store peft_config on model for checkpoint filtering (Phase B.2).
+        model._peft_config = peft_config
 
         # Log trainable parameters
         total_params = sum(p.numel() for p in model.parameters())

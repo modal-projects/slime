@@ -103,15 +103,17 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, checkpointing_con
         load_path
     ), f"{args.load=} does not exist or is an empty directory. Did you specify the wrong folder?"
 
-    if _is_megatron_checkpoint(load_path):
-        return _load_checkpoint_megatron(
-            ddp_model=ddp_model,
-            optimizer=optimizer,
-            opt_param_scheduler=opt_param_scheduler,
-            checkpointing_context=checkpointing_context,
-            skip_load_to_model_and_opt=skip_load_to_model_and_opt,
-        )
-    else:
+    peft_enabled = getattr(args, "peft_type", "none") != "none"
+
+    if not peft_enabled:
+        if _is_megatron_checkpoint(load_path):
+            return _load_checkpoint_megatron(
+                ddp_model=ddp_model,
+                optimizer=optimizer,
+                opt_param_scheduler=opt_param_scheduler,
+                checkpointing_context=checkpointing_context,
+                skip_load_to_model_and_opt=skip_load_to_model_and_opt,
+            )
         return _load_checkpoint_hf(
             ddp_model=ddp_model,
             optimizer=optimizer,
@@ -119,11 +121,71 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, checkpointing_con
             load_path=load_path,
         )
 
+    # PEFT: always load HF base weights first (base params + fresh adapter init).
+    if _is_megatron_checkpoint(load_path):
+        # Two-phase PEFT resume: HF base weights, then adapter overlay from
+        # the Megatron checkpoint (which may contain adapter-only params saved
+        # with apply_peft_adapter_filter_to_state_dict).
+        return _load_checkpoint_peft_resume(
+            ddp_model=ddp_model,
+            optimizer=optimizer,
+            opt_param_scheduler=opt_param_scheduler,
+            checkpointing_context=checkpointing_context,
+            skip_load_to_model_and_opt=skip_load_to_model_and_opt,
+            args=args,
+        )
+    return _load_checkpoint_hf(
+        ddp_model=ddp_model,
+        optimizer=optimizer,
+        args=args,
+        load_path=load_path,
+    )
+
 
 def _is_megatron_checkpoint(path: str | Path) -> bool:
     return (Path(path) / "latest_checkpointed_iteration.txt").is_file() or bool(
         re.fullmatch(r"iter_\d{7}", Path(path).name)
     )
+
+
+def _load_checkpoint_peft_resume(ddp_model, optimizer, opt_param_scheduler, checkpointing_context, skip_load_to_model_and_opt, args):
+    """Two-phase PEFT resume: load HF base weights, then overlay adapter checkpoint.
+
+    Phase 1 loads pretrained base weights from HuggingFace into the model.
+    Phase 2 loads trained adapter weights, optimizer state, and iteration from
+    a previously saved Megatron checkpoint (which may be adapter-only after
+    filtering with apply_peft_adapter_filter_to_state_dict).
+
+    The dist-ckpt loader's ``adjust_non_strict_load`` removes model keys that
+    don't exist in the checkpoint (base params), so only adapter keys are
+    actually read from disk.
+    """
+    # Phase 1: fill base params from HF pretrained model.
+    logger.info(
+        "PEFT resume: loading base weights from HF model (%s), then "
+        "overlaying adapter weights from Megatron checkpoint (%s).",
+        args.hf_checkpoint,
+        args.load,
+    )
+    _load_checkpoint_hf(ddp_model=ddp_model, optimizer=None, args=args, load_path=args.load)
+
+    # Phase 2: overlay adapter weights + optimizer + iteration from checkpoint.
+    # Use "log_all" strictness so the dist-ckpt loader detects that base-param
+    # keys are missing from the adapter-only checkpoint, removes them from the
+    # sharded state dict, and proceeds without error.
+    original_strictness = getattr(args, "dist_ckpt_strictness", "assume_ok_unexpected")
+    args.dist_ckpt_strictness = "log_all"
+    try:
+        return _load_checkpoint_megatron(
+            ddp_model=ddp_model,
+            optimizer=optimizer,
+            opt_param_scheduler=opt_param_scheduler,
+            checkpointing_context=checkpointing_context,
+            skip_load_to_model_and_opt=skip_load_to_model_and_opt,
+            strict=False,
+        )
+    finally:
+        args.dist_ckpt_strictness = original_strictness
 
 
 def _load_checkpoint_hf(ddp_model, optimizer, args, load_path: str):

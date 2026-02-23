@@ -697,6 +697,23 @@ def train(
         disable_forward_pre_hook(model)
 
 
+def _get_peft_preprocess_fn(model: Sequence[DDP]):
+    """Build a state-dict preprocess function that filters adapter-only params.
+
+    Returns None when PEFT is not active, so Megatron saves the full checkpoint.
+    """
+    peft_config = getattr(model[0].module, "_peft_config", None)
+    if peft_config is None:
+        return None
+
+    from megatron.bridge.training.checkpointing import apply_peft_adapter_filter_to_state_dict
+
+    def _filter(state_dict):
+        return apply_peft_adapter_filter_to_state_dict(state_dict, peft_config)
+
+    return _filter
+
+
 def save(
     iteration: int, model: Sequence[DDP], optimizer: MegatronOptimizer, opt_param_scheduler: OptimizerParamScheduler
 ) -> None:
@@ -719,7 +736,7 @@ def save(
         num_floating_point_operations_so_far=0,
         checkpointing_context=None,
         train_data_iterator=None,
-        preprocess_common_state_dict_fn=None,
+        preprocess_common_state_dict_fn=_get_peft_preprocess_fn(model),
     )
     if should_disable_forward_pre_hook(args):
         enable_forward_pre_hook(model)

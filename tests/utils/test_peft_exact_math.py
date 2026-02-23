@@ -35,18 +35,6 @@ def _tensor_or_cuda_wrapper(tensor: torch.Tensor):
     return _CudaWrapper(tensor)
 
 
-class _Linear:
-    def __init__(self, weight):
-        self.weight = weight
-
-
-class _ParallelAdapter:
-    def __init__(self, lora_a, lora_b, *, is_expert=False):
-        self.linear_in = _Linear(lora_a)
-        self.linear_out = _Linear(lora_b)
-        self.is_expert = is_expert
-
-
 @dataclasses.dataclass
 class _FakeTask:
     vp_stage: int
@@ -89,7 +77,7 @@ def test_merge_base_weight_with_dora_entry_matches_formula():
         ((2, 2), (4, 2), (4, 4), True, [1], ((2, 4), (4, 2))),
     ],
 )
-def test_get_parallel_lora_ab_uses_expected_gather_dims(
+def test_gather_parallel_lora_ab_uses_expected_gather_dims(
     monkeypatch,
     lora_a_shape,
     lora_b_shape,
@@ -105,13 +93,11 @@ def test_get_parallel_lora_ab_uses_expected_gather_dims(
         return torch.cat([tensor, tensor], dim=dim)
 
     monkeypatch.setattr(bridge_mod, "_all_gather_tp", _fake_all_gather_tp)
-    monkeypatch.setattr(bridge_mod, "_get_safe_tensor", lambda x: x)
 
-    lora_a = _tensor_or_cuda_wrapper(torch.randn(*lora_a_shape))
-    lora_b = _tensor_or_cuda_wrapper(torch.randn(*lora_b_shape))
-    adapter = _ParallelAdapter(lora_a, lora_b, is_expert=is_expert)
+    lora_a = _maybe_cuda_tensor(torch.randn(*lora_a_shape))
+    lora_b = _maybe_cuda_tensor(torch.randn(*lora_b_shape))
 
-    gathered_a, gathered_b = bridge_mod._get_parallel_lora_ab(adapter, torch.Size(base_shape))
+    gathered_a, gathered_b = bridge_mod._gather_parallel_lora_ab(lora_a, lora_b, torch.Size(base_shape), is_expert)
     assert calls == [(dim, is_expert) for dim in expected_gather_dims]
     assert gathered_a.shape == torch.Size(expected_shapes[0])
     assert gathered_b.shape == torch.Size(expected_shapes[1])
@@ -161,25 +147,34 @@ def test_process_conversion_tasks_exact_tracks_expected_keys_across_syncs():
     adapted_param = object()
     other_param = object()
     tasks = [
-        _FakeTask(vp_stage=0, param_name="layer0.weight", param_weight=adapted_param),
-        _FakeTask(vp_stage=0, param_name="layer1.weight", param_weight=other_param),
+        _FakeTask(
+            vp_stage=0,
+            param_name="decoder.layers.0.mlp.linear_fc1.to_wrap.weight",
+            param_weight=adapted_param,
+        ),
+        _FakeTask(
+            vp_stage=0,
+            param_name="decoder.layers.0.self_attention.linear_qkv.weight",
+            param_weight=other_param,
+        ),
     ]
 
     base0 = torch.full((2, 3), 1.0, dtype=torch.float32)
     base1 = torch.full((2, 3), 5.0, dtype=torch.float32)
     new_weight_dict = {
-        "vp_stages.0.layer0.weight": _tensor_or_cuda_wrapper(base0),
-        "vp_stages.0.layer1.weight": _tensor_or_cuda_wrapper(base1),
+        "vp_stages.0.decoder.layers.0.mlp.linear_fc1.to_wrap.weight": _tensor_or_cuda_wrapper(base0),
+        "vp_stages.0.decoder.layers.0.self_attention.linear_qkv.weight": _tensor_or_cuda_wrapper(base1),
     }
 
     delta_round0 = _maybe_cuda_tensor(torch.full((2, 3), 0.25, dtype=torch.float32))
     delta_round1 = _maybe_cuda_tensor(torch.full((2, 3), 0.75, dtype=torch.float32))
 
+    # Delta map keyed by base module name (name-based matching)
     exact_state0 = {}
     iterator0 = bridge_mod._process_conversion_tasks(
         tasks,
         new_weight_dict,
-        lora_delta_map={id(adapted_param): delta_round0},
+        lora_delta_map={"decoder.layers.0.mlp.linear_fc1": delta_round0},
         ci_test=True,
         ci_peft_exact=True,
         prev_merged_by_task=None,
@@ -187,15 +182,20 @@ def test_process_conversion_tasks_exact_tracks_expected_keys_across_syncs():
         exact_state=exact_state0,
     )
     output_round0 = list(iterator0)
-    adapted_round0 = next(x for x in output_round0 if x.param_name == "layer0.weight").param_weight
+    adapted_round0 = next(
+        x for x in output_round0
+        if x.param_name == "decoder.layers.0.mlp.linear_fc1.to_wrap.weight"
+    ).param_weight
     assert torch.allclose(adapted_round0, _maybe_cuda_tensor(base0) + delta_round0)
-    assert set(exact_state0["current_merged_by_task"]) == {"vp_stages.0.layer0.weight"}
+    assert set(exact_state0["current_merged_by_task"]) == {
+        "vp_stages.0.decoder.layers.0.mlp.linear_fc1.to_wrap.weight"
+    }
 
     exact_state1 = {}
     iterator1 = bridge_mod._process_conversion_tasks(
         tasks,
         new_weight_dict,
-        lora_delta_map={id(adapted_param): delta_round1},
+        lora_delta_map={"decoder.layers.0.mlp.linear_fc1": delta_round1},
         ci_test=True,
         ci_peft_exact=True,
         prev_merged_by_task=exact_state0["current_merged_by_task"],
@@ -203,9 +203,14 @@ def test_process_conversion_tasks_exact_tracks_expected_keys_across_syncs():
         exact_state=exact_state1,
     )
     output_round1 = list(iterator1)
-    adapted_round1 = next(x for x in output_round1 if x.param_name == "layer0.weight").param_weight
+    adapted_round1 = next(
+        x for x in output_round1
+        if x.param_name == "decoder.layers.0.mlp.linear_fc1.to_wrap.weight"
+    ).param_weight
     assert torch.allclose(adapted_round1, _maybe_cuda_tensor(base0) + delta_round1)
-    assert set(exact_state1["current_merged_by_task"]) == {"vp_stages.0.layer0.weight"}
+    assert set(exact_state1["current_merged_by_task"]) == {
+        "vp_stages.0.decoder.layers.0.mlp.linear_fc1.to_wrap.weight"
+    }
 
 
 def test_check_peft_exact_weight_sync_rejects_unchanged_sync():
@@ -214,9 +219,9 @@ def test_check_peft_exact_weight_sync_rejects_unchanged_sync():
         check_peft_exact_weight_sync(
             sync_round=1,
             expected_merge_count=1,
-            expected_tensor_ids={11},
-            matched_tensor_ids={11},
-            duplicate_tensor_id_count=0,
+            expected_keys={"decoder.layers.0.mlp.linear_fc1"},
+            matched_keys={"decoder.layers.0.mlp.linear_fc1"},
+            duplicate_key_count=0,
             current_merged_by_task=merged,
             prev_merged_by_task={"vp_stages.0.layer0.weight": _maybe_cuda_tensor(torch.ones(2, 2))},
         )
