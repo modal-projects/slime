@@ -50,7 +50,7 @@ SGLANG_IMAGE_TAG = "v0.5.10.post1"
 MEGATRON_COMMIT = "1dcf0dafa884ad52ffb243625717a3471643e087"
 
 ROLLOUT_BASE_IMAGE = os.environ.get("SLIME_MODAL_ROLLOUT_BASE_IMAGE", f"slimerl/sglang:{SGLANG_IMAGE_TAG}")
-TRAINER_BASE_IMAGE = os.environ.get("SLIME_MODAL_TRAINER_BASE_IMAGE", "slimerl/slime-test:nightly-dev-20260429b")
+TRAINER_BASE_IMAGE = os.environ.get("SLIME_MODAL_TRAINER_BASE_IMAGE", "slimerl/slime:nightly-dev-20260527a")
 AUTOINFERENCE_UTILS_VERSION = os.environ.get("AUTOINFERENCE_UTILS_VERSION", "0.2.0")
 
 HF_CACHE_PATH = "/root/.cache/huggingface"
@@ -559,7 +559,7 @@ def _build_train_args(
         "1",
         "--rollout-num-gpus-per-engine",
         "1",
-        "--sglang-router-url",
+        "--rollout-router-url",
         rollout_url,
         "--rollout-external-engine-addrs",
         rollout_url,

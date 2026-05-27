@@ -47,7 +47,7 @@ For custom trainer invocations, use the deployed URL as both the generation rout
 
 ```bash
 --rollout-external
---sglang-router-url https://your-rollout-url.modal.run
+--rollout-router-url https://your-rollout-url.modal.run
 --rollout-external-engine-addrs https://your-rollout-url.modal.run
 --update-weight-delta-dir /delta
 --custom-delta-pre-push-path slime.backends.sglang_utils.modal_volume_hooks.commit_modal_delta_volume

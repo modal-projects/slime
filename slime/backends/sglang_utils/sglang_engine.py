@@ -127,8 +127,8 @@ class SGLangEngine(RayActor):
         server_url=None,
         external_addr_is_url: bool = False,
     ):
-        self.router_ip = router_ip if router_ip is not None else getattr(self.args, "sglang_router_ip", None)
-        self.router_port = router_port if router_port is not None else getattr(self.args, "sglang_router_port", None)
+        self.router_ip = router_ip if router_ip is not None else self.args.sglang_router_ip
+        self.router_port = router_port if router_port is not None else self.args.sglang_router_port
 
         host = host or get_host_info()[1]
 

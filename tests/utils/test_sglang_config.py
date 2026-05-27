@@ -131,11 +131,11 @@ class TestGetModelUrl:
         assert get_model_url_from_args(args, "anything") == "http://10.0.0.1:3000/generate"
 
     def test_get_model_url_router_url_precedence(self):
-        """sglang_router_url should take precedence over router ip/port."""
+        """rollout_router_url should take precedence over router ip/port."""
         from slime.utils.url_utils import get_model_url_from_args
 
         args = Namespace(
-            sglang_router_url="https://rollout.example.modal.run",
+            rollout_router_url="https://rollout.example.modal.run",
             sglang_router_ip="10.0.0.1",
             sglang_router_port=3000,
         )

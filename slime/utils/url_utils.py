@@ -30,8 +30,8 @@ def make_http_base_url(host: str, port: int) -> str:
 
 
 def get_default_router_url_from_args(args, endpoint: str = "/generate") -> str:
-    if getattr(args, "sglang_router_url", None):
-        return join_url(args.sglang_router_url, endpoint)
+    if getattr(args, "rollout_router_url", None):
+        return join_url(args.rollout_router_url, endpoint)
     return join_url(make_http_base_url(args.sglang_router_ip, args.sglang_router_port), endpoint)
 
 

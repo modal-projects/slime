@@ -23,15 +23,6 @@ def add_sglang_router_arguments(parser):
         help="Port of the SGLang router",
     )
     parser.add_argument(
-        "--sglang-router-url",
-        type=str,
-        default=None,
-        help=(
-            "Full http(s) base URL for an externally managed SGLang router or single-engine endpoint. "
-            "When set, rollout generation uses this URL instead of --sglang-router-ip/port."
-        ),
-    )
-    parser.add_argument(
         "--sglang-router-request-timeout-secs",
         type=int,
         default=14400,
@@ -166,9 +157,9 @@ def validate_args(args):
 
     if getattr(args, "sglang_router_ip", None):
         args.sglang_router_ip = _wrap_ipv6(args.sglang_router_ip)
-    if getattr(args, "sglang_router_url", None):
-        args.sglang_router_url = normalize_base_url(args.sglang_router_url)
-        assert getattr(args, "rollout_external", False), "--sglang-router-url requires --rollout-external."
+    if getattr(args, "rollout_router_url", None):
+        args.rollout_router_url = normalize_base_url(args.rollout_router_url)
+        assert getattr(args, "rollout_external", False), "--rollout-router-url requires --rollout-external."
 
     if getattr(args, "rollout_external", False):
         external_engine_addrs = getattr(args, "rollout_external_engine_addrs", None)

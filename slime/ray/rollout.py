@@ -969,8 +969,8 @@ def _start_router(args, *, has_pd_disaggregation: bool = False, force_new: bool 
     ``force_new`` is False, skip launching and return the existing values.
     When ``force_new`` is True (multi-model), always allocate a fresh port.
     """
-    if not force_new and getattr(args, "sglang_router_url", None):
-        addr = parse_external_engine_addr(args.sglang_router_url)
+    if not force_new and getattr(args, "rollout_router_url", None):
+        addr = parse_external_engine_addr(args.rollout_router_url)
         return addr.host, addr.port
 
     if not force_new and args.sglang_router_ip is not None:
@@ -1064,7 +1064,7 @@ def start_rollout_servers(args, pg) -> dict[str, RolloutServer]:
 
         has_pd = model_cfg.has_pd_disaggregation
         router_ip, router_port = _start_router(args, has_pd_disaggregation=has_pd, force_new=(model_idx > 0))
-        router_url = getattr(args, "sglang_router_url", None) if model_idx == 0 else None
+        router_url = getattr(args, "rollout_router_url", None) if model_idx == 0 else None
 
         # Write back for backward compat (first model only).
         if model_idx == 0:
@@ -1076,7 +1076,7 @@ def start_rollout_servers(args, pg) -> dict[str, RolloutServer]:
 
         has_epd = model_cfg.has_encoder_disaggregation
 
-        def _make_group(group_cfg, router_ip, router_port, overrides_extra=None):
+        def _make_group(group_cfg, router_ip, router_port, overrides_extra=None, router_url_value=router_url):
             nonlocal engine_offset, gpu_offset
             gpus_per_engine = group_cfg.num_gpus_per_engine
             num_gpu_per_engine_local = min(gpus_per_engine, args.num_gpus_per_node)
@@ -1109,7 +1109,7 @@ def start_rollout_servers(args, pg) -> dict[str, RolloutServer]:
                 model_path=overrides.get("model_path", args.hf_checkpoint),
                 router_ip=router_ip,
                 router_port=router_port,
-                router_url=router_url,
+                router_url=router_url_value,
             )
             engine_offset += num_engines
             gpu_offset += group_cfg.num_gpus

@@ -55,9 +55,9 @@ def test_external_engine_base_urls_from_args_normalizes_admin_urls():
     ]
 
 
-def test_sglang_router_url_takes_generation_precedence():
+def test_rollout_router_url_takes_generation_precedence():
     args = Namespace(
-        sglang_router_url="https://rollout.example.modal.run",
+        rollout_router_url="https://rollout.example.modal.run",
         sglang_router_ip="10.0.0.1",
         sglang_router_port=3000,
     )
