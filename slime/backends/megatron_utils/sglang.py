@@ -13,15 +13,7 @@ except ImportError:
     from sglang.srt.patch_torch import monkey_patch_torch_reductions
 
 
-try:
-    from sglang.srt.managers.io_struct import DeltaEncoding, DeltaParam, DeltaSpec
-except ImportError:
-    # Older sglang images don't have delta-sync io_struct. Only --update-weight-mode=delta
-    # needs these; the default full-sync path runs without them.
-    DeltaEncoding = None
-    DeltaParam = None
-    DeltaSpec = None
-
+from sglang.srt.managers.io_struct import DeltaEncoding, DeltaParam, DeltaSpec
 from sglang.srt.utils import MultiprocessingSerializer
 
 

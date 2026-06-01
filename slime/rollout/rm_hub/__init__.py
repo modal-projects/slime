@@ -52,6 +52,12 @@ async def remote_rm(args, sample: Sample, max_retries: int = 10):
             await asyncio.sleep(backoff)
 
 
+async def constant_reward(args, sample_or_samples, **kwargs):
+    if isinstance(sample_or_samples, list):
+        return [1.0 for _ in sample_or_samples]
+    return 1.0
+
+
 async def async_rm(args, sample: Sample, **kwargs):
     if args.custom_rm_path is not None:
         rm_function = load_function(args.custom_rm_path)

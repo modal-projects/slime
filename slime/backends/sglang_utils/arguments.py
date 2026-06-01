@@ -2,6 +2,7 @@ import argparse
 
 from sglang.srt.server_args import ServerArgs
 from slime.utils.http_utils import _wrap_ipv6
+from slime.utils.url_utils import normalize_base_url, parse_external_engine_addr
 
 
 # TODO: use all sglang router arguments with `--sglang-router` prefix
@@ -156,6 +157,18 @@ def validate_args(args):
 
     if getattr(args, "sglang_router_ip", None):
         args.sglang_router_ip = _wrap_ipv6(args.sglang_router_ip)
+    if getattr(args, "rollout_router_url", None):
+        args.rollout_router_url = normalize_base_url(args.rollout_router_url)
+        assert getattr(args, "rollout_external", False), "--rollout-router-url requires --rollout-external."
+
+    if getattr(args, "rollout_external", False):
+        external_engine_addrs = getattr(args, "rollout_external_engine_addrs", None)
+        assert external_engine_addrs, (
+            "--rollout-external requires --rollout-external-engine-addrs so external admin and update RPCs "
+            "target explicit engine endpoints."
+        )
+        for addr in external_engine_addrs:
+            parse_external_engine_addr(addr)
 
     # Mutual-exclusion checks for PD disaggregation / sglang-config.
     assert not (

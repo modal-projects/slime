@@ -513,11 +513,23 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 help="Use external SGLang instances instead of launching them inside the framework.",
             )
             parser.add_argument(
+                "--rollout-router-url",
+                type=str,
+                default=None,
+                help=(
+                    "Full http(s) base URL for an externally managed rollout generation router or "
+                    "single-engine endpoint."
+                ),
+            )
+            parser.add_argument(
                 "--rollout-external-engine-addrs",
                 type=str,
                 default=None,
                 nargs="+",
-                help="Address and ports of the external engines.",
+                help=(
+                    "Address and ports of the external engines. Entries can be host:port or "
+                    "http(s)://... base URLs for engines exposed through an external gateway."
+                ),
             )
             return parser
 
