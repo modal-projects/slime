@@ -834,6 +834,24 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help="lower bound of the value for Dual-clip PPO from https://arxiv.org/pdf/1912.09729",
             )
+            parser.add_argument(
+                "--custom-policy-loss-function-path",
+                type=str,
+                default=None,
+                help=(
+                    "Path to a custom policy-loss hook. The hook receives args, ppo_kl, log_probs, old_log_probs, "
+                    "advantages, and batch shape metadata, and returns unreduced per-token policy loss and clipfrac."
+                ),
+            )
+            parser.add_argument(
+                "--policy-loss-ratio-max",
+                type=float,
+                default=None,
+                help=(
+                    "Optional direct upper cap for policy-loss hooks that use importance-sampling ratios, "
+                    "for example CISPO."
+                ),
+            )
             parser.add_argument("--value-clip", type=float, default=0.2, help="the clip for value loss")
             parser.add_argument(
                 "--kl-coef",
