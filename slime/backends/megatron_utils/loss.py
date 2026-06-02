@@ -895,7 +895,21 @@ def policy_loss_function(
         log_probs = torch.cat(log_probs, dim=0)
         ppo_kl = old_log_probs - log_probs
 
-    pg_loss, pg_clipfrac = compute_policy_loss(ppo_kl, advantages, args.eps_clip, args.eps_clip_high)
+    if args.custom_policy_loss_function_path is not None:
+        custom_policy_loss_func = load_function(args.custom_policy_loss_function_path)
+        pg_loss, pg_clipfrac = custom_policy_loss_func(
+            args=args,
+            ppo_kl=ppo_kl,
+            log_probs=log_probs,
+            old_log_probs=old_log_probs,
+            advantages=advantages,
+            loss_masks=batch["loss_masks"],
+            total_lengths=total_lengths,
+            response_lengths=response_lengths,
+            max_seq_lens=max_seq_lens,
+        )
+    else:
+        pg_loss, pg_clipfrac = compute_policy_loss(ppo_kl, advantages, args.eps_clip, args.eps_clip_high)
 
     if args.use_opsm:
         pg_loss = pg_loss * opsm_mask
