@@ -5,7 +5,7 @@ import torch
 
 
 @torch.compile(dynamic=True)
-def _cispo_policy_loss(
+def _compute_cispo_policy_loss(
     ppo_kl: torch.Tensor,
     log_probs: torch.Tensor,
     advantages: torch.Tensor,
@@ -21,7 +21,7 @@ def _cispo_policy_loss(
     return pg_losses, clipfrac
 
 
-def compute_policy_loss(
+def cispo_policy_loss_function(
     *,
     args: Namespace,
     ppo_kl: torch.Tensor,
@@ -38,4 +38,9 @@ def compute_policy_loss(
     if ratio_max <= 0:
         raise ValueError(f"policy_loss_ratio_max must be positive for CISPO, got {ratio_max}.")
 
-    return _cispo_policy_loss(ppo_kl, log_probs, advantages, ratio_max)
+    return _compute_cispo_policy_loss(ppo_kl, log_probs, advantages, ratio_max)
+
+
+# Backward-compatible hook path for configs created before the function was
+# named after the policy-loss hook slot.
+compute_policy_loss = cispo_policy_loss_function
