@@ -30,7 +30,7 @@ Rollout-side requirements:
 Oracle check (no model involved -- validates boot/prep/verify plumbing by
 running each task's reference solution through the exact rollout path)::
 
-    python -m async_rl_research.env.harbor out/usaco.jsonl --task-root out --limit 3
+    python -m async_rl_research.environment.harbor out/usaco.jsonl --task-root out --limit 3
 """
 
 from __future__ import annotations

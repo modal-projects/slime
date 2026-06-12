@@ -174,8 +174,8 @@ DEFAULT_ENV = "swe_gym"
 # task_type -> "module:Class". Values are strings so importing base.py never
 # imports any env module (env modules pull in provider backends).
 ENVS: dict[str, str] = {
-    "swe_gym": "async_rl_research.env.swe_gym:SweGymEnv",
-    "harbor": "async_rl_research.env.harbor:HarborEnv",
+    "swe_gym": "async_rl_research.environment.swe_gym:SweGymEnv",
+    "harbor": "async_rl_research.environment.harbor:HarborEnv",
 }
 
 _ENV_CACHE: dict[str, RolloutEnv] = {}

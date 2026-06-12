@@ -3,7 +3,7 @@
 The contract + shared machinery (detached launch/poll, idempotent
 provisioning) live in ``agent/base.py``; the generic rollout recipe lives in
 ``async_rl_research.generate`` and the per-task-family envs in
-``async_rl_research.env``. By the time ``run_agent`` is called the workspace
+``async_rl_research.environment``. By the time ``run_agent`` is called the workspace
 is already task-prepped (the active env applied its setup and wrote
 ``PROBLEM_FILE``). Here we own only what is unique to mini-swe-agent:
 
@@ -47,7 +47,7 @@ from .base import AgentRuntime
 
 # Task-layer constant: the active env writes the problem statement here
 # before run_agent is called; the runner reads it via MSWE_PROBLEM_FILE.
-from ..env.base import PROBLEM_FILE
+from ..environment.base import PROBLEM_FILE
 
 
 # --- mini-swe-agent-specific knobs ------------------------------------------

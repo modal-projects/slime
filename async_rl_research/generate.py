@@ -88,7 +88,7 @@ from slime.utils.types import Sample
 
 from .agent.base import AgentRuntime, load_runtime
 from .aiohttp_threaded import run_app_in_thread
-from .env.base import EnvMetadataError, RewardResult, load_env
+from .environment.base import EnvMetadataError, RewardResult, load_env
 
 logger = logging.getLogger(__name__)
 

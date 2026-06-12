@@ -22,7 +22,7 @@ datasets like USACO (in-place `test.sh` verification, multi-step aware).
 
 Harbor datasets need two things at rollout time: `ASYNC_RL_TASK_ROOT` pointing at
 the converter's out dir (on the slime-data volume), and ideally an oracle pass
-first (`python -m async_rl_research.env.harbor <jsonl> --limit 3`, expect
+first (`python -m async_rl_research.environment.harbor <jsonl> --limit 3`, expect
 reward=1.0) -- see `data/README.md` for the full flow.
 
 The rollout boot honors these env vars:

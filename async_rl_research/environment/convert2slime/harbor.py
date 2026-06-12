@@ -20,11 +20,11 @@ Sources::
 
     # a directory whose subdirectories are harbor tasks (e.g. a
     # harbor-datasets checkout subtree, or an adapter's generated tasks)
-    python -m async_rl_research.env.convert2slime.harbor \
+    python -m async_rl_research.environment.convert2slime.harbor \
         --tasks-dir ~/harbor-datasets/datasets/usaco --out-dir data/usaco
 
     # straight from a harbor registry (requires `pip install harbor`)
-    python -m async_rl_research.env.convert2slime.harbor \
+    python -m async_rl_research.environment.convert2slime.harbor \
         --registry ~/harbor/registry.json --dataset usaco --out-dir data/usaco
 
 v1 scope (anything else is skipped + logged): linux, single-container
@@ -289,7 +289,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"converted {converted} tasks ({skipped} skipped) -> {out_dir / (name + '.jsonl')}")
     print("next steps:")
     print(f"  export ASYNC_RL_TASK_ROOT={out_dir}")
-    print(f"  python -m async_rl_research.env.harbor {out_dir / (name + '.jsonl')} --limit 3   # oracle check")
+    print(f"  python -m async_rl_research.environment.harbor {out_dir / (name + '.jsonl')} --limit 3   # oracle check")
     return 0 if converted else 1
 
 
