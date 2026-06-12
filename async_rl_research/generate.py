@@ -86,6 +86,7 @@ from slime.utils.misc import SingletonMeta
 from slime.utils.processing_utils import load_tokenizer
 from slime.utils.types import Sample
 
+from .profiles import profiling
 from .agent.base import AgentRuntime, load_runtime
 from .aiohttp_threaded import run_app_in_thread
 from .environment.base import EnvMetadataError, RewardResult, load_env
@@ -160,6 +161,9 @@ class _State(metaclass=SingletonMeta):
             tool_parser=self.tool_parser,
             reasoning_parser=self.reasoning_parser,
         )
+        # Per-turn timing by session (bearer token == session_id); must be
+        # installed before the app starts. Feeds metadata["timing"] below.
+        profiling.install(self.adapter.app)
         # handler_cancellation=True so a client disconnect cancels the handler
         # coroutine, arming the adapter's fire-and-forget /abort_request. Without
         # it a cancelled client leaves an inflight sglang /generate that races
@@ -343,6 +347,11 @@ async def generate(args, sample: Sample, sampling_params: dict[str, Any], evalua
                 agent_time_budget_sec=AGENT_TIME_BUDGET_SEC,
                 eval_timeout_sec=AGENT_EVAL_TIMEOUT_SEC,
             )
+            # Fold the adapter's per-turn stats into the env's phase timing
+            # (one "timing" dict per sample -> dumps -> profile.py).
+            turn_stats = profiling.pop_session_stats(session_id)
+            if turn_stats:
+                reward_result.extra.setdefault("timing", {}).update(turn_stats)
             segments = await state.adapter.finish_session(session_id)
             return _merge_samples(
                 sample=sample,

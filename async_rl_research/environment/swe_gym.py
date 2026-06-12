@@ -24,12 +24,14 @@ from __future__ import annotations
 import json
 import logging
 import shlex
+import time
 from pathlib import Path
 from typing import Any
 
 from slime.agent.sandbox import Sandbox
 
 from ..modal_sandbox import ModalSandbox
+from ..profiles.profiling import PhaseTimer
 from .base import PROBLEM_FILE, EnvMetadataError, RewardResult, RolloutEnv, coerce_prompt
 
 logger = logging.getLogger(__name__)
@@ -92,23 +94,39 @@ class SweGymEnv(RolloutEnv):
         eval_timeout_sec: int,
     ) -> RewardResult:
         workdir = md["workdir"]
+        timer = PhaseTimer()
+        t0 = time.monotonic()
         async with ModalSandbox(md["image"]) as sb:
-            await self._prepare_workspace(sb, md)
-            await runtime.run_agent(
-                sb,
-                md=md,
-                session_id=session_id,
-                adapter_url=adapter_url,
-                time_budget_sec=agent_time_budget_sec,
-            )
-            diff_text = await self._git_diff(sb, workdir, exclude=runtime.diff_exclude_all)
+            timer.record("work_boot", time.monotonic() - t0)
+            with timer.phase("prep"):
+                await self._prepare_workspace(sb, md)
+            with timer.phase("agent"):
+                await runtime.run_agent(
+                    sb,
+                    md=md,
+                    session_id=session_id,
+                    adapter_url=adapter_url,
+                    time_budget_sec=agent_time_budget_sec,
+                )
+            with timer.phase("diff"):
+                diff_text = await self._git_diff(sb, workdir, exclude=runtime.diff_exclude_all)
 
         # Work sandbox is closed; grade the diff in a clean one.
-        reward, is_solved, applied = await self._evaluate(md, diff_text, timeout_sec=eval_timeout_sec)
+        with timer.phase("eval"):
+            reward, is_solved, applied = await self._evaluate(
+                md, diff_text, timeout_sec=eval_timeout_sec, timer=timer
+            )
         return RewardResult(
             reward=float(reward),
             is_solved=bool(is_solved),
-            extra={"applied_cleanly": bool(applied)},
+            # diff_bytes/diff_files are SIZE metrics only (len + header count);
+            # the patch text itself is never stored.
+            extra={
+                "applied_cleanly": bool(applied),
+                "diff_bytes": len(diff_text),
+                "diff_files": diff_text.count("diff --git"),
+                "timing": timer.as_dict(),
+            },
         )
 
     # ------------------------------------------------------------------
@@ -147,14 +165,19 @@ class SweGymEnv(RolloutEnv):
     # ------------------------------------------------------------------
     # Eval (fresh clean sandbox, apply diff, run dataset tests)
     # ------------------------------------------------------------------
-    async def _evaluate(self, md: dict[str, Any], diff_text: str, *, timeout_sec: int) -> tuple[float, bool, bool]:
+    async def _evaluate(
+        self, md: dict[str, Any], diff_text: str, *, timeout_sec: int, timer: PhaseTimer | None = None
+    ) -> tuple[float, bool, bool]:
         """Grade ``diff_text`` in a CLEAN sandbox; returns (reward, solved, applied)."""
         if not (md["swepro"] or md["eval_cmd"]):
             logger.warning("[swe_gym.evaluate] no swepro/eval_cmd; reward=0")
             return 0.0, False, True
 
         workdir = md["workdir"]
+        t0 = time.monotonic()
         async with ModalSandbox(md["image"]) as ev:
+            if timer is not None:
+                timer.record("eval_boot", time.monotonic() - t0)
             if md["pre_commands"]:
                 await _apply_pre_commands(ev, workdir, md["pre_commands"])
 
