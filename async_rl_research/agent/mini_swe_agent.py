@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import os
 import shlex
+from pathlib import Path
 
 from slime.agent.adapters import OpenAIAdapter
 from slime.agent.sandbox import Sandbox
@@ -52,12 +53,18 @@ from ..environment.base import PROBLEM_FILE
 
 # --- mini-swe-agent-specific knobs ------------------------------------------
 MSWE_STEP_LIMIT = int(os.environ.get("MSWE_STEP_LIMIT", "50"))
-# Which builtin mini-swe-agent YAML config (prompts!) the runner loads,
-# relative to its packaged config dir. Resolution: MSWE_CONFIG env (global
-# override) > the env's md["agent_config"] hint (swe_gym ->
-# benchmarks/swebench.yaml, harbor -> mini.yaml) > the SWE-bench default.
+# Which YAML config (prompts!) the runner loads. The DEFAULT is the repo-owned
+# universal config below, uploaded into the sandbox -- ONE prompt scaffold for
+# all task families; the task-specific deliverable lives in the instruction
+# text the env writes (see config/universal.yaml's scope rule). Override
+# ladder (both name a BUILTIN config relative to the package's config dir,
+# e.g. "mini.yaml" or "benchmarks/swebench.yaml"):
+#   MSWE_CONFIG env (global, experiments) > metadata.agent_config (per-row)
+#   > the uploaded universal config.
 MSWE_CONFIG = os.environ.get("MSWE_CONFIG", "")
-MSWE_DEFAULT_CONFIG = "benchmarks/swebench.yaml"
+# Read at import: the prompt scaffold ships with this module and must be
+# identical for every rollout in a run.
+UNIVERSAL_CONFIG_YAML = (Path(__file__).parent / "config" / "universal.yaml").read_text(encoding="utf-8")
 # Exact-pinned: the scaffold's prompts + wire protocol are part of the RL task
 # distribution (a PyPI drift mid-experiment silently changes the environment),
 # and MINI_RUNNER_PY below is written against the v2 API.
@@ -81,14 +88,16 @@ _VENV_PY = f"{MSWE_AGENT_VENV}/bin/python"
 # Runtime scratch under workdir beyond the base's launch files (which keep
 # their historical .mswe_* names via scratch_prefix below).
 _RUNNER = ".mswe_runner.py"
+_CONFIG_FILE = ".mswe_config.yaml"
 
 
 # ---------------------------------------------------------------------------
 # Headless in-sandbox runner.
 #
 # Written against mini-swe-agent v2 (exact-pinned via MSWE_PIP_SPEC). The v2
-# specifics this depends on: default prompts ship as packaged YAML configs
-# (we load the SWE-bench-tuned one instead of hand-rolling templates), bash is
+# specifics this depends on: prompts come from a YAML config in the same
+# schema as the packaged ones (we upload the repo-owned universal config;
+# builtins remain reachable via the MSWE_CONFIG override ladder), bash is
 # driven through NATIVE tool-calls, and cost tracking hard-fails on models
 # litellm cannot price (hence cost_tracking="ignore_errors"). The wiring that
 # must hold regardless of version: litellm points at the slime adapter
@@ -101,6 +110,7 @@ MINI_RUNNER_PY = r'''"""Headless mini-swe-agent (v2) runner -- runs INSIDE the s
 import os
 import sys
 import traceback
+from pathlib import Path
 
 WORKDIR = os.environ["MSWE_WORKDIR"]
 MODEL = os.environ.get("MSWE_MODEL", "slime-actor")
@@ -116,15 +126,20 @@ try:
     from minisweagent.environments.local import LocalEnvironment
     from minisweagent.models.litellm_model import LitellmModel
 
-    # v2 ships its default prompts in packaged YAML configs; the host picks
-    # one per task family (MSWE_CONFIG: SWE -> the SWE-bench-tuned config's
-    # patch-submission protocol, harbor -> the generic default). Read the
-    # builtin path directly -- get_config_from_spec() would also try
-    # cwd-relative candidates, which a repo file could shadow.
-    cfg_path = builtin_config_dir / os.environ.get("MSWE_CONFIG", "benchmarks/swebench.yaml")
-    if not cfg_path.is_file():
-        print("[runner] config %s not found; falling back to benchmarks/swebench.yaml" % cfg_path)
-        cfg_path = builtin_config_dir / "benchmarks" / "swebench.yaml"
+    # Prompt config: the host uploads the repo-owned UNIVERSAL config next to
+    # this runner (MSWE_CONFIG_FILE) -- the default for every task family.
+    # MSWE_CONFIG, when set (global env override or a row's agent_config),
+    # names a BUILTIN packaged config instead. Read the builtin path directly
+    # -- get_config_from_spec() would also try cwd-relative candidates, which
+    # a repo file could shadow.
+    cfg_path = Path(os.environ["MSWE_CONFIG_FILE"])
+    builtin = os.environ.get("MSWE_CONFIG", "")
+    if builtin:
+        candidate = builtin_config_dir / builtin
+        if candidate.is_file():
+            cfg_path = candidate
+        else:
+            print("[runner] builtin config %s not found; using the universal config" % candidate)
     cfg = yaml.safe_load(cfg_path.read_text())
     agent_cfg = dict(cfg.get("agent") or {})
     model_cfg = dict(cfg.get("model") or {})
@@ -197,11 +212,13 @@ class MiniSweAgentRuntime(AgentRuntime):
     model_name = "slime-actor"
     # Keep the historical scratch names (.mswe_run.sh / .mswe_done / .mswe_log).
     scratch_prefix = ".mswe"
-    # "patch.txt" is the submission artifact the v2 swebench prompt instructs
-    # the agent to create; `git add -N .` would otherwise sweep it into the
-    # diff. (Launch scratch + the task-layer PROBLEM_FILE are excluded by the
-    # base / by the swe_gym env's git_diff itself.)
-    diff_exclude = (_RUNNER, "patch.txt")
+    # "patch.txt" is the submission artifact the builtin swebench prompt
+    # instructs the agent to create -- the universal config doesn't, but an
+    # MSWE_CONFIG/agent_config override back to the builtin would, and
+    # `git add -N .` would sweep it into the diff. (Launch scratch + the
+    # task-layer PROBLEM_FILE are excluded by the base / by the swe_gym env's
+    # git_diff itself.)
+    diff_exclude = (_RUNNER, _CONFIG_FILE, "patch.txt")
 
     async def run_agent(
         self,
@@ -215,6 +232,7 @@ class MiniSweAgentRuntime(AgentRuntime):
         """Provision mini-swe-agent in ``sb``, run it on the task, poll to done."""
         workdir = md["workdir"]
         await sb.write_file(f"{workdir}/{_RUNNER}", MINI_RUNNER_PY)
+        await sb.write_file(f"{workdir}/{_CONFIG_FILE}", UNIVERSAL_CONFIG_YAML)
         await self._ensure_provisioned(
             sb,
             spec=MSWE_PIP_SPEC,
@@ -232,7 +250,10 @@ class MiniSweAgentRuntime(AgentRuntime):
             "MSWE_MODEL": self.model_name,
             "MSWE_WORKDIR": workdir,
             "MSWE_PROBLEM_FILE": f"{workdir}/{PROBLEM_FILE}",
-            "MSWE_CONFIG": MSWE_CONFIG or md.get("agent_config") or MSWE_DEFAULT_CONFIG,
+            # Override ladder: global env > per-row builtin override > the
+            # uploaded universal config ("" -> the runner uses MSWE_CONFIG_FILE).
+            "MSWE_CONFIG": MSWE_CONFIG or md.get("agent_config") or "",
+            "MSWE_CONFIG_FILE": f"{workdir}/{_CONFIG_FILE}",
             "MSWE_STEP_LIMIT": str(MSWE_STEP_LIMIT),
             "MSWE_PATH_PREPEND": MSWE_PATH_PREPEND,
             # keep the v2 import-time banner out of the runner log.

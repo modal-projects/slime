@@ -97,10 +97,10 @@ def _meets_min_reward(rewards: dict[str, Any] | None, min_reward: float | dict[s
 
 class HarborEnv(RolloutEnv):
     name = "harbor"
-    # mini-swe-agent prompt config hint: the generic builtin, not the SWE-bench
-    # patch-submission one -- harbor tasks ask for artifacts, not patches.
-    # Per-row override via metadata.agent_config; global via MSWE_CONFIG.
-    agent_config = "mini.yaml"
+    # No agent_config default: the runtime's universal prompt scaffold is the
+    # default for all task families, and harbor instruction.md files already
+    # carry their own deliverable contract (what artifacts to leave where).
+    # Per-row builtin override via metadata.agent_config; global via MSWE_CONFIG.
 
     # ------------------------------------------------------------------
     # Row schema (written by env/convert2slime/harbor.py -- keep in sync)
@@ -140,7 +140,7 @@ class HarborEnv(RolloutEnv):
             "reward_strategy": m.get("reward_strategy"),
             "cpus": m.get("cpus"),
             "memory_mb": m.get("memory_mb"),
-            "agent_config": m.get("agent_config") or self.agent_config,
+            "agent_config": m.get("agent_config"),
         }
 
     @staticmethod

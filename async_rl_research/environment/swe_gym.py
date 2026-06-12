@@ -40,12 +40,29 @@ _PATCH = "/tmp/__swe_patch__.diff"
 _PRE = "/tmp/__swe_pre__.sh"
 
 
+# Appended to the row's problem statement: with the universal prompt scaffold
+# the agent's YAML no longer carries a submission protocol, so the task
+# instruction must say what the deliverable is. Reward here is the captured
+# working-tree `git diff`, hence: edit in place, don't commit, no patch files
+# (the builtin swebench prompt's patch.txt ritual was never what got graded).
+_DELIVERABLE_SUFFIX = """
+
+## Deliverable
+
+Fix the issue by editing the repository's source files in place.
+
+- Your work is collected as the uncommitted working-tree changes (`git diff`) of this repository when you finish: leave your edits uncommitted.
+- Do NOT commit your changes and do NOT create patch files.
+- Do NOT modify tests or configuration files (pyproject.toml, setup.cfg, etc.).
+- Delete any reproduction scripts or scratch files you created before finishing.
+"""
+
+
 class SweGymEnv(RolloutEnv):
     name = "swe_gym"
-    # mini-swe-agent prompt config hint: the SWE-bench-tuned builtin (patch
-    # submission protocol, capped observations). Rows may override via
-    # metadata.agent_config.
-    agent_config = "benchmarks/swebench.yaml"
+    # No agent_config default: the runtime's universal prompt scaffold is the
+    # default; the SWE deliverable contract is _DELIVERABLE_SUFFIX above.
+    # Per-row builtin override via metadata.agent_config; global via MSWE_CONFIG.
 
     def normalize_metadata(self, sample) -> dict[str, Any]:
         m = sample.metadata or {}
@@ -58,7 +75,7 @@ class SweGymEnv(RolloutEnv):
             "swepro": m.get("swepro"),
             "eval_cmd": m.get("eval_cmd"),
             "pre_commands": m.get("pre_commands"),
-            "agent_config": m.get("agent_config") or self.agent_config,
+            "agent_config": m.get("agent_config"),
         }
         if not md["image"] or not md["workdir"]:
             raise EnvMetadataError("missing_image_or_workdir")
@@ -110,7 +127,7 @@ class SweGymEnv(RolloutEnv):
         await sb.exec("git config --system --add safe.directory '*'", check=False, timeout=60)
         if md["pre_commands"]:
             await _apply_pre_commands(sb, md["workdir"], md["pre_commands"])
-        await self.write_problem_file(sb, md["workdir"], md["problem_statement"])
+        await self.write_problem_file(sb, md["workdir"], (md["problem_statement"] or "") + _DELIVERABLE_SUFFIX)
 
     # ------------------------------------------------------------------
     # Diff capture

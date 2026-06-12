@@ -1,0 +1,173 @@
+# The universal mini-swe-agent config: ONE prompt scaffold for ALL task
+# families. Owned by this repo (not the pip-installed package) so the prompt
+# distribution is version-controlled here and changing it never requires a
+# package bump.
+#
+# Based on mini-swe-agent v2.3.1's default.yaml, with the action rules and
+# format_error_template rewritten for NATIVE tool-calls (the runner uses
+# LitellmModel, and the slime adapter parses tool calls via sglang's parser;
+# default.yaml's ```mswea_bash_command``` text format would be rejected every
+# turn).
+#
+# Scope rule: this file carries only scaffold-universal content (response
+# format, subshell semantics, how to finish). The task's DELIVERABLE (patch
+# vs. artifacts vs. stdout) belongs in the instruction text the env writes to
+# PROBLEM_STATEMENT.md, which is rendered here as {{task}} -- harbor
+# instruction.md files already follow this; swe_gym appends its suffix in
+# env/swe_gym.py.
+#
+# step_limit / cost_limit / sampling knobs are overridden host-side by the
+# runner regardless of what this file says.
+agent:
+  system_template: |
+    You are a helpful assistant that can interact with a computer.
+  instance_template: |
+    Please solve the following task:
+
+    <task>
+    {{task}}
+    </task>
+
+    You can execute bash commands and edit files to accomplish it. The task
+    description above defines what you must produce and any task-specific
+    submission steps; follow it exactly.
+
+    ## Command Execution Rules
+
+    You are operating in an environment where
+
+    1. You issue at least one command
+    2. The system executes the command(s) in a subshell
+    3. You see the result(s)
+    4. You write your next command(s)
+
+    Each response should include:
+
+    1. **Reasoning text** where you explain your analysis and plan
+    2. At least one tool call with your command
+
+    **CRITICAL REQUIREMENTS:**
+
+    - Your response SHOULD include reasoning text explaining what you're doing
+    - Your response MUST include AT LEAST ONE bash tool call
+    - Directory or environment variable changes are not persistent. Every action is executed in a new subshell.
+    - However, you can prefix any action with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...` or write/load environment variables from files
+
+    Example of a CORRECT response:
+    <example_response>
+    I need to understand the structure of the repository first. Let me check what files are in the current directory to get a better understanding of the codebase.
+
+    [Makes bash tool call with {"command": "ls -la"} as arguments]
+    </example_response>
+
+    ## Environment Details
+
+    - You have a full Linux shell environment
+    - Always use non-interactive flags (-y, -f) for commands
+    - Avoid interactive tools like vi, nano, or any that require user input
+    - You can create new tools or scripts to help you with the task; if a tool isn't available, you can install it
+
+    <system_information>
+    {{system}} {{release}} {{version}} {{machine}}
+    </system_information>
+
+    ## Useful command examples
+
+    ### Create a new file:
+
+    ```bash
+    cat <<'EOF' > newfile.py
+    import numpy as np
+    hello = "world"
+    print(hello)
+    EOF
+    ```
+
+    ### Edit files with sed:
+
+    ```bash
+    # Replace all occurrences
+    sed -i 's/old_string/new_string/g' filename.py
+
+    # Replace only first occurrence
+    sed -i 's/old_string/new_string/' filename.py
+
+    # Replace first occurrence on line 1
+    sed -i '1s/old_string/new_string/' filename.py
+
+    # Replace all occurrences in lines 1-10
+    sed -i '1,10s/old_string/new_string/g' filename.py
+    ```
+
+    ### View file content:
+
+    ```bash
+    # View specific lines with numbers
+    nl -ba filename.py | sed -n '10,20p'
+    ```
+
+    ## Finishing
+
+    Once you have verified your work and completed any submission steps the
+    task description requires, finish by issuing the following command:
+    `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`.
+    Do not combine it with any other command. <important>After this command,
+    you cannot continue working on this task.</important>
+  step_limit: 0
+  cost_limit: 0.
+environment:
+  timeout: 60
+  env:
+    PAGER: cat
+    MANPAGER: cat
+    LESS: -R
+    PIP_PROGRESS_BAR: 'off'
+    TQDM_DISABLE: '1'
+model:
+  observation_template: |
+    {% if output.exception_info -%}
+    <exception>{{output.exception_info}}</exception>
+    {% endif -%}
+    <returncode>{{output.returncode}}</returncode>
+    {% if output.output | length < 10000 -%}
+    <output>
+    {{ output.output -}}
+    </output>
+    {%- else -%}
+    <warning>
+    The output of your last command was too long.
+    Please try a different command that produces less output.
+    If you're looking at a file you can try use head, tail or sed to view a smaller number of lines selectively.
+    If you're using grep or find and it produced too much output, you can use a more selective search pattern.
+    If you really need to see something from the full command's output, you can redirect output to a file and then search in that file.
+    </warning>
+    {%- set elided_chars = output.output | length - 10000 -%}
+    <output_head>
+    {{ output.output[:5000] }}
+    </output_head>
+    <elided_chars>
+    {{ elided_chars }} characters elided
+    </elided_chars>
+    <output_tail>
+    {{ output.output[-5000:] }}
+    </output_tail>
+    {%- endif -%}
+  format_error_template: |
+    Tool call error:
+
+    <error>
+    {{error}}
+    </error>
+
+    Here is general guidance on how to submit correct toolcalls:
+
+    Every response needs to use the 'bash' tool at least once to execute commands.
+
+    Call the bash tool with your command as the argument:
+    - Tool: bash
+    - Arguments: {"command": "your_command_here"}
+
+    If you want to end the task, please issue the following command: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
+    without any other command.
+  model_kwargs:
+    drop_params: true
