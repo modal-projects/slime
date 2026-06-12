@@ -218,10 +218,24 @@ def convert(
 
 
 def _discover_task_dirs(tasks_dir: Path) -> list[Path]:
-    """Direct subdirectories holding a task.toml, sorted for determinism."""
+    """Direct subdirectories holding a task.toml, sorted for determinism.
+
+    Falls back to treating ``tasks_dir`` itself as a single task only when no
+    subdirectory tasks exist: some published datasets (e.g. harbor-datasets'
+    openthoughts-tblite) ship a stray template task.toml at the dataset root.
+    """
+    subdirs = sorted(p for p in tasks_dir.iterdir() if (p / "task.toml").is_file())
+    if subdirs:
+        if (tasks_dir / "task.toml").is_file():
+            logger.warning(
+                "[harbor2slime] %s has both a root task.toml and %d task subdirs; using the subdirs",
+                tasks_dir,
+                len(subdirs),
+            )
+        return subdirs
     if (tasks_dir / "task.toml").is_file():
         return [tasks_dir]
-    return sorted(p for p in tasks_dir.iterdir() if (p / "task.toml").is_file())
+    return []
 
 
 def _download_from_registry(registry_spec: str, dataset: str, version: str | None, download_dir: Path) -> list[Path]:

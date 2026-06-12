@@ -190,8 +190,14 @@ except Exception:
 _VENV_SETUP = (
     'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"\n'
     "if ! command -v uv >/dev/null 2>&1; then\n"
-    "  curl -LsSf https://astral.sh/uv/install.sh | sh\n"
-    '  export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"\n'
+    "  if command -v curl >/dev/null 2>&1; then\n"
+    "    curl -LsSf https://astral.sh/uv/install.sh | sh\n"
+    '    export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"\n'
+    "  else\n"
+    "    # slim images (e.g. harbor's python:*-slim) ship neither curl nor\n"
+    "    # wget, but they do ship pip; uv's PyPI wheel lands on PATH.\n"
+    "    python3 -m pip install --quiet uv\n"
+    "  fi\n"
     "fi\n"
     f"rm -rf {shlex.quote(MSWE_AGENT_VENV)}\n"
     f"uv venv --python {shlex.quote(MSWE_AGENT_PYTHON_VERSION)} {shlex.quote(MSWE_AGENT_VENV)}\n"

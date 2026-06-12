@@ -270,7 +270,9 @@ class HarborEnv(RolloutEnv):
         reward = self._aggregate(steps, step_results, md["reward_strategy"])
         return RewardResult(
             reward=reward,
-            is_solved=reward >= 1.0,
+            # epsilon: weighted pytest fractions can sum to 0.999... for a
+            # fully-passing task (seen on openthoughts-tblite bash-log-processor-fix)
+            is_solved=reward >= 1.0 - 1e-6,
             extra={
                 "harbor_step_results": step_results,
                 "harbor_steps_completed": len(step_results),
@@ -357,6 +359,15 @@ class HarborEnv(RolloutEnv):
             except ValueError:
                 logger.warning("[harbor] %s: unparseable reward.txt: %.200s", instance_id, raw_txt)
                 return None
+        # No reward file: terminal-bench-style tasks (e.g. openthoughts-tblite)
+        # end test.sh with a bare pytest run and rely on the harness to grade
+        # it. Grade all-or-nothing on pytest's exit code (tb's resolved
+        # semantics): 0 = every test passed, 1 = test failures. Anything else
+        # (127 missing dep, 2-5 pytest infra, timeout) stays "no verdict" so
+        # infra breakage is not silently scored as a model failure.
+        if ec in (0, 1):
+            logger.info("[harbor] %s: no reward file; graded from test.sh exit=%d", instance_id, ec)
+            return {"reward": 1.0 if ec == 0 else 0.0, "graded_from": "exit_code"}
         logger.warning(
             "[harbor] %s: test.sh exit=%s wrote no reward file; stderr tail: %s",
             instance_id,
