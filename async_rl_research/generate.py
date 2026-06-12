@@ -364,14 +364,38 @@ async def generate(args, sample: Sample, sampling_params: dict[str, Any], evalua
 
     except asyncio.TimeoutError:
         _log_timeout_diagnostic(t0)
+        _attach_partial_timing(sample, session_id, t0)
         return _abort_result(sample, "wall_clock_timeout")
+    except asyncio.CancelledError:
+        # A stray CancelledError from inside the rollout (e.g. the Modal SDK's
+        # synchronicity bridge cancelling an in-flight .aio call on a client
+        # hiccup) is not caught by `except Exception` and would otherwise
+        # propagate through generate_and_rm_group's gather and cancel the
+        # WHOLE generate_rollout_async task, crashing the training step. A
+        # genuine external cancel (the asyncio.timeout guard converts its own
+        # to TimeoutError before this; Ray/loop teardown does not) leaves the
+        # task in a cancelling state -- re-raise only then.
+        if asyncio.current_task().cancelling():
+            raise
+        logger.error("[async_rl] %s: stray CancelledError; aborting sample", instance_id)
+        _attach_partial_timing(sample, session_id, t0)
+        return _abort_result(sample, "exception:CancelledError")
     except Exception as e:
         logger.error("[async_rl] %s: rollout failed: %s\n%s", instance_id, e, traceback.format_exc())
+        _attach_partial_timing(sample, session_id, t0)
         return _abort_result(sample, f"exception:{type(e).__name__}")
     finally:
         # Close the sid before the next train step's release_memory_occupation;
         # stragglers from this trajectory would otherwise race its idle assert.
         await state.adapter.finish_session(session_id)  # idempotent
+
+
+def _attach_partial_timing(sample: Sample, session_id: str, t0: float) -> None:
+    """On abort, keep whatever turn stats accrued -- distinguishes 'agent was
+    alive but slow' (turns accrued) from 'never dialed in' (no stats)."""
+    stats = profiling.pop_session_stats(session_id) or {}
+    stats["elapsed_at_abort"] = round(time.time() - t0, 1)
+    sample.metadata = {**(sample.metadata or {}), "timing": stats}
 
 
 def _log_timeout_diagnostic(t0: float) -> None:
