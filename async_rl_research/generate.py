@@ -224,7 +224,7 @@ class _State(metaclass=SingletonMeta):
 # ---------------------------------------------------------------------------
 # Trajectory -> Sample
 # ---------------------------------------------------------------------------
-def _start_session(state: _State, sample: Sample, md: dict[str, Any]) -> str:
+def _start_session(state: _State, sample: Sample, md: dict[str, Any], sampling_params: dict[str, Any]) -> str:
     """Register the adapter session BEFORE the agent starts.
 
     The in-sandbox agent sends ``session_id`` as its auth/bearer token so the
@@ -243,26 +243,38 @@ def _start_session(state: _State, sample: Sample, md: dict[str, Any]) -> str:
     # Runtimes must strip sampling knobs from agent requests to stay on-policy.
     state.adapter.open_session(
         session_id,
-        sampling_defaults=_sampling_params(state.args),
+        sampling_defaults=_sampling_params(state.args, sampling_params),
         max_context_tokens=state.max_context_len,
     )
     return session_id
 
 
-def _sampling_params(args) -> dict[str, Any]:
+def _sampling_params(args, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     # Kept tiny on purpose: the adapter fills the rest of its defaults. We only
     # pin the knobs that must match training. Extend as needed.
-    if args is None:
-        return {}
-    return {
-        k: v
-        for k, v in (
-            ("temperature", getattr(args, "rollout_temperature", None)),
-            ("top_p", getattr(args, "rollout_top_p", None)),
-            ("top_k", getattr(args, "rollout_top_k", None)),
-        )
-        if v is not None
-    }
+    #
+    # ``overrides`` is the sampling_params dict slime hands to generate(): on
+    # the train path it mirrors the rollout_* args, on the eval path it carries
+    # the per-dataset eval overrides (eval_config temperature/top_p/top_k), so
+    # honoring it here is what makes eval-time sampling settings take effect.
+    # Per-turn max_new_tokens deliberately stays adapter-governed.
+    params = (
+        {}
+        if args is None
+        else {
+            k: v
+            for k, v in (
+                ("temperature", getattr(args, "rollout_temperature", None)),
+                ("top_p", getattr(args, "rollout_top_p", None)),
+                ("top_k", getattr(args, "rollout_top_k", None)),
+            )
+            if v is not None
+        }
+    )
+    for k in ("temperature", "top_p", "top_k"):
+        if overrides and overrides.get(k) is not None:
+            params[k] = overrides[k]
+    return params
 
 
 def _merge_samples(
@@ -335,7 +347,7 @@ async def generate(args, sample: Sample, sampling_params: dict[str, Any], evalua
         return _abort_result(sample, f"env_dispatch_failed:{type(e).__name__}:{e}")
 
     instance_id = md["instance_id"]
-    session_id = _start_session(state, sample, md)
+    session_id = _start_session(state, sample, md, sampling_params)
     t0 = time.time()
     try:
         async with asyncio.timeout(AGENT_GENERATE_GUARD_SEC):
