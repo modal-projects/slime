@@ -1,11 +1,8 @@
 """Build a versioned eval set by subsampling converted slime datasets.
 
-An *eval set* is a directory of per-subset JSONL files drawn from
-already-converted datasets (the outputs of ``env/convert2slime/*``), plus a
-manifest pinning exactly which instances were chosen. Build it once onto the
-slime-data volume, then point the training config's inline ``eval_config``
-at the subset files. The rows are ordinary slime prompt rows, so eval drives
-the same ``runtime x env`` stack as training.
+Writes per-subset JSONL files drawn from already-converted datasets plus a
+manifest pinning the chosen instances; point the training config's inline
+``eval_config`` at the subset files.
 
 Spec YAML::
 
@@ -26,15 +23,10 @@ Usage::
 
     python -m async_rl_research.evalset spec.yaml --out-dir /data/evalsets/v0
 
-Outputs ``<out-dir>/<name>.jsonl`` per subset, ``manifest.json`` (spec +
-chosen instance ids), and ``eval_config.yaml`` (a ready ``--eval-config``
-file). It also prints the equivalent inline ``eval_config`` dict to paste
-into a training config. Paths inside the spec should be the paths as seen at
-*runtime* (e.g. ``/data/...`` on the cluster); run the builder where those
-paths resolve (a Modal shell / function with the volume mounted) so the
-harbor task-dir checks mean something. After building, oracle-check a subset:
-``ASYNC_RL_TASK_ROOT=<task_root> python -m async_rl_research.environment.harbor
-<out-dir>/<name>.jsonl --limit 3``.
+Outputs per-subset ``<name>.jsonl``, ``manifest.json``, and
+``eval_config.yaml``, and prints the inline ``eval_config`` dict. Spec paths
+must be the *runtime* paths (e.g. ``/data/...``); run the builder where they
+resolve so harbor task-dir checks mean something.
 """
 
 from __future__ import annotations
@@ -70,12 +62,8 @@ def _instance_id(row: dict[str, Any], index: int) -> str:
 
 
 def _rewrite_task_path(row: dict[str, Any], source_dir: Path, task_root: Path | None, problems: list[str]) -> None:
-    """Re-root a harbor row's relative task_path so it stays resolvable.
-
-    Converted harbor rows carry task_path relative to their converter's
-    out dir; a subsampled copy lives elsewhere, so pin the path down: relative
-    to ``task_root`` when given (matching the run's single ASYNC_RL_TASK_ROOT),
-    absolute otherwise (env/harbor accepts absolute paths as-is).
+    """Re-root a harbor row's relative task_path so it stays resolvable: pin it
+    relative to ``task_root`` when given, absolute otherwise.
     """
     md = row.get("metadata") or {}
     if md.get("task_type") != "harbor" or not md.get("task_path"):
@@ -115,7 +103,7 @@ def _build_subset(subset: dict[str, Any], out_dir: Path, task_root: Path | None,
     problems: list[str] = []
     chosen = []
     for i in keep:
-        row = json.loads(json.dumps(rows[i]))  # deep copy; never mutate the source rows
+        row = json.loads(json.dumps(rows[i]))  # deep copy
         _rewrite_task_path(row, source.parent, task_root, problems)
         chosen.append(row)
 
@@ -150,7 +138,7 @@ def main() -> None:
 
     spec = _load_spec(args.spec)
     task_root = Path(spec["task_root"]) if spec.get("task_root") else None
-    # Resolve so the paths baked into the manifest / eval_config are absolute.
+    # Resolve so manifest / eval_config paths are absolute.
     args.out_dir = args.out_dir.resolve()
     args.out_dir.mkdir(parents=True, exist_ok=True)
 

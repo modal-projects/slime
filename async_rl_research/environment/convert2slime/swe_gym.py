@@ -1,7 +1,7 @@
 """Translate SWE-Gym / SWE-Gym-Lite rows into slime prompt data.
 
 Schema pair of ``env/swe_gym.py`` (SWE rows carry no ``metadata.task_type``:
-they are the default env). The output is one JSON object per line:
+the default env). Output is one JSON object per line:
 
     {
       "prompt": "...",
@@ -16,9 +16,8 @@ they are the default env). The output is one JSON object per line:
       }
     }
 
-The only SWE-Gym-specific choices here are deriving the prebuilt image name and
-building a simple pytest-based reward command from ``test_patch`` + F2P/P2P
-tests.
+SWE-Gym-specific: derive the prebuilt image name and build a pytest reward
+command from ``test_patch`` + F2P/P2P tests.
 """
 
 from __future__ import annotations
@@ -108,8 +107,11 @@ def translate(raw: dict[str, Any]) -> dict[str, Any] | None:
     if base_commit := raw.get("base_commit"):
         metadata["pre_commands"] = [f"git checkout {base_commit} -f"]
 
+    # prompt as a single-message list, NOT a raw string: slime's Dataset asserts
+    # a list when a HF processor loads for hf_checkpoint. Harmless: the agent
+    # reads problem_statement from metadata, never sample.prompt.
     return {
-        "prompt": problem,
+        "prompt": [{"role": "user", "content": problem}],
         "label": instance_id,
         "metadata": metadata,
     }

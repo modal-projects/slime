@@ -1,22 +1,10 @@
 """SWE-Gym env: git-diff capture + clean-sandbox grading on Modal.
 
-The schema pair of ``env/convert2slime/swe_gym.py`` (see ``base.py`` for the
-convention). Each row carries a prebuilt per-instance registry image plus a
-self-contained ``eval_cmd`` (or a ``swepro`` run/parse spec), and grading is
-diff-transplant based:
-
-    boot work sandbox -> pre_commands + problem file -> agent runs ->
-    capture git diff -> CLOSE work sandbox -> boot CLEAN sandbox ->
-    re-apply pre_commands -> apply diff -> run eval_cmd.
-
-No-test-cheating guarantee: the evaluator sandbox never sees the agent's
-filesystem -- only the captured diff can affect reward. This is what
-``rollout`` owning the whole lifecycle buys: the work sandbox is torn down
-BEFORE the evaluator boots, exactly as the pre-refactor flow did.
-
-The provider backend is ``modal_sandbox.ModalSandbox``; boot concurrency and
-create-retry live there, so the evaluator sandbox is gated and retried just
-like the work sandbox.
+Schema pair of ``env/convert2slime/swe_gym.py`` (see ``base.py``). Grading is
+diff-transplant: boot work sandbox -> pre_commands + problem file -> agent runs
+-> capture git diff -> CLOSE work sandbox -> boot CLEAN sandbox -> re-apply
+pre_commands -> apply diff -> run eval_cmd. The evaluator never sees the agent's
+filesystem (only the captured diff affects reward), so tests can't be cheated.
 """
 
 from __future__ import annotations
@@ -42,11 +30,8 @@ _PATCH = "/tmp/__swe_patch__.diff"
 _PRE = "/tmp/__swe_pre__.sh"
 
 
-# Appended to the row's problem statement: with the universal prompt scaffold
-# the agent's YAML no longer carries a submission protocol, so the task
-# instruction must say what the deliverable is. Reward here is the captured
-# working-tree `git diff`, hence: edit in place, don't commit, no patch files
-# (the builtin swebench prompt's patch.txt ritual was never what got graded).
+# Appended to the problem statement: the universal scaffold has no submission
+# protocol, so spell out the deliverable (reward is the working-tree `git diff`).
 _DELIVERABLE_SUFFIX = """
 
 ## Deliverable
@@ -62,9 +47,8 @@ Fix the issue by editing the repository's source files in place.
 
 class SweGymEnv(RolloutEnv):
     name = "swe_gym"
-    # No agent_config default: the runtime's universal prompt scaffold is the
-    # default; the SWE deliverable contract is _DELIVERABLE_SUFFIX above.
-    # Per-row builtin override via metadata.agent_config; global via MSWE_CONFIG.
+    # No agent_config default: the universal scaffold + _DELIVERABLE_SUFFIX
+    # apply. Override per-row via metadata.agent_config; globally via MSWE_CONFIG.
 
     def normalize_metadata(self, sample) -> dict[str, Any]:
         m = sample.metadata or {}
@@ -101,7 +85,7 @@ class SweGymEnv(RolloutEnv):
             with timer.phase("prep"):
                 await self._prepare_workspace(sb, md)
             with timer.phase("agent"):
-                await runtime.run_agent(
+                agent_run = await runtime.run_agent(
                     sb,
                     md=md,
                     session_id=session_id,
@@ -119,13 +103,14 @@ class SweGymEnv(RolloutEnv):
         return RewardResult(
             reward=float(reward),
             is_solved=bool(is_solved),
-            # diff_bytes/diff_files are SIZE metrics only (len + header count);
-            # the patch text itself is never stored.
+            # diff_bytes/diff_files are SIZE metrics; patch text never stored.
             extra={
                 "applied_cleanly": bool(applied),
                 "diff_bytes": len(diff_text),
                 "diff_files": diff_text.count("diff --git"),
                 "timing": timer.as_dict(),
+                "agent_exit_code": agent_run.exit_code,
+                "agent_tail": agent_run.tail,
             },
         )
 
@@ -135,13 +120,10 @@ class SweGymEnv(RolloutEnv):
     async def _prepare_workspace(self, sb: Sandbox, md: dict[str, Any]) -> None:
         """Bring a freshly booted work sandbox to the task's start state.
 
-        ``pre_commands`` must run in BOTH the work and eval sandboxes (see
-        ``_apply_pre_commands``): they are typically ``git checkout
-        <base_sha> -f``, and skipping either side makes the model's diff
-        context mismatch the eval base -> apply failures.
+        ``pre_commands`` (typically ``git checkout <base_sha> -f``) run in BOTH
+        work and eval sandboxes, else the diff context mismatches the eval base.
         """
-        # git operations inside the sandbox (pre_commands, the later diff
-        # capture) need the repo marked safe for root.
+        # In-sandbox git ops need the repo marked safe for root.
         await sb.exec("git config --system --add safe.directory '*'", check=False, timeout=60)
         if md["pre_commands"]:
             await _apply_pre_commands(sb, md["workdir"], md["pre_commands"])
@@ -151,11 +133,8 @@ class SweGymEnv(RolloutEnv):
     # Diff capture
     # ------------------------------------------------------------------
     async def _git_diff(self, sb: Sandbox, workdir: str, *, exclude: tuple[str, ...] = ()) -> str:
-        """Capture the model's edits as a patch, excluding scratch files.
-
-        ``git add -N .`` stages intent-to-add for new files so they show up in
-        the diff. ``exclude`` is the active runtime's ``diff_exclude_all``;
-        the task-layer ``PROBLEM_FILE`` is always excluded here.
+        """Capture the model's edits as a patch (``git add -N .`` so new files
+        appear), excluding ``PROBLEM_FILE`` + the runtime's ``diff_exclude_all``.
         """
         excludes = " ".join(f"':(exclude){f}'" for f in (PROBLEM_FILE, *exclude))
         cmd = f"cd {shlex.quote(workdir)} && git add -N . && git diff -- . {excludes}"
@@ -216,15 +195,13 @@ async def _apply_diff(sb: Sandbox, workdir: str, diff_text: str) -> bool:
 
 
 async def _run_eval_cmd(sb: Sandbox, workdir: str, cmd: str, timeout: int) -> tuple[float, bool]:
-    # What SWE-Gym-Lite emits: a self-contained command whose exit code is the
-    # verdict (applies the test_patch, runs pytest on F2P/P2P).
+    # SWE-Gym-Lite's self-contained command whose exit code is the verdict.
     ec, _, _ = await sb.exec(f"cd {shlex.quote(workdir)} && {cmd}", check=False, timeout=timeout)
     return (1.0 if ec == 0 else 0.0), ec == 0
 
 
 async def _run_swepro(sb: Sandbox, workdir: str, swepro: dict, timeout: int) -> tuple[float, bool]:
-    # Forward-compat pass-through for swepro-style grading (SWE-Gym-Lite data
-    # carries none, but a richer dataset can supply a run/parse script pair).
+    # Forward-compat pass-through for swepro-style run/parse grading.
     swepro_dir = "/tmp/swepro_eval"
     await sb.exec(f"mkdir -p {swepro_dir} && chmod 777 {swepro_dir}", check=True, timeout=30)
     for key, dst in (("run_script_path", "run_script.sh"), ("parser_script_path", "parser.py")):

@@ -1,36 +1,21 @@
 """Materialize a harbor dataset as slime prompt data + local task dirs.
 
-Schema pair of ``env/harbor.py`` (rows carry ``metadata.task_type:
-"harbor"``). This converter is the ONLY writer of that schema: it parses each
-task's ``task.toml`` offline (plain ``tomllib`` -- the ``harbor`` package is
-needed only for ``--registry`` downloads) and bakes everything the rollout
-needs into ``metadata``, so the rollout runtime never reads harbor config.
-
-Output layout (put ``--out-dir`` on the slime-data volume)::
-
-    <out-dir>/<name>.jsonl          slime prompt data
-    <out-dir>/tasks/<instance_id>/  copied harbor task dirs (environment/ for
-                                    Dockerfile builds, tests/ + steps/ for
-                                    verification, solution/ for oracle checks)
-
-Rows reference tasks via ``metadata.task_path`` RELATIVE to the out dir;
-export ``ASYNC_RL_TASK_ROOT=<out-dir>`` for the rollout / oracle.
+Schema pair of ``env/harbor.py`` and the ONLY writer of that schema: parses
+each ``task.toml`` offline and bakes everything into ``metadata`` so the rollout
+never reads harbor config. Output goes under ``--out-dir`` (on the slime-data
+volume): ``<name>.jsonl`` + ``tasks/<instance_id>/``, referenced via
+``metadata.task_path`` relative to it (export ``ASYNC_RL_TASK_ROOT=<out-dir>``).
 
 Sources::
 
-    # a directory whose subdirectories are harbor tasks (e.g. a
-    # harbor-datasets checkout subtree, or an adapter's generated tasks)
     python -m async_rl_research.environment.convert2slime.harbor \
         --tasks-dir ~/harbor-datasets/datasets/usaco --out-dir data/usaco
-
-    # straight from a harbor registry (requires `pip install harbor`)
     python -m async_rl_research.environment.convert2slime.harbor \
         --registry ~/harbor/registry.json --dataset usaco --out-dir data/usaco
 
-v1 scope (anything else is skipped + logged): linux, single-container
-Dockerfile or prebuilt docker_image, shared-environment verification, no
-GPU/TPU, no MCP servers. Multi-step tasks ARE supported (per-step
-instruction/tests/min_reward; see env/harbor.py for reward aggregation).
+v1 scope (else skipped + logged): linux, single-container Dockerfile or prebuilt
+docker_image, shared-environment verification, no GPU/TPU, no MCP. Multi-step
+tasks are supported.
 """
 
 from __future__ import annotations
@@ -59,8 +44,8 @@ def _parse_dockerfile_workdir(dockerfile: Path) -> str | None:
     if not matches:
         return None
     last = matches[-1].strip().strip('"').strip("'")
-    # Variable or relative WORKDIRs can't be resolved statically; let the
-    # rollout detect the cwd from the booted sandbox instead.
+    # Variable/relative WORKDIRs can't be resolved statically; let the rollout
+    # detect cwd from the sandbox.
     return last if last.startswith("/") and "$" not in last else None
 
 
@@ -91,8 +76,7 @@ def _steps_md(cfg: dict[str, Any], task_dir: Path) -> list[dict[str, Any]]:
         if not name:
             raise SkipTask("unnamed step")
         step_dir = task_dir / "steps" / name
-        # Harbor falls back to the shared top-level tests/ when a step ships
-        # no tests of its own.
+        # Fall back to the shared top-level tests/ when a step ships none.
         tests_path = f"steps/{name}/tests" if (step_dir / "tests" / "test.sh").is_file() else "tests"
         if not (task_dir / tests_path / "test.sh").is_file():
             raise SkipTask(f"step {name!r} has no tests/test.sh (step or shared)")
@@ -111,11 +95,10 @@ def _steps_md(cfg: dict[str, Any], task_dir: Path) -> list[dict[str, Any]]:
 
 
 def translate_task(task_dir: Path, *, dataset: str | None = None) -> dict[str, Any]:
-    """One harbor task dir -> one slime row (metadata.task_path filled by caller).
+    """One harbor task dir -> one slime row (task_path filled by caller).
 
-    ``dataset`` qualifies tasks whose task.toml carries no ``[task].name``
-    (harbor-datasets tasks are often bare numeric dirs like ``usaco/84``).
-    Raises ``SkipTask`` for tasks outside v1 scope.
+    ``dataset`` qualifies tasks whose task.toml has no ``[task].name``. Raises
+    ``SkipTask`` for tasks outside v1 scope.
     """
     config_path = task_dir / "task.toml"
     if not config_path.is_file():
@@ -130,8 +113,8 @@ def translate_task(task_dir: Path, *, dataset: str | None = None) -> dict[str, A
     if env_cfg.get("mcp_servers"):
         raise SkipTask("requires MCP servers")
     if env_cfg.get("network_mode") in ("no-network", "allowlist"):
-        # The Modal backend doesn't enforce per-phase network policies yet;
-        # running these would silently grant more network than the task allows.
+        # Modal can't enforce per-phase network policies yet, so running these
+        # would grant more network than the task allows.
         raise SkipTask(f"network_mode={env_cfg['network_mode']}")
 
     docker_image = env_cfg.get("docker_image")
@@ -172,6 +155,7 @@ def translate_task(task_dir: Path, *, dataset: str | None = None) -> dict[str, A
         "workdir": workdir,
         "problem_statement": instruction,
         "agent_timeout_sec": (cfg.get("agent") or {}).get("timeout_sec"),
+        "build_timeout_sec": env_cfg.get("build_timeout_sec"),
         "verifier": _verifier_md(verifier_cfg),
         "steps": steps_md or None,
         "reward_strategy": cfg.get("multi_step_reward_strategy"),
@@ -180,7 +164,10 @@ def translate_task(task_dir: Path, *, dataset: str | None = None) -> dict[str, A
     }
     metadata = {k: v for k, v in metadata.items() if v is not None}
 
-    return {"prompt": instruction, "label": task_name, "metadata": metadata}
+    # prompt as a single-message list, NOT a raw string: slime's Dataset asserts
+    # a list when a HF processor loads for hf_checkpoint. Harmless: the agent
+    # reads metadata["problem_statement"], never sample.prompt.
+    return {"prompt": [{"role": "user", "content": instruction}], "label": task_name, "metadata": metadata}
 
 
 def convert(
@@ -220,9 +207,8 @@ def convert(
 def _discover_task_dirs(tasks_dir: Path) -> list[Path]:
     """Direct subdirectories holding a task.toml, sorted for determinism.
 
-    Falls back to treating ``tasks_dir`` itself as a single task only when no
-    subdirectory tasks exist: some published datasets (e.g. harbor-datasets'
-    openthoughts-tblite) ship a stray template task.toml at the dataset root.
+    Falls back to ``tasks_dir`` as a single task only when no subdir tasks exist
+    (some datasets ship a stray template task.toml at the root).
     """
     subdirs = sorted(p for p in tasks_dir.iterdir() if (p / "task.toml").is_file())
     if subdirs:
@@ -239,7 +225,7 @@ def _discover_task_dirs(tasks_dir: Path) -> list[Path]:
 
 
 def _download_from_registry(registry_spec: str, dataset: str, version: str | None, download_dir: Path) -> list[Path]:
-    """Fetch a dataset's tasks via the harbor package (optional dependency)."""
+    """Fetch a dataset's tasks via the harbor package (optional dep)."""
     try:
         from harbor.models.registry import Registry
         from harbor.tasks.client import TaskClient

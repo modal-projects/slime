@@ -63,6 +63,8 @@ Three pieces, in order:
    entrypoint).
 
 Per-dataset eval sampling overrides (`temperature`, `top_p`, `top_k`) flow
-through `generate.py::_sampling_params` into the adapter's session defaults;
-per-turn `max_new_tokens` stays adapter-governed regardless of
-`eval_max_response_len`.
+through `generate.py::_sampling_params` into the adapter's session defaults,
+along with `max_new_tokens` (the per-turn generation cap). slime sets it to
+`rollout_max_response_len` for train and `eval_max_response_len` for eval, so
+that value bounds a single model turn, then the adapter further clamps it to the
+remaining `rollout_max_context_len` budget.

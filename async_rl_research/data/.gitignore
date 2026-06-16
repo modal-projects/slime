@@ -1,6 +1,0 @@
-# Generated datasets are reproducible via env/convert2slime/*.py; don't commit them.
-# Keep only the small hand-written example.
-*.jsonl
-!example.jsonl
-# materialized harbor datasets (tasks/ copies + downloads)
-*/

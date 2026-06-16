@@ -1,74 +1,30 @@
 """Generic agentic-RL rollout entrypoint for slime (design A: HTTP adapter).
 
-Wire-up::
+Wire-up: ``--custom-generate-function-path async_rl_research.generate.generate``.
 
-    --custom-generate-function-path async_rl_research.generate.generate
-
-This is the **agent- and task-agnostic** per-sample orchestrator. It owns the
-parts that are identical for any in-sandbox agent on any task family, and
-delegates everything else to two orthogonal collaborators:
-
-    generate.py  (this file)   adapter/HTTP lifecycle + session management +
-                               trajectory merge + abort/timeout isolation.
-    agent/base.py              the AgentRuntime contract + shared launch and
-                               provisioning machinery + the runtime registry
-                               (load_runtime). One subclass per agent
-                               framework (default: mini_swe_agent).
-    env/base.py                the RolloutEnv contract + the env registry
-                               (load_env). One subclass per task family --
-                               row schema, sandbox boot/prep, agent-leg
-                               sequencing, grading. env/swe_gym.py grades a
-                               captured git diff in a CLEAN sandbox;
-                               env/harbor.py verifies harbor tasks in-place
-                               (multi-step aware). Rows pick their env via
-                               metadata.task_type (absent -> swe_gym).
-
-Topology (design A -- "in-sandbox subprocess + HTTP adapter"):
-
-    host generate():
-      1. _State (once/worker): build the runtime's adapter (an aiohttp app that
-         speaks the agent's wire API and records exact SGLang tokens) and serve
-         it on a bg thread; expose adapter_url = http://$SLIME_HEAD_HOST:$PORT.
-      2. open an adapter session keyed by session_id.
-      3. env.rollout(): boot the task sandbox, prep the workspace, let the
-         runtime launch the agent inside it for each task step. The agent
-         dials BACK to adapter_url for every model call; the adapter renders
-         messages -> input_ids, calls SGLang /generate (return_logprob), and
-         records (prompt_ids, output_ids, logprobs). The env grades the
-         result into a RewardResult.
-      4. finish_session() drains the recorded token segments; merge -> Sample.
-
-Reward is computed inline (env.rollout) and written onto the sample, so
-slime's default reward-model step is skipped (generate_and_rm only calls
-async_rm when sample.reward is None).
-
-The full contracts live on ``agent.base.AgentRuntime`` and
-``env.base.RolloutEnv`` -- single sources of truth. This module only relies
-on: ``runtime.adapter_cls`` (constructed as adapter_cls(tokenizer=,
-sglang_url=, tool_parser=, reasoning_parser=)), ``env.normalize_metadata``,
-and ``env.rollout``.
+Agent- and task-agnostic per-sample orchestrator. Owns the parts identical for
+any in-sandbox agent on any task family (adapter/HTTP lifecycle, session
+management, trajectory merge, abort/timeout isolation) and delegates the rest to
+a runtime (``agent/base.py``) and an env (``env/base.py``, picked per row by
+metadata.task_type). Per sample: ``_State`` serves the runtime's adapter on a bg
+thread, a session is opened keyed by session_id, ``env.rollout`` runs the agent
+(which dials back to the adapter per model call), and the recorded token
+segments merge into Sample(s). Reward is computed inline so slime's reward-model
+step is skipped.
 
 Env knobs
 ---------
     SLIME_HEAD_HOST        public IP sandboxes use to reach the adapter
                            (REQUIRED unless MODAL_EXPOSE_ADAPTER=1)
     MODAL_EXPOSE_ADAPTER   1 to publish the adapter through a modal.forward
-                           tunnel (required on a Modal cluster: sandboxes are
-                           network-isolated and can only dial a public URL)
+                           tunnel (required on a Modal cluster)
     SHIM_BIND_HOST         0.0.0.0   adapter bind host on the head node
     SHIM_PORT              18002     adapter bind port
-    ASYNC_RL_AGENT_RUNTIME which agent runtime to use: a registry short name
-                           ("mini-swe"), "module:Class", or a module path
-                           exposing RUNTIME (default "mini-swe"; see
-                           agent.base.load_runtime)
+    ASYNC_RL_AGENT_RUNTIME agent runtime spec (default "mini-swe")
     ASYNC_RL_AGENT_DRIVER  legacy alias for ASYNC_RL_AGENT_RUNTIME
-    ASYNC_RL_TASK_ROOT     root dir that relative metadata.task_path values
-                           resolve against (harbor env; the converter's
-                           --out-dir on the slime-data volume)
-    AGENT_TIME_BUDGET_SEC  1800      total agent wallclock budget per sample
-                                     (multi-step episodes share it)
-    AGENT_EVAL_TIMEOUT_SEC 600       wallclock cap per grading command
-    AGENT_GENERATE_GUARD_SEC         full generate() guard; default budget+eval+180
+    ASYNC_RL_TASK_ROOT     root dir relative metadata.task_path resolve against
+    AGENT_TIME_BUDGET_SEC  1800  total agent wallclock budget per sample
+    AGENT_EVAL_TIMEOUT_SEC 600   wallclock cap per grading command
 """
 
 from __future__ import annotations
@@ -90,32 +46,24 @@ from .profiles import profiling
 from .agent.base import AgentRuntime, load_runtime
 from .aiohttp_threaded import run_app_in_thread
 from .environment.base import EnvMetadataError, RewardResult, load_env
+from .modal_sandbox import SandboxBootTimeout
 
 logger = logging.getLogger(__name__)
 
 
 AGENT_TIME_BUDGET_SEC = int(os.environ.get("AGENT_TIME_BUDGET_SEC", "1800"))
 AGENT_EVAL_TIMEOUT_SEC = int(os.environ.get("AGENT_EVAL_TIMEOUT_SEC", "600"))
-# Wall-clock guard for the entire generate() call. When exceeded, the in-flight
-# sample is aborted (`wall_clock_timeout`) and the rest of the rollout
-# continues -- isolates one hung trajectory from the whole training step.
-AGENT_GENERATE_GUARD_SEC = int(os.environ.get("AGENT_GENERATE_GUARD_SEC", "0") or 0) or (
-    AGENT_TIME_BUDGET_SEC + AGENT_EVAL_TIMEOUT_SEC + 180
-)
 SHIM_BIND_HOST = os.environ.get("SHIM_BIND_HOST", "0.0.0.0")
 SHIM_PORT = int(os.environ.get("SHIM_PORT", "18002"))
-# On a Modal cluster the head is itself a Modal container and the sandboxes are
-# network-isolated (no i6pn/cluster routing), so they can only reach the
-# adapter via a public modal.forward tunnel rather than a private cluster IP.
+# On a Modal cluster sandboxes are network-isolated and reach the adapter only
+# via a public modal.forward tunnel.
 MODAL_EXPOSE_ADAPTER = os.environ.get("MODAL_EXPOSE_ADAPTER", "0").strip().lower() in ("1", "true", "yes")
 
 
 def _load_runtime(args) -> AgentRuntime:
     """Resolve + instantiate the agent runtime (env > arg > registry default).
 
-    Validation is eager (load_runtime / AgentRuntime.__init_subclass__), so a
-    misdeclared runtime fails the worker boot loudly instead of
-    AttributeError-ing mid-sample.
+    Validation is eager so a misdeclared runtime fails the worker boot loudly.
     """
     spec = (
         os.environ.get("ASYNC_RL_AGENT_RUNTIME")
@@ -126,20 +74,14 @@ def _load_runtime(args) -> AgentRuntime:
     return load_runtime(spec)
 
 
-# ---------------------------------------------------------------------------
-# Singleton: tokenizer + runtime-selected adapter + background HTTP server.
-# SingletonMeta keys per class, so there is exactly one runtime + adapter +
-# server per rollout worker process; trajectories stay isolated by session_id.
-# ---------------------------------------------------------------------------
+# Singleton per worker process: tokenizer + adapter + bg HTTP server.
 class _State(metaclass=SingletonMeta):
     def __init__(self, args) -> None:
         self.args = args
         self.runtime = _load_runtime(args)
         self.tokenizer = load_tokenizer(args.hf_checkpoint, trust_remote_code=True)
         self.max_context_len = int(getattr(args, "rollout_max_context_len", 0) or 0)
-        # Adapter reuses the SGLang parsers configured for the served model so
-        # tool-call bash / reasoning are parsed correctly (e.g.
-        # --sglang-tool-call-parser qwen3_coder, --sglang-reasoning-parser qwen3).
+        # Reuse the served model's SGLang parsers so tool-call / reasoning parse.
         self.tool_parser = getattr(args, "sglang_tool_call_parser", None) or None
         self.reasoning_parser = getattr(args, "sglang_reasoning_parser", None) or None
 
@@ -161,13 +103,10 @@ class _State(metaclass=SingletonMeta):
             tool_parser=self.tool_parser,
             reasoning_parser=self.reasoning_parser,
         )
-        # Per-turn timing by session (bearer token == session_id); must be
-        # installed before the app starts. Feeds metadata["timing"] below.
+        # Per-turn timing by session; install before the app starts.
         profiling.install(self.adapter.app)
-        # handler_cancellation=True so a client disconnect cancels the handler
-        # coroutine, arming the adapter's fire-and-forget /abort_request. Without
-        # it a cancelled client leaves an inflight sglang /generate that races
-        # the next release_memory_occupation and trips sglang's idle assertion.
+        # handler_cancellation=True: a client disconnect cancels the handler and
+        # arms /abort_request, else an inflight /generate trips sglang's idle assert.
         self.app_handle = run_app_in_thread(
             self.adapter.app,
             host=SHIM_BIND_HOST,
@@ -175,14 +114,9 @@ class _State(metaclass=SingletonMeta):
             thread_name="agent-adapter",
             runner_kwargs={"handler_cancellation": True},
         )
-        # Everything past the bind can still fail (e.g. modal.forward). The
-        # server thread is a daemon that holds SHIM_PORT for the process
-        # lifetime, and SingletonMeta only caches on a clean __init__, so a
-        # failure here would orphan the thread and make every later _State()
-        # collide on the port. Tear the server down on any failure so the bind
-        # is releasable and the next sample can retry.
+        # Work past the bind can still fail (e.g. modal.forward); tear down so
+        # the orphaned daemon thread doesn't hold SHIM_PORT against retries.
         try:
-            # Base URL (no /v1). The runtime appends whatever its wire API needs.
             self._tunnel_cm = None
             self.adapter_url = self._resolve_adapter_url(public_host)
         except BaseException:
@@ -200,21 +134,16 @@ class _State(metaclass=SingletonMeta):
     def _resolve_adapter_url(self, public_host: str | None) -> str:
         """Pick the URL the in-sandbox agent dials back on.
 
-        On a Modal cluster the adapter must be reached through a per-process
-        ``modal.forward`` tunnel (the head is a Modal container; sandboxes are
-        network-isolated). Each rollout-worker process is its own ``_State``
-        singleton, so it opens its OWN tunnel -- a single static env can't cover
-        multiple data-parallel workers. The tunnel context is held on ``self``
-        for the process lifetime; litellm speaks HTTPS, so the encrypted
-        ``https://<random>.modal.host`` URL needs no port juggling.
+        On a Modal cluster: a per-process ``modal.forward`` tunnel (one static
+        env can't cover multiple data-parallel workers), held on ``self`` for
+        the process lifetime.
         """
         if not MODAL_EXPOSE_ADAPTER:
             return f"http://{public_host}:{self.app_handle.port}"
 
         import modal
 
-        # Blocking context manager (we're in sync __init__); never exited --
-        # the process owns the tunnel until it dies.
+        # Blocking CM, never exited -- the process owns the tunnel until death.
         self._tunnel_cm = modal.forward(self.app_handle.port)
         tunnel = self._tunnel_cm.__enter__()
         logger.info("[async_rl] modal.forward tunnel for adapter port %d -> %s", self.app_handle.port, tunnel.url)
@@ -225,11 +154,8 @@ class _State(metaclass=SingletonMeta):
 # Trajectory -> Sample
 # ---------------------------------------------------------------------------
 def _start_session(state: _State, sample: Sample, md: dict[str, Any], sampling_params: dict[str, Any]) -> str:
-    """Register the adapter session BEFORE the agent starts.
-
-    The in-sandbox agent sends ``session_id`` as its auth/bearer token so the
-    adapter groups all of its turns under one chain.
-    """
+    """Register the adapter session BEFORE the agent starts (it sends
+    ``session_id`` as its bearer token to group its turns)."""
     if sample.session_id:
         session_id = sample.session_id
     elif sample.index is not None and sample.group_index is not None:
@@ -237,10 +163,8 @@ def _start_session(state: _State, sample: Sample, md: dict[str, Any], sampling_p
     else:
         session_id = f"agent-{md['instance_id']}-{secrets.token_hex(8)}"
     sample.session_id = session_id
-    # sampling_defaults are the rollout's baseline, but the adapter applies the
-    # request body OVER them (adapters/common._sampling_params): an agent that
-    # sends its own temperature/top_p would silently override training's.
-    # Runtimes must strip sampling knobs from agent requests to stay on-policy.
+    # Adapter applies the request body OVER sampling_defaults; runtimes must
+    # strip the agent's own sampling knobs to stay on-policy.
     state.adapter.open_session(
         session_id,
         sampling_defaults=_sampling_params(state.args, sampling_params),
@@ -250,14 +174,14 @@ def _start_session(state: _State, sample: Sample, md: dict[str, Any], sampling_p
 
 
 def _sampling_params(args, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
-    # Kept tiny on purpose: the adapter fills the rest of its defaults. We only
-    # pin the knobs that must match training. Extend as needed.
-    #
-    # ``overrides`` is the sampling_params dict slime hands to generate(): on
-    # the train path it mirrors the rollout_* args, on the eval path it carries
-    # the per-dataset eval overrides (eval_config temperature/top_p/top_k), so
-    # honoring it here is what makes eval-time sampling settings take effect.
-    # Per-turn max_new_tokens deliberately stays adapter-governed.
+    # Pin the knobs that must match training; the adapter fills the rest. These
+    # become the session defaults the adapter applies UNDER each request.
+    # ``overrides`` (slime's sampling_params) carries the per-call values:
+    # the eval temperature/top_p AND ``max_new_tokens`` -- which slime sets to
+    # rollout_max_response_len for train and eval_max_response_len for eval.
+    # Forwarding it makes that the adapter's per-turn generation cap (still
+    # further clamped to the remaining rollout_max_context_len budget); dropping
+    # it would silently fall back to the adapter's hardcoded per-turn default.
     params = (
         {}
         if args is None
@@ -267,11 +191,12 @@ def _sampling_params(args, overrides: dict[str, Any] | None = None) -> dict[str,
                 ("temperature", getattr(args, "rollout_temperature", None)),
                 ("top_p", getattr(args, "rollout_top_p", None)),
                 ("top_k", getattr(args, "rollout_top_k", None)),
+                ("max_new_tokens", getattr(args, "rollout_max_response_len", None)),
             )
             if v is not None
         }
     )
-    for k in ("temperature", "top_p", "top_k"):
+    for k in ("temperature", "top_p", "top_k", "max_new_tokens"):
         if overrides and overrides.get(k) is not None:
             params[k] = overrides[k]
     return params
@@ -288,22 +213,23 @@ def _merge_samples(
 ):
     """Fan TokenSegments + reward out into Sample(s).
 
-    A single linear agent chain yields one ("final") segment -> K=1 -> one
-    Sample. Routing through ``fan_out_sample_segments`` (which handles K==1)
-    keeps it correct if an agent later adds context compaction ("wipe"
-    segments): reward is split reward/K and siblings share ``rollout_id`` so
-    the per-rollout loss reducer counts the trajectory once.
+    A linear chain yields one Sample; routing through ``fan_out_sample_segments``
+    stays correct if an agent later adds context-compaction "wipe" segments
+    (reward split reward/K, siblings share ``rollout_id``).
     """
     if not segments:
-        return _abort_result(sample, "adapter_session_empty")
+        # Carry the agent's exit code + failure tail (set by the env in
+        # reward_result.extra) onto the abort, so a zero-turn rollout self-
+        # explains in the dump instead of needing tail-only Modal logs.
+        diag = {k: reward_result.extra[k] for k in ("agent_exit_code", "agent_tail") if k in reward_result.extra}
+        return _abort_result(sample, "adapter_session_empty", extra=diag)
 
     trajectory_metadata = {
         **(sample.metadata or {}),
         "instance_id": instance_id,
         "is_solved": reward_result.is_solved,
         "elapsed_sec": elapsed_sec,
-        # Env-specific diagnostics (swe_gym: applied_cleanly; harbor: per-step
-        # rewards). Keys are env-namespaced or unambiguous by construction.
+        # Env-specific diagnostics (swe_gym: applied_cleanly; harbor: per-step).
         **reward_result.extra,
     }
     fanned = fan_out_sample_segments(
@@ -318,7 +244,7 @@ def _merge_samples(
         reward_result.is_solved,
         elapsed_sec,
         len(fanned),
-        {k: v for k, v in reward_result.extra.items() if not isinstance(v, (list, dict))},
+        {k: v for k, v in reward_result.extra.items() if k != "agent_tail" and not isinstance(v, (list, dict))},
     )
     return fanned
 
@@ -329,15 +255,11 @@ def _merge_samples(
 async def generate(args, sample: Sample, sampling_params: dict[str, Any], evaluation: bool = False):
     """Per-sample agent rollout with a wall-clock guard.
 
-    Accepts ``evaluation`` (slime passes it when present in the signature) but
-    treats train and eval identically -- running the agent + grading the
-    result is what eval wants too.
+    Treats train and eval identically (run the agent + grade).
     """
     state = _State(args)
-    # Row -> env dispatch. load_env imports the env module lazily, so this
-    # module stays importable on nodes that never boot a sandbox. A bad row
-    # (unknown task_type, unusable metadata) aborts THAT sample; systemic
-    # failures (an env module that doesn't import) still raise loudly.
+    # Row -> env dispatch (lazy import). A bad row aborts THAT sample; an env
+    # module that won't import still raises loudly.
     try:
         env = load_env((sample.metadata or {}).get("task_type"))
         md = env.normalize_metadata(sample)
@@ -347,46 +269,46 @@ async def generate(args, sample: Sample, sampling_params: dict[str, Any], evalua
         return _abort_result(sample, f"env_dispatch_failed:{type(e).__name__}:{e}")
 
     instance_id = md["instance_id"]
+    # Enforced budgets (env defaults, or task.toml under override): recorded up
+    # front so the dump self-reports them even when the sample aborts.
+    sample.metadata = {
+        **(sample.metadata or {}),
+        "budgets": env.effective_budgets(
+            md, agent_time_budget_sec=AGENT_TIME_BUDGET_SEC, eval_timeout_sec=AGENT_EVAL_TIMEOUT_SEC
+        ),
+    }
     session_id = _start_session(state, sample, md, sampling_params)
     t0 = time.time()
     try:
-        async with asyncio.timeout(AGENT_GENERATE_GUARD_SEC):
-            reward_result: RewardResult = await env.rollout(
-                md,
-                runtime=state.runtime,
-                session_id=session_id,
-                adapter_url=state.adapter_url,
-                agent_time_budget_sec=AGENT_TIME_BUDGET_SEC,
-                eval_timeout_sec=AGENT_EVAL_TIMEOUT_SEC,
-            )
-            # Fold the adapter's per-turn stats into the env's phase timing
-            # (one "timing" dict per sample -> dumps -> profile.py).
-            turn_stats = profiling.pop_session_stats(session_id)
-            if turn_stats:
-                reward_result.extra.setdefault("timing", {}).update(turn_stats)
-            segments = await state.adapter.finish_session(session_id)
-            return _merge_samples(
-                sample=sample,
-                state=state,
-                segments=segments,
-                reward_result=reward_result,
-                elapsed_sec=time.time() - t0,
-                instance_id=instance_id,
-            )
+        reward_result: RewardResult = await env.rollout(
+            md,
+            runtime=state.runtime,
+            session_id=session_id,
+            adapter_url=state.adapter_url,
+            agent_time_budget_sec=AGENT_TIME_BUDGET_SEC,
+            eval_timeout_sec=AGENT_EVAL_TIMEOUT_SEC,
+        )
+        # Fold adapter per-turn stats into the env's phase timing.
+        turn_stats = profiling.pop_session_stats(session_id)
+        if turn_stats:
+            reward_result.extra.setdefault("timing", {}).update(turn_stats)
+        segments = await state.adapter.finish_session(session_id)
+        return _merge_samples(
+            sample=sample,
+            state=state,
+            segments=segments,
+            reward_result=reward_result,
+            elapsed_sec=time.time() - t0,
+            instance_id=instance_id,
+        )
 
-    except asyncio.TimeoutError:
-        _log_timeout_diagnostic(t0)
+    except SandboxBootTimeout as e:
         _attach_partial_timing(sample, session_id, t0)
-        return _abort_result(sample, "wall_clock_timeout")
+        return _abort_result(sample, f"boot_timeout:{e.timeout_sec}s")
     except asyncio.CancelledError:
-        # A stray CancelledError from inside the rollout (e.g. the Modal SDK's
-        # synchronicity bridge cancelling an in-flight .aio call on a client
-        # hiccup) is not caught by `except Exception` and would otherwise
-        # propagate through generate_and_rm_group's gather and cancel the
-        # WHOLE generate_rollout_async task, crashing the training step. A
-        # genuine external cancel (the asyncio.timeout guard converts its own
-        # to TimeoutError before this; Ray/loop teardown does not) leaves the
-        # task in a cancelling state -- re-raise only then.
+        # A stray CancelledError from inside the rollout (e.g. Modal's
+        # synchronicity bridge) would crash the whole training step. Only a
+        # genuine external cancel leaves the task cancelling -- re-raise then.
         if asyncio.current_task().cancelling():
             raise
         logger.error("[async_rl] %s: stray CancelledError; aborting sample", instance_id)
@@ -397,61 +319,37 @@ async def generate(args, sample: Sample, sampling_params: dict[str, Any], evalua
         _attach_partial_timing(sample, session_id, t0)
         return _abort_result(sample, f"exception:{type(e).__name__}")
     finally:
-        # Close the sid before the next train step's release_memory_occupation;
-        # stragglers from this trajectory would otherwise race its idle assert.
+        # Close the sid before the next step's release_memory_occupation, else
+        # stragglers race its idle assert.
         await state.adapter.finish_session(session_id)  # idempotent
 
 
 def _attach_partial_timing(sample: Sample, session_id: str, t0: float) -> None:
-    """On abort, keep whatever turn stats accrued -- distinguishes 'agent was
-    alive but slow' (turns accrued) from 'never dialed in' (no stats)."""
+    """On abort, keep accrued turn stats (distinguishes 'alive but slow' from
+    'never dialed in')."""
     stats = profiling.pop_session_stats(session_id) or {}
     stats["elapsed_at_abort"] = round(time.time() - t0, 1)
     sample.metadata = {**(sample.metadata or {}), "timing": stats}
 
 
-def _log_timeout_diagnostic(t0: float) -> None:
-    """Dump pending-task names when the wall-clock guard fires. Never crashes."""
-    try:
-        elapsed = time.time() - t0
-        pending = [t for t in asyncio.all_tasks() if not t.done()]
-        stuck = []
-        for t in pending[:5]:
-            coro = getattr(t, "_coro", None)
-            stuck.append(getattr(coro, "__qualname__", repr(coro)))
-        logger.warning(
-            "[async_rl] generate() wall_clock_timeout after %.1fs (guard=%ds); %d tasks pending; stuck: %s",
-            elapsed,
-            AGENT_GENERATE_GUARD_SEC,
-            len(pending),
-            stuck,
-        )
-    except Exception:  # pragma: no cover
-        pass
-
-
-def _abort(sample: Sample, reason: str) -> Sample:
+def _abort(sample: Sample, reason: str, extra: dict[str, Any] | None = None) -> Sample:
     sample.tokens = [0, 0]
     sample.response = ""
     sample.response_length = 1
     sample.loss_mask = [0]
-    # Per-token fields must stay shape-consistent with response_length: when
-    # any sample in the batch carries rollout_log_probs, the train actor
-    # slices it for EVERY sample (actor._get_rollout_data), and a None here
-    # crashes the whole train step. loss_mask is 0 so the value never trains.
+    # Shape-consistent with response_length: the train actor slices
+    # rollout_log_probs for every sample, so a None here crashes the step.
     sample.rollout_log_probs = [0.0]
     sample.reward = 0.0
-    # Mirror fan_out_sample_segments' convention (rollout_id = sample.index):
-    # build_dp_schedule groups samples by rollout_id, so a None here collapses
-    # every aborted sample in the batch into ONE rollout group and the unique
-    # rollout count drops below global_batch_size, crashing the train step.
+    # Mirror fan_out_sample_segments: build_dp_schedule groups by rollout_id, so
+    # a None collapses all aborts into one group and drops below global_batch_size.
     sample.rollout_id = sample.index
     sample.status = Sample.Status.ABORTED
-    sample.metadata = {**(sample.metadata or {}), "abort_reason": reason}
+    sample.metadata = {**(sample.metadata or {}), "abort_reason": reason, **(extra or {})}
     logger.warning("[async_rl] aborted: %s", reason)
     return sample
 
 
-def _abort_result(sample: Sample, reason: str):
+def _abort_result(sample: Sample, reason: str, extra: dict[str, Any] | None = None):
     """Uniform list shape for this (potentially fan-out) generate function."""
-    return [_abort(sample, reason)]
+    return [_abort(sample, reason, extra)]

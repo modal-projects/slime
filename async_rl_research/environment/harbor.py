@@ -1,34 +1,16 @@
 """Harbor env: run harbor-format tasks (USACO, ...) as RL episodes on Modal.
 
-The schema pair of ``env/convert2slime/harbor.py`` (see ``base.py``). The
-converter materializes harbor task directories next to the JSONL and bakes
-everything the rollout needs into ``metadata`` -- this module never imports
-the ``harbor`` package and never parses ``task.toml`` at rollout time.
+Schema pair of ``env/convert2slime/harbor.py`` (see ``base.py``); the converter
+bakes everything into ``metadata`` so this never reads ``task.toml`` at rollout.
 
-Episode shape (harbor "shared" verifier semantics):
+Episode (harbor "shared" verifier semantics): boot sandbox, then per step write
+the instruction, run the agent leg against the shared session, verify IN-PLACE
+(upload tests/, run test.sh, parse /logs/verifier/reward.{json,txt}), and gate
+on min_reward. Per-step rewards aggregate (mean | final) to a scalar. Tests are
+uploaded only AFTER the agent leg so the agent can't read them.
 
-    boot sandbox (task Dockerfile built on Modal, or prebuilt docker_image)
-    for each step (single-step tasks are one pseudo-step):
-        write the step instruction to {workdir}/PROBLEM_STATEMENT.md
-        agent leg: runtime.run_agent(...) against the shared adapter session
-        verify IN-PLACE: upload step tests/ -> /tests, run test.sh,
-            parse /logs/verifier/reward.{json,txt}
-        gate on the step's min_reward (abort remaining steps below threshold)
-    aggregate per-step rewards (mean | final) -> scalar training reward
-
-Verification runs inside the agent's sandbox (tests are uploaded only AFTER
-the agent leg, so the agent cannot read them) -- weaker than swe_gym's
-clean-sandbox diff grading, but it is harbor's contract: the agent's job is
-to leave artifacts behind. Tasks demanding a separate verifier container are
-filtered out by the converter.
-
-Rollout-side requirements:
-    ASYNC_RL_TASK_ROOT   directory the JSONL's relative ``task_path``s resolve
-                         against (the converter's --out-dir; put it on the
-                         slime-data volume so head workers can read tests/).
-
-Oracle check (no model involved -- validates boot/prep/verify plumbing by
-running each task's reference solution through the exact rollout path)::
+Rollout needs ``ASYNC_RL_TASK_ROOT`` (dir relative ``task_path``s resolve
+against). Oracle check (no model):
 
     python -m async_rl_research.environment.harbor out/usaco.jsonl --task-root out --limit 3
 """
@@ -51,11 +33,18 @@ logger = logging.getLogger(__name__)
 
 TASK_ROOT_ENV = "ASYNC_RL_TASK_ROOT"
 
-# ${VAR} / ${VAR:-default} templates in verifier/solution env values, resolved
-# against the HEAD's os.environ at use time (harbor's resolve_env_vars
-# semantics, except an unresolvable var is skipped with a warning instead of
-# failing the rollout).
+# Per-task task.toml timeouts override the env defaults only when this is set;
+# default (off) keeps the env vars (boot/agent/eval) the single source of truth.
+TASK_TIMEOUT_OVERRIDE = os.environ.get("ASYNC_RL_TASK_TIMEOUT_OVERRIDE", "0").strip().lower() in ("1", "true", "yes")
+
+# ${VAR} / ${VAR:-default} templates in verifier env values, resolved against
+# the HEAD's os.environ (unresolvable -> skipped with a warning).
 _ENV_TEMPLATE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-(.*))?\}$")
+
+
+def _effective(env_val: int, task_val: Any) -> int:
+    """Task.toml timeout wins over the env default only under TASK_TIMEOUT_OVERRIDE."""
+    return int(task_val) if (TASK_TIMEOUT_OVERRIDE and task_val) else int(env_val)
 
 
 def _resolve_env_templates(env: dict[str, str] | None) -> dict[str, str]:
@@ -97,14 +86,10 @@ def _meets_min_reward(rewards: dict[str, Any] | None, min_reward: float | dict[s
 
 class HarborEnv(RolloutEnv):
     name = "harbor"
-    # No agent_config default: the runtime's universal prompt scaffold is the
-    # default for all task families, and harbor instruction.md files already
-    # carry their own deliverable contract (what artifacts to leave where).
-    # Per-row builtin override via metadata.agent_config; global via MSWE_CONFIG.
+    # No agent_config default: harbor instruction.md files carry their own
+    # deliverable contract. Override per-row via metadata.agent_config.
 
-    # ------------------------------------------------------------------
     # Row schema (written by env/convert2slime/harbor.py -- keep in sync)
-    # ------------------------------------------------------------------
     def normalize_metadata(self, sample) -> dict[str, Any]:
         m = sample.metadata or {}
         task_path = m.get("task_path")
@@ -132,15 +117,23 @@ class HarborEnv(RolloutEnv):
             "task_dir": str(task_dir),
             "docker_image": docker_image,
             "dockerfile": dockerfile,
-            "workdir": m.get("workdir"),  # None -> detected from the booted sandbox
+            "workdir": m.get("workdir"),  # None -> detected from the sandbox
             "problem_statement": m.get("problem_statement") or coerce_prompt(sample.prompt),
             "agent_timeout_sec": m.get("agent_timeout_sec"),
+            "build_timeout_sec": m.get("build_timeout_sec"),
             "verifier": m.get("verifier") or {},
             "steps": steps,
             "reward_strategy": m.get("reward_strategy"),
             "cpus": m.get("cpus"),
             "memory_mb": m.get("memory_mb"),
             "agent_config": m.get("agent_config"),
+        }
+
+    def effective_budgets(self, md: dict[str, Any], *, agent_time_budget_sec: int, eval_timeout_sec: int) -> dict[str, int]:
+        return {
+            "boot_sec": _effective(ModalSandbox._boot_timeout_from_env(), md.get("build_timeout_sec")),
+            "agent_sec": _effective(agent_time_budget_sec, md.get("agent_timeout_sec")),
+            "eval_sec": _effective(eval_timeout_sec, (md.get("verifier") or {}).get("timeout_sec")),
         }
 
     @staticmethod
@@ -155,9 +148,7 @@ class HarborEnv(RolloutEnv):
             raise EnvMetadataError(f"task_dir_missing:{p}")
         return p
 
-    # ------------------------------------------------------------------
     # Episode
-    # ------------------------------------------------------------------
     def _image(self, md: dict[str, Any]) -> str | DockerfileImage:
         if md["docker_image"]:
             return md["docker_image"]
@@ -172,6 +163,8 @@ class HarborEnv(RolloutEnv):
             kwargs["memory_mb"] = int(md["memory_mb"])
         if md["workdir"]:
             kwargs["workdir"] = md["workdir"]
+        if TASK_TIMEOUT_OVERRIDE and md.get("build_timeout_sec"):
+            kwargs["boot_timeout"] = int(md["build_timeout_sec"])
         return ModalSandbox(self._image(md), **kwargs)
 
     def _step_specs(self, md: dict[str, Any]) -> list[dict[str, Any]]:
@@ -199,8 +192,8 @@ class HarborEnv(RolloutEnv):
         agent_time_budget_sec: int,
         eval_timeout_sec: int,
     ) -> RewardResult:
-        async def agent_leg(sb, leg_md: dict[str, Any], budget_sec: int) -> None:
-            await runtime.run_agent(
+        async def agent_leg(sb, leg_md: dict[str, Any], budget_sec: int):
+            return await runtime.run_agent(
                 sb,
                 md=leg_md,
                 session_id=session_id,
@@ -227,18 +220,27 @@ class HarborEnv(RolloutEnv):
         task_dir = Path(md["task_dir"])
         steps = self._step_specs(md)
         step_results: list[dict[str, Any]] = []
-        deadline = time.monotonic() + agent_time_budget_sec
+        # Last agent leg's exit code + failure tail (stays None for the oracle
+        # leg, which runs solve.sh rather than the agent). Surfaced in extra so
+        # a zero-turn adapter_session_empty self-explains in the rollout dump.
+        last_agent = None
 
         async with self._sandbox(md) as sb:
             workdir = md["workdir"] or await self._detect_workdir(sb)
             q = shlex.quote
-            # Harbor mounts /logs/{agent,verifier,artifacts}; test scripts
-            # assume they exist. workdir may be absent on prebuilt images.
+            # Test scripts assume /logs/{agent,verifier,artifacts} exist.
             await sb.exec(
                 f"mkdir -p {q(workdir)} /logs/agent /logs/verifier /logs/artifacts",
                 check=True,
                 timeout=60,
             )
+
+            # Start the agent clock only once the sandbox is booted and prepped:
+            # a cold per-instance image pull can take many minutes, and charging
+            # it against the agent budget would exhaust the window before any step
+            # runs (-> zero agent turns -> adapter_session_empty). Provisioning on
+            # the first leg likewise gets its own clock inside _detached_run.
+            deadline = time.monotonic() + _effective(agent_time_budget_sec, md.get("agent_timeout_sec"))
 
             for step in steps:
                 remaining = int(deadline - time.monotonic())
@@ -246,13 +248,14 @@ class HarborEnv(RolloutEnv):
                     logger.warning("[harbor] %s: agent budget exhausted before step %r", md["instance_id"], step["name"])
                     break
                 budget = remaining
-                for cap in (step.get("agent_timeout_sec"), md["agent_timeout_sec"]):
-                    if cap:
-                        budget = min(budget, int(cap))
+                if TASK_TIMEOUT_OVERRIDE and step.get("agent_timeout_sec"):
+                    budget = min(budget, int(step["agent_timeout_sec"]))
 
                 await self.write_problem_file(sb, workdir, step["instruction"])
                 leg_md = {**md, "workdir": workdir}
-                await run_leg(sb, leg_md, budget)
+                leg_result = await run_leg(sb, leg_md, budget)
+                if leg_result is not None:
+                    last_agent = leg_result
 
                 rewards = await self._verify(
                     sb,
@@ -268,27 +271,29 @@ class HarborEnv(RolloutEnv):
                     break
 
         reward = self._aggregate(steps, step_results, md["reward_strategy"])
+        extra: dict[str, Any] = {
+            "harbor_step_results": step_results,
+            "harbor_steps_completed": len(step_results),
+            "harbor_steps_total": len(steps),
+        }
+        if last_agent is not None:
+            extra["agent_exit_code"] = last_agent.exit_code
+            extra["agent_tail"] = last_agent.tail
         return RewardResult(
             reward=reward,
-            # epsilon: weighted pytest fractions can sum to 0.999... for a
-            # fully-passing task (seen on openthoughts-tblite bash-log-processor-fix)
+            # epsilon: weighted pytest fractions sum to 0.999... for a fully-
+            # passing task (seen on openthoughts-tblite bash-log-processor-fix)
             is_solved=reward >= 1.0 - 1e-6,
-            extra={
-                "harbor_step_results": step_results,
-                "harbor_steps_completed": len(step_results),
-                "harbor_steps_total": len(steps),
-            },
+            extra=extra,
         )
 
     @staticmethod
     def _aggregate(steps: list[dict], results: list[dict], strategy: str | None) -> float:
         """Scalar episode reward from per-step scalars.
 
-        'mean' divides by ALL declared steps (an unexecuted/gated step counts
-        0) -- stricter than harbor's job-level mean, which excludes steps
-        whose verifier never ran, but the conservative signal is what RL
-        wants. 'final' is the last DECLARED step's reward (0 if never
-        reached), matching harbor.
+        'mean' divides by ALL declared steps (gated steps count 0; stricter than
+        harbor's job-level mean, but the conservative signal is what RL wants).
+        'final' is the last declared step's reward (0 if never reached).
         """
         if not results:
             return 0.0
@@ -300,15 +305,12 @@ class HarborEnv(RolloutEnv):
 
     @staticmethod
     async def _detect_workdir(sb) -> str:
-        # Prebuilt docker_image rows may not know their WORKDIR; ask the
-        # sandbox (Modal honors the image workdir for exec cwd).
+        # Prebuilt docker_image rows may not know their WORKDIR; ask the sandbox.
         ec, out, _ = await sb.exec("pwd", check=False, timeout=30)
         detected = (out or "").strip().splitlines()[-1] if ec == 0 and (out or "").strip() else ""
         return detected or "/app"
 
-    # ------------------------------------------------------------------
     # In-place verification (harbor's shared-environment Verifier semantics)
-    # ------------------------------------------------------------------
     async def _verify(
         self,
         sb,
@@ -320,15 +322,7 @@ class HarborEnv(RolloutEnv):
         instance_id: str,
     ) -> dict[str, Any] | None:
         """Upload tests, run test.sh, parse the reward files. None = no verdict."""
-        timeout = int(verifier.get("timeout_sec") or eval_timeout_sec)
-        if timeout > eval_timeout_sec:
-            logger.info(
-                "[harbor] %s: verifier timeout %ds capped to AGENT_EVAL_TIMEOUT_SEC=%ds",
-                instance_id,
-                timeout,
-                eval_timeout_sec,
-            )
-            timeout = eval_timeout_sec
+        timeout = _effective(eval_timeout_sec, verifier.get("timeout_sec"))
 
         await self.upload_dir(sb, tests_dir, "/tests")
         q = shlex.quote
@@ -338,12 +332,20 @@ class HarborEnv(RolloutEnv):
             timeout=60,
         )
         env = _resolve_env_templates(verifier.get("env"))
-        ec, _, err = await sb.exec(
+        ec, out, err = await sb.exec(
             f"cd {q(workdir)} && bash /tests/test.sh",
             env=env or None,
             timeout=timeout,
             check=False,
         )
+        if os.environ.get("HARBOR_VERIFY_DEBUG"):
+            logger.info(
+                "[harbor-verify-debug] %s: test.sh exit=%s\n--- stdout tail ---\n%s\n--- stderr tail ---\n%s",
+                instance_id,
+                ec,
+                (out or "")[-3000:],
+                (err or "")[-3000:],
+            )
 
         raw_json = await sb.read_file("/logs/verifier/reward.json")
         if raw_json.strip():
@@ -359,12 +361,9 @@ class HarborEnv(RolloutEnv):
             except ValueError:
                 logger.warning("[harbor] %s: unparseable reward.txt: %.200s", instance_id, raw_txt)
                 return None
-        # No reward file: terminal-bench-style tasks (e.g. openthoughts-tblite)
-        # end test.sh with a bare pytest run and rely on the harness to grade
-        # it. Grade all-or-nothing on pytest's exit code (tb's resolved
-        # semantics): 0 = every test passed, 1 = test failures. Anything else
-        # (127 missing dep, 2-5 pytest infra, timeout) stays "no verdict" so
-        # infra breakage is not silently scored as a model failure.
+        # No reward file: terminal-bench-style tasks end test.sh with a bare
+        # pytest run. Grade all-or-nothing on its exit code (0 pass, 1 fail);
+        # anything else stays "no verdict" so infra breakage isn't scored.
         if ec in (0, 1):
             logger.info("[harbor] %s: no reward file; graded from test.sh exit=%d", instance_id, ec)
             return {"reward": 1.0 if ec == 0 else 0.0, "graded_from": "exit_code"}
@@ -376,15 +375,10 @@ class HarborEnv(RolloutEnv):
         )
         return None
 
-    # ------------------------------------------------------------------
     # Oracle check (reference solution through the exact rollout path)
-    # ------------------------------------------------------------------
     async def oracle_episode(self, md: dict[str, Any], *, solve_timeout_sec: int, eval_timeout_sec: int) -> RewardResult:
-        """Replace the agent leg with the task's solution/solve.sh.
-
-        Legs run sequentially, so a simple counter maps each leg back to its
-        step (for per-step solution dirs on multi-step tasks).
-        """
+        """Replace the agent leg with the task's solution/solve.sh (a counter
+        maps each sequential leg to its step)."""
         task_dir = Path(md["task_dir"])
         steps = self._step_specs(md)
         state = {"i": 0}
@@ -400,13 +394,21 @@ class HarborEnv(RolloutEnv):
             await self.upload_dir(sb, solution_dir, "/solution")
             q = shlex.quote
             await sb.exec("chmod +x /solution/solve.sh", check=False, timeout=30)
-            ec, _, err = await sb.exec(
+            ec, out, err = await sb.exec(
                 f"cd {q(leg_md['workdir'])} && bash /solution/solve.sh",
                 timeout=min(budget_sec, solve_timeout_sec),
                 check=False,
             )
             if ec != 0:
                 logger.warning("[harbor-oracle] solve.sh exit=%d stderr tail: %s", ec, (err or "")[-400:])
+            if os.environ.get("HARBOR_VERIFY_DEBUG"):
+                logger.info(
+                    "[harbor-oracle-debug] %s: solve.sh exit=%s\n--- stdout tail ---\n%s\n--- stderr tail ---\n%s",
+                    md["instance_id"],
+                    ec,
+                    (out or "")[-3000:],
+                    (err or "")[-3000:],
+                )
 
         return await self._episode(
             md,
@@ -428,7 +430,14 @@ def _oracle_main() -> int:
     parser.add_argument("--index", type=int, help="check exactly this row")
     parser.add_argument("--solve-timeout", type=int, default=600)
     parser.add_argument("--eval-timeout", type=int, default=int(os.environ.get("AGENT_EVAL_TIMEOUT_SEC", "600")))
+    parser.add_argument(
+        "--vm-runtime",
+        action="store_true",
+        help="boot VM sandboxes (experimental_options={'vm_runtime': True}) instead of gVisor",
+    )
     args = parser.parse_args()
+    if args.vm_runtime:
+        os.environ["SLIME_AGENT_SANDBOX_VM_RUNTIME"] = "1"
 
     root = args.task_root or os.environ.get(TASK_ROOT_ENV) or str(Path(args.jsonl).resolve().parent)
     os.environ[TASK_ROOT_ENV] = root
@@ -445,9 +454,10 @@ def _oracle_main() -> int:
     for row in picked:
         sample = SimpleNamespace(metadata=row.get("metadata"), prompt=row.get("prompt"), label=row.get("label"))
         md = env.normalize_metadata(sample)
+        t0 = time.monotonic()
         result = asyncio.run(env.oracle_episode(md, solve_timeout_sec=args.solve_timeout, eval_timeout_sec=args.eval_timeout))
         status = "OK " if result.is_solved else "FAIL"
-        print(f"[{status}] {md['instance_id']}: reward={result.reward:.2f} {result.extra}")
+        print(f"[{status}] {md['instance_id']}: reward={result.reward:.2f} t={time.monotonic() - t0:.0f}s {result.extra}")
         failures += 0 if result.is_solved else 1
     return 1 if failures else 0
 

@@ -1,11 +1,6 @@
-"""Run an ``aiohttp.web.Application`` in a background daemon thread.
-
-This is the "http" piece: ``generate.py`` builds the slime adapter (an
-``aiohttp`` app that speaks the agent's wire API on the front and SGLang
-``/generate`` on the back) and serves it here, on a daemon thread, so the
-synchronous slime rollout loop and the in-sandbox agent's HTTP callbacks can
-run concurrently. Verbatim copy of
-``examples/coding_agent_rl/aiohttp_threaded.py`` (generic, no SWE specifics).
+"""Run an ``aiohttp.web.Application`` in a background daemon thread, so the
+synchronous slime rollout loop and the agent's HTTP callbacks run concurrently.
+Verbatim copy of ``examples/coding_agent_rl/aiohttp_threaded.py``.
 """
 
 from __future__ import annotations
@@ -54,9 +49,7 @@ def run_app_in_thread(
 ) -> AppHandle:
     """Spin up ``app`` on a daemon thread; block until it is listening.
 
-    ``runner_kwargs`` is forwarded to ``web.AppRunner`` (e.g. pass
-    ``{"handler_cancellation": True}`` to make a client disconnect cancel
-    the in-flight handler coroutine).
+    ``runner_kwargs`` is forwarded to ``web.AppRunner``.
     """
     started = threading.Event()
     err_box: list[BaseException] = []

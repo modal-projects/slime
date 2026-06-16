@@ -1,4 +1,0 @@
-# Per-run profiling artifacts produced by profile.py; regenerate by re-running
-# it against the W&B run + rollout dump. Keep only the code + methodology.
-runs.jsonl
-ATTRIBUTION.md
