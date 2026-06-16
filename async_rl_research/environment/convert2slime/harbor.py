@@ -25,9 +25,10 @@ import json
 import logging
 import re
 import shutil
-import tomllib
 from pathlib import Path
 from typing import Any
+
+import tomllib
 
 logger = logging.getLogger(__name__)
 
@@ -137,7 +138,9 @@ def translate_task(task_dir: Path, *, dataset: str | None = None) -> dict[str, A
     steps_md = _steps_md(cfg, task_dir)
     if steps_md:
         instruction_path = task_dir / "instruction.md"
-        instruction = instruction_path.read_text(encoding="utf-8") if instruction_path.is_file() else steps_md[0]["instruction"]
+        instruction = (
+            instruction_path.read_text(encoding="utf-8") if instruction_path.is_file() else steps_md[0]["instruction"]
+        )
     else:
         instruction = _instruction(task_dir / "instruction.md", "instruction.md")
         if not (task_dir / "tests" / "test.sh").is_file():
@@ -266,7 +269,9 @@ def main(argv: list[str] | None = None) -> int:
     source.add_argument("--registry", help="harbor registry.json path or URL (needs `pip install harbor`)")
     parser.add_argument("--dataset", help="dataset name in the registry (with --registry)")
     parser.add_argument("--dataset-version", help="dataset version in the registry (default: last match)")
-    parser.add_argument("--out-dir", type=Path, required=True, help="output dir (JSONL + tasks/); use the slime-data volume")
+    parser.add_argument(
+        "--out-dir", type=Path, required=True, help="output dir (JSONL + tasks/); use the slime-data volume"
+    )
     parser.add_argument("--name", help="JSONL filename stem (default: dataset or tasks-dir name)")
     parser.add_argument("--limit", type=int, help="maximum tasks to convert")
     args = parser.parse_args(argv)
@@ -274,7 +279,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.registry:
         if not args.dataset:
             parser.error("--registry requires --dataset")
-        task_dirs = _download_from_registry(args.registry, args.dataset, args.dataset_version, args.out_dir / "downloads")
+        task_dirs = _download_from_registry(
+            args.registry, args.dataset, args.dataset_version, args.out_dir / "downloads"
+        )
         name = args.name or args.dataset
         dataset = args.dataset
     else:

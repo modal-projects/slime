@@ -97,9 +97,7 @@ class SweGymEnv(RolloutEnv):
 
         # Work sandbox is closed; grade the diff in a clean one.
         with timer.phase("eval"):
-            reward, is_solved, applied = await self._evaluate(
-                md, diff_text, timeout_sec=eval_timeout_sec, timer=timer
-            )
+            reward, is_solved, applied = await self._evaluate(md, diff_text, timeout_sec=eval_timeout_sec, timer=timer)
         return RewardResult(
             reward=float(reward),
             is_solved=bool(is_solved),

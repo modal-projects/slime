@@ -21,13 +21,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any
 
 from aiohttp import web
 
 from slime.agent.adapters import openai as _slime_openai
+from slime.agent.adapters.common import ADAPTER_KEY, TOKENIZER_KEY, BaseAdapter, render_token_ids
 from slime.agent.adapters.openai import OpenAIAdapter
-from slime.agent.adapters.common import ADAPTER_KEY, BaseAdapter, TOKENIZER_KEY, render_token_ids
 
 
 def _dictify_tool_arguments(messages: list[dict]) -> None:
@@ -53,9 +52,7 @@ def _dictify_tool_arguments(messages: list[dict]) -> None:
 def _template_ids(tok, messages: list[dict], *, add_generation_prompt: bool) -> list[int]:
     """``apply_chat_template`` -> flat token-id list (tolerating the 1-element
     batch that some transformers versions return for ``tokenize=True``)."""
-    enc = tok.apply_chat_template(
-        messages, tools=None, tokenize=True, add_generation_prompt=add_generation_prompt
-    )
+    enc = tok.apply_chat_template(messages, tools=None, tokenize=True, add_generation_prompt=add_generation_prompt)
     ids = enc["input_ids"] if hasattr(enc, "__getitem__") and "input_ids" in enc else enc
     ids = list(ids)
     if ids and isinstance(ids[0], list):  # transformers>=5 may return [[...ids...]]
@@ -112,9 +109,7 @@ def _build_prompt(target, messages: list[dict], tools_schema: list[dict] | None,
     return render_token_ids(target, tok)
 
 
-async def _run_turn(
-    request: web.Request, body: dict, messages: list[dict]
-):
+async def _run_turn(request: web.Request, body: dict, messages: list[dict]):
     """Mirror of ``openai._run_turn`` calling the dict-args ``_build_prompt``."""
     sid = _slime_openai._request_session_id(request, body)
     adapter = request.app[ADAPTER_KEY]
@@ -146,9 +141,7 @@ async def _handle_chat_completions(request: web.Request) -> web.StreamResponse:
         raise web.HTTPBadRequest(text="messages must be a list")
     turn, parsed, in_tok, out_tok = await _run_turn(request, body, messages)
     if body.get("stream"):
-        return await _slime_openai._stream_chat_completion(
-            request, body, parsed, turn.finish_reason, in_tok, out_tok
-        )
+        return await _slime_openai._stream_chat_completion(request, body, parsed, turn.finish_reason, in_tok, out_tok)
     return web.json_response(
         _slime_openai._chat_completion_response(body, parsed, turn.finish_reason, in_tok, out_tok)
     )

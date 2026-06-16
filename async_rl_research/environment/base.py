@@ -93,7 +93,9 @@ class RolloutEnv(ABC):
         ``eval_timeout_sec`` caps each grading command.
         """
 
-    def effective_budgets(self, md: dict[str, Any], *, agent_time_budget_sec: int, eval_timeout_sec: int) -> dict[str, int]:
+    def effective_budgets(
+        self, md: dict[str, Any], *, agent_time_budget_sec: int, eval_timeout_sec: int
+    ) -> dict[str, int]:
         """Wall-clock budgets actually enforced this rollout (for the dump/dashboard)."""
         from ..modal_sandbox import ModalSandbox
 

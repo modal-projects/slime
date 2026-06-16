@@ -73,6 +73,7 @@ class DockerfileImage:
     def description(self) -> str:
         return f"dockerfile:{self.path}"
 
+
 # Modal validates exec argv against ARG_MAX (64 KiB) client-side; larger
 # commands are staged as a script file. Under the limit to leave room for the
 # bash/runuser wrapper argv.
@@ -190,11 +191,15 @@ class ModalSandbox:
             # VM memory is static; Modal's 128MB default OOMs a VM.
             self.memory_mb = _getenv_int("MODAL_VM_MEMORY_FLOOR_MB", default=2048)
         self.registry_secret = registry_secret or (_getenv("MODAL_REGISTRY_SECRET") or None)
-        self.rpc_retries = rpc_retries if rpc_retries is not None else _getenv_int(
-            "MODAL_RPC_RETRIES", "SLIME_AGENT_SANDBOX_RPC_RETRIES", default=self.default_rpc_retries
+        self.rpc_retries = (
+            rpc_retries
+            if rpc_retries is not None
+            else _getenv_int("MODAL_RPC_RETRIES", "SLIME_AGENT_SANDBOX_RPC_RETRIES", default=self.default_rpc_retries)
         )
-        self.create_retries = create_retries if create_retries is not None else _getenv_int(
-            "MODAL_BOOT_RETRIES", default=self.default_create_retries
+        self.create_retries = (
+            create_retries
+            if create_retries is not None
+            else _getenv_int("MODAL_BOOT_RETRIES", default=self.default_create_retries)
         )
         self.app_name = app_name or _getenv(
             "SLIME_AGENT_SANDBOX_MODAL_APP", "MODAL_SANDBOX_APP_NAME", default=self.default_app_name
@@ -317,7 +322,7 @@ class ModalSandbox:
             return modal.Image.from_aws_ecr(self.image, secret=secret, **kwargs)
         return modal.Image.from_registry(self.image, secret=secret, **kwargs)
 
-    async def __aenter__(self) -> "ModalSandbox":
+    async def __aenter__(self) -> ModalSandbox:
         import modal  # lazy
 
         self._modal = modal

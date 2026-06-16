@@ -16,13 +16,12 @@ from pathlib import Path
 
 from slime.agent.sandbox import Sandbox
 
-from .base import AgentRunResult, AgentRuntime
+from ..environment.base import PROBLEM_FILE
+
 # Renders tool-call arguments as a dict so Qwen3.6's qwen3_coder chat template
 # doesn't crash on turn 2+ (safe for hermes-style Qwen3 too).
 from .adapters import QwenOpenAIAdapter
-
-from ..environment.base import PROBLEM_FILE
-
+from .base import AgentRunResult, AgentRuntime
 
 MSWE_STEP_LIMIT = int(os.environ.get("MSWE_STEP_LIMIT", "50"))
 # Which YAML config (prompts) the runner loads. Override ladder: MSWE_CONFIG
@@ -35,9 +34,7 @@ UNIVERSAL_CONFIG_YAML = (Path(__file__).parent / "config" / "universal.yaml").re
 MSWE_PIP_SPEC = os.environ.get("MSWE_PIP_SPEC", "mini-swe-agent==2.3.1")
 # Prepended to PATH for the agent's bash commands: LocalEnvironment runs via
 # /bin/sh so `conda activate testbed` never fires; this is how its python wins.
-MSWE_PATH_PREPEND = os.environ.get(
-    "MSWE_PATH_PREPEND", "/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/bin"
-)
+MSWE_PATH_PREPEND = os.environ.get("MSWE_PATH_PREPEND", "/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/bin")
 # Isolated venv so the testbed conda env is never used or clobbered. Provisioned
 # at boot with uv; can be pre-baked into a derived image.
 MSWE_AGENT_VENV = os.environ.get("MSWE_AGENT_VENV", "/opt/mswe-agent")
@@ -140,8 +137,8 @@ _VENV_SETUP = (
     "if ! command -v uv >/dev/null 2>&1; then\n"
     # Ensure curl via whatever package manager the image ships (best-effort:
     # if none works we still try the pip path below).
-    "  command -v curl >/dev/null 2>&1 || retry \"apt-get update && apt-get install -y curl"
-    " || apk add --no-cache curl || yum install -y curl || dnf install -y curl\" || true\n"
+    '  command -v curl >/dev/null 2>&1 || retry "apt-get update && apt-get install -y curl'
+    ' || apk add --no-cache curl || yum install -y curl || dnf install -y curl" || true\n'
     # uv via the pinned astral script (bypasses the image's pip entirely);
     # pip fallback forces a clean PyPI index so a poisoned image config can't win,
     # then retries with --break-system-packages so PEP 668 ("externally-managed")

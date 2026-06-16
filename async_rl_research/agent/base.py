@@ -121,11 +121,7 @@ class AgentRuntime(ABC):
         launch, done, log = self._launch_scratch_files()
         exports = "".join(f"export {k}={q(str(v))}\n" for k, v in (env or {}).items())
         launcher_body = (
-            "#!/bin/bash\n"
-            f"cd {q(workdir)}\n"
-            f"{exports}"
-            f"{command} > {q(log)} 2>&1\n"
-            f"echo $? > {q(done)}\n"
+            "#!/bin/bash\n" f"cd {q(workdir)}\n" f"{exports}" f"{command} > {q(log)} 2>&1\n" f"echo $? > {q(done)}\n"
         )
         await sb.write_file(f"{workdir}/{launch}", launcher_body)
         # rm the done marker BEFORE launching: a stale marker from a prior leg
@@ -151,7 +147,9 @@ class AgentRuntime(ABC):
                 break
         tail = ""
         if exit_code != 0:
-            _, raw_tail, _ = await sb.exec(f"tail -c 4000 {q(f'{workdir}/{log}')} 2>/dev/null", check=False, timeout=15)
+            _, raw_tail, _ = await sb.exec(
+                f"tail -c 4000 {q(f'{workdir}/{log}')} 2>/dev/null", check=False, timeout=15
+            )
             tail = (raw_tail or "").strip()
             if tail:
                 logger.warning("[%s] %s exit=%s %s tail:\n%s", self.name, log_tag, exit_code, log, tail)

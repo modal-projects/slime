@@ -137,16 +137,16 @@ def materialize(
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--out-dir", type=Path, required=True, help="output dir (JSONL + tasks/); use the slime-data volume")
+    parser.add_argument(
+        "--out-dir", type=Path, required=True, help="output dir (JSONL + tasks/); use the slime-data volume"
+    )
     parser.add_argument("--name", default=DATASET_NAME, help="JSONL filename stem")
     parser.add_argument("--repo", default=HF_DATASET, help="HuggingFace dataset repo id")
     parser.add_argument("--split", default="train", help="HuggingFace split")
     parser.add_argument("--limit", type=int, help="maximum tasks to convert")
     args = parser.parse_args(argv)
 
-    converted, skipped = materialize(
-        args.out_dir, name=args.name, repo=args.repo, split=args.split, limit=args.limit
-    )
+    converted, skipped = materialize(args.out_dir, name=args.name, repo=args.repo, split=args.split, limit=args.limit)
     out_dir = args.out_dir.resolve()
     jsonl = out_dir / f"{args.name}.jsonl"
     print(f"converted {converted} tasks ({skipped} skipped) -> {jsonl}")

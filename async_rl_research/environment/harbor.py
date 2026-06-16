@@ -80,7 +80,9 @@ def _meets_min_reward(rewards: dict[str, Any] | None, min_reward: float | dict[s
     if min_reward is None:
         return True
     if isinstance(min_reward, dict):
-        return all(rewards is not None and key in rewards and float(rewards[key]) >= float(v) for key, v in min_reward.items())
+        return all(
+            rewards is not None and key in rewards and float(rewards[key]) >= float(v) for key, v in min_reward.items()
+        )
     return rewards is not None and "reward" in rewards and float(rewards["reward"]) >= float(min_reward)
 
 
@@ -129,7 +131,9 @@ class HarborEnv(RolloutEnv):
             "agent_config": m.get("agent_config"),
         }
 
-    def effective_budgets(self, md: dict[str, Any], *, agent_time_budget_sec: int, eval_timeout_sec: int) -> dict[str, int]:
+    def effective_budgets(
+        self, md: dict[str, Any], *, agent_time_budget_sec: int, eval_timeout_sec: int
+    ) -> dict[str, int]:
         return {
             "boot_sec": _effective(ModalSandbox._boot_timeout_from_env(), md.get("build_timeout_sec")),
             "agent_sec": _effective(agent_time_budget_sec, md.get("agent_timeout_sec")),
@@ -245,7 +249,9 @@ class HarborEnv(RolloutEnv):
             for step in steps:
                 remaining = int(deadline - time.monotonic())
                 if remaining <= 0:
-                    logger.warning("[harbor] %s: agent budget exhausted before step %r", md["instance_id"], step["name"])
+                    logger.warning(
+                        "[harbor] %s: agent budget exhausted before step %r", md["instance_id"], step["name"]
+                    )
                     break
                 budget = remaining
                 if TASK_TIMEOUT_OVERRIDE and step.get("agent_timeout_sec"):
@@ -267,7 +273,11 @@ class HarborEnv(RolloutEnv):
                 )
                 step_results.append({"name": step["name"], "rewards": rewards, "reward": _scalar_reward(rewards)})
                 if not _meets_min_reward(rewards, step.get("min_reward")):
-                    logger.info("[harbor] %s: step %r below min_reward; aborting remaining steps", md["instance_id"], step["name"])
+                    logger.info(
+                        "[harbor] %s: step %r below min_reward; aborting remaining steps",
+                        md["instance_id"],
+                        step["name"],
+                    )
                     break
 
         reward = self._aggregate(steps, step_results, md["reward_strategy"])
@@ -376,7 +386,9 @@ class HarborEnv(RolloutEnv):
         return None
 
     # Oracle check (reference solution through the exact rollout path)
-    async def oracle_episode(self, md: dict[str, Any], *, solve_timeout_sec: int, eval_timeout_sec: int) -> RewardResult:
+    async def oracle_episode(
+        self, md: dict[str, Any], *, solve_timeout_sec: int, eval_timeout_sec: int
+    ) -> RewardResult:
         """Replace the agent leg with the task's solution/solve.sh (a counter
         maps each sequential leg to its step)."""
         task_dir = Path(md["task_dir"])
@@ -423,7 +435,9 @@ def _oracle_main() -> int:
     import asyncio
     from types import SimpleNamespace
 
-    parser = argparse.ArgumentParser(description="Run harbor reference solutions through the rollout path (reward should be 1.0).")
+    parser = argparse.ArgumentParser(
+        description="Run harbor reference solutions through the rollout path (reward should be 1.0)."
+    )
     parser.add_argument("jsonl", help="converted slime prompt JSONL (env/convert2slime/harbor.py output)")
     parser.add_argument("--task-root", help=f"task root (default: ${TASK_ROOT_ENV} or the JSONL's directory)")
     parser.add_argument("--limit", type=int, default=1, help="how many rows to check (default 1)")
@@ -455,9 +469,13 @@ def _oracle_main() -> int:
         sample = SimpleNamespace(metadata=row.get("metadata"), prompt=row.get("prompt"), label=row.get("label"))
         md = env.normalize_metadata(sample)
         t0 = time.monotonic()
-        result = asyncio.run(env.oracle_episode(md, solve_timeout_sec=args.solve_timeout, eval_timeout_sec=args.eval_timeout))
+        result = asyncio.run(
+            env.oracle_episode(md, solve_timeout_sec=args.solve_timeout, eval_timeout_sec=args.eval_timeout)
+        )
         status = "OK " if result.is_solved else "FAIL"
-        print(f"[{status}] {md['instance_id']}: reward={result.reward:.2f} t={time.monotonic() - t0:.0f}s {result.extra}")
+        print(
+            f"[{status}] {md['instance_id']}: reward={result.reward:.2f} t={time.monotonic() - t0:.0f}s {result.extra}"
+        )
         failures += 0 if result.is_solved else 1
     return 1 if failures else 0
 
