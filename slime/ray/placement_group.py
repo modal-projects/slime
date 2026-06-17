@@ -103,7 +103,7 @@ def _get_placement_group_layout(args) -> tuple[int, int]:
     if args.debug_train_only:
         return actor_num_gpus, 0
 
-    if args.rollout_external:
+    if args.rollout_external or getattr(args, "rollout_endpoint_url", None):
         if args.debug_rollout_only:
             return 0, 0
         return actor_num_gpus, actor_num_gpus

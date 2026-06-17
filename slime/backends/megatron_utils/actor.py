@@ -624,8 +624,11 @@ class MegatronTrainRayActor(TrainRayActor):
         ) = ray.get(self.rollout_manager.get_updatable_engines_and_lock.remote())
 
         reconnect_rollout_engines = self.args.offload_train and self.args.use_critic and not self.args.colocate
+        # An opaque HTTP rollout fleet exposes no engine handles; the trainer publishes the delta to
+        # disk instead of pushing, so it still runs update_weights (and connects once) with no engines.
+        publish_only = bool(getattr(self.args, "rollout_endpoint_url", None))
 
-        if not rollout_engines and not reconnect_rollout_engines:
+        if not rollout_engines and not reconnect_rollout_engines and not publish_only:
             if dist.get_rank() == 0:
                 logger.info("No updatable SGLang engines are running; skip weight update.")
             return
@@ -635,7 +638,7 @@ class MegatronTrainRayActor(TrainRayActor):
         elif self.args.offload_train:
             reload_process_groups()
 
-        if num_new_engines > 0 or reconnect_rollout_engines:
+        if num_new_engines > 0 or reconnect_rollout_engines or publish_only:
             self.weight_updater.connect_rollout_engines(
                 rollout_engines,
                 rollout_engine_lock,

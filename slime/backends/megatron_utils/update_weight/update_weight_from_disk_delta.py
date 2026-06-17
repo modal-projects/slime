@@ -51,6 +51,9 @@ class UpdateWeightFromDiskDelta(UpdateWeightFromDistributed):
         self.checksum_algorithm = args.update_weight_delta_checksum
         self._snapshot: dict[str, np.ndarray] = {}
         self._baseline_captured = False
+        # Opaque HTTP rollout: no engine handles, so publish the version to disk and let the fleet
+        # pull it, instead of pushing via per-engine RPCs.
+        self._publish_only = bool(getattr(args, "rollout_endpoint_url", None))
         self._commit_hook: Callable | None = None
         if args.custom_delta_pre_push_path:
             from slime.utils.misc import load_function
@@ -86,13 +89,16 @@ class UpdateWeightFromDiskDelta(UpdateWeightFromDistributed):
             return
 
         self.weight_version += 1
-        if dist.get_rank() == 0:
+        if dist.get_rank() == 0 and not self._publish_only:
             ray.get([engine.pause_generation.remote() for engine in self.rollout_engines])
             ray.get([engine.flush_cache.remote() for engine in self.rollout_engines])
         dist.barrier(group=get_gloo_group())
 
         self._publish()
-        self._reload_engines()
+        if self._publish_only:
+            self._announce_version()
+        else:
+            self._reload_engines()
         self._record_metrics()
 
     def _capture_baseline(self) -> None:
@@ -183,6 +189,16 @@ class UpdateWeightFromDiskDelta(UpdateWeightFromDistributed):
                 ]
             )
             ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
+        dist.barrier(group=get_gloo_group())
+
+    def _announce_version(self) -> None:
+        """Publish-only: commit the version dir and advance the latest-version pointer, so the
+        external fleet pulls and applies it on its own. No engine handles, hence no reload RPCs."""
+        if self._commit_hook is not None:
+            self._commit_hook(self.args, self._version_dir, [])  # opaque fleet: no engine handles
+        dist.barrier(group=get_gloo_group())
+        if dist.get_rank() == 0:
+            _atomic_write(os.path.join(self.delta_dir, "latest"), f"{self.weight_version:06d}".encode())
         dist.barrier(group=get_gloo_group())
 
     def _iter_hf_tensors(self):
