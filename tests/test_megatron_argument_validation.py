@@ -49,6 +49,7 @@ def load_slime_arguments_module(monkeypatch):
     sglang_arguments_mod.sglang_parse_args = lambda *args, **kwargs: None
     sglang_arguments_mod.validate_args = lambda args: args
     sglang_external_mod.apply_external_engine_info_to_args = lambda *args, **kwargs: None
+    sglang_external_mod.normalize_rollout_endpoint_url = lambda url: url.rstrip("/")
     logging_utils_mod.configure_logger = lambda *args, **kwargs: None
 
     monkeypatch.setitem(sys.modules, "sglang_router", router_pkg_mod)
@@ -219,6 +220,7 @@ def make_slime_validate_args(**overrides):
         save_debug_train_data=None,
         load_debug_rollout_data=None,
         rollout_external_engine_addrs=None,
+        rollout_endpoint_url=None,
         debug_train_only=False,
         actor_num_gpus_per_node=8,
         actor_num_nodes=1,

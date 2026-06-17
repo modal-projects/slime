@@ -37,6 +37,7 @@ from slime.rollout.sglang_rollout import (
     _extract_rollout_top_p_token_data,
     _merge_rollout_top_p_token_data,
     _prepare_prompt_ids,
+    get_model_url,
 )
 from slime.utils import http_utils
 from slime.utils.processing_utils import encode_image_for_rollout_engine
@@ -58,7 +59,7 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
         assert isinstance(sample.prompt, str)
 
     state = GenerateState(args)
-    url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate"
+    url = get_model_url(args, "default", "/generate")
 
     assert sample.status in (
         Sample.Status.PENDING,
@@ -182,5 +183,9 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
         sample.update_from_meta_info(args, last_meta_info)
     elif state.aborted:
         sample.status = Sample.Status.ABORTED
+        # Record the version of the partial's tokens (every streaming chunk carries it) so off-policy
+        # correction can weight it — update_from_meta_info is skipped without a finish_reason.
+        if "weight_version" in last_meta_info:
+            sample.weight_versions.append(last_meta_info["weight_version"])
 
     return sample
