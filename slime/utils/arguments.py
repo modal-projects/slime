@@ -9,7 +9,7 @@ import yaml
 
 from slime.backends.sglang_utils.arguments import sglang_parse_args
 from slime.backends.sglang_utils.arguments import validate_args as sglang_validate_args
-from slime.backends.sglang_utils.external import apply_external_engine_info_to_args
+from slime.backends.sglang_utils.external import apply_external_engine_info_to_args, normalize_rollout_endpoint_url
 from slime.utils.eval_config import EvalDatasetConfig, build_eval_dataset_configs, ensure_dataset_list
 from slime.utils.logging_utils import configure_logger
 
@@ -565,6 +565,16 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 nargs="+",
                 help="Address and ports of the external engines.",
+            )
+            parser.add_argument(
+                "--rollout-endpoint-url",
+                type=str,
+                default=None,
+                help=(
+                    "Base URL of an opaque HTTP rollout endpoint (an elastic fleet behind one URL). "
+                    "slime launches no engines and sends /generate here; weights are published to "
+                    "--update-weight-disk-dir for the fleet to pull (requires delta + disk transport)."
+                ),
             )
             return parser
 
@@ -1851,6 +1861,29 @@ def slime_validate_args(args):
     if args.rollout_external and not args.debug_train_only:
         apply_external_engine_info_to_args(args, logger=logger)
 
+    if args.rollout_endpoint_url is not None:
+        args.rollout_endpoint_url = normalize_rollout_endpoint_url(args.rollout_endpoint_url)
+        if args.rollout_external:
+            raise ValueError("--rollout-endpoint-url and --rollout-external-engine-addrs are mutually exclusive.")
+        if not (args.update_weight_mode == "delta" and args.update_weight_transport == "disk"):
+            raise ValueError(
+                "--rollout-endpoint-url requires --update-weight-mode=delta --update-weight-transport=disk: "
+                "weights are published to disk for the external fleet to pull."
+            )
+        # One logical endpoint; client-side concurrency is sglang_server_concurrency * this. Must be
+        # set before init_http_client (which otherwise derives 0 engines from the 0 rollout GPUs).
+        if getattr(args, "rollout_num_engines", None) is None:
+            args.rollout_num_engines = 1
+        # Partial-rollout against an opaque endpoint can only capture partials client-side, which
+        # needs the streaming rollout (the non-streaming path yields nothing to a disconnected client).
+        if getattr(args, "partial_rollout", False) and "sglang_streaming_rollout" not in (
+            getattr(args, "custom_generate_function_path", None) or ""
+        ):
+            raise ValueError(
+                "--rollout-endpoint-url with --partial-rollout requires the streaming rollout: set "
+                "--custom-generate-function-path slime.rollout.sglang_streaming_rollout.generate_streaming"
+            )
+
     args.use_critic = args.advantage_estimator == "ppo"
     # Critic always uses the same GPU count as actor.
     args.critic_num_gpus_per_node = args.actor_num_gpus_per_node
@@ -1999,7 +2032,8 @@ def slime_validate_args(args):
                 "weights via CUDA IPC (only a handle crosses processes), so the delta bookkeeping "
                 "(snapshot + diff + encode) is pure overhead."
             )
-        if not args.update_weight_local_checkpoint_dir:
+        if not args.update_weight_local_checkpoint_dir and args.rollout_endpoint_url is None:
+            # publish-only (--rollout-endpoint-url) applies on the fleet, not on a slime-host-local copy
             raise ValueError(
                 "--update-weight-mode=delta requires --update-weight-local-checkpoint-dir "
                 "(a rollout-host-local NVMe directory)."

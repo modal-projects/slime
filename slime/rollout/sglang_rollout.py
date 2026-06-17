@@ -14,6 +14,7 @@ import sglang_router
 from packaging.version import parse
 from tqdm import tqdm
 
+from slime.backends.sglang_utils.external import uses_rollout_endpoint
 from slime.backends.sglang_utils.server_control import abort_servers_until_idle
 from slime.rollout.base_types import RolloutFnEvalOutput, RolloutFnTrainOutput
 from slime.rollout.filter_hub.base_types import MetricGatherer, call_dynamic_filter
@@ -72,8 +73,11 @@ def get_model_url(args: Namespace, model_name: str, endpoint: str = "/generate")
         resp = await post(url, json=payload)
 
     Falls back to the default router if *model_name* is not found or
-    ``sglang_model_routers`` is not set.
+    ``sglang_model_routers`` is not set. With ``--rollout-endpoint-url`` set, returns that opaque
+    endpoint with *endpoint* appended (no router APIs are assumed to exist).
     """
+    if uses_rollout_endpoint(args):
+        return f"{args.rollout_endpoint_url}{endpoint}"
     routers = getattr(args, "sglang_model_routers", None)
     if routers and model_name in routers:
         ip, port = routers[model_name]
@@ -154,7 +158,7 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         assert isinstance(sample.prompt, str)
 
     state = GenerateState(args)
-    url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate"
+    url = get_model_url(args, "default", "/generate")
 
     assert (
         sample.status == Sample.Status.PENDING or sample.status == Sample.Status.ABORTED
@@ -355,14 +359,26 @@ async def abort(args: Namespace, rollout_id: int) -> list[list[Sample]]:
     assert not state.aborted
     state.aborted = True
 
-    if parse(sglang_router.__version__) <= parse("0.2.1"):
-        response = await get(f"http://{args.sglang_router_ip}:{args.sglang_router_port}/list_workers")
-        urls = response["urls"]
-    else:
-        response = await get(f"http://{args.sglang_router_ip}:{args.sglang_router_port}/workers")
-        urls = [worker["url"] for worker in response["workers"]]
+    if uses_rollout_endpoint(args) and not args.partial_rollout:
+        # Opaque endpoint, surplus discarded: cancel locally — the client disconnect aborts the
+        # request on the fleet. No worker API to call, and nothing to collect.
+        for task in state.pendings:
+            task.cancel()
+        await asyncio.gather(*state.pendings, return_exceptions=True)
+        state.pendings = set()
+        return aborted_samples
 
-    await abort_servers_until_idle(urls)
+    if not uses_rollout_endpoint(args):
+        # Router: explicitly abort in-flight requests on each worker.
+        if parse(sglang_router.__version__) <= parse("0.2.1"):
+            response = await get(f"http://{args.sglang_router_ip}:{args.sglang_router_port}/list_workers")
+            urls = response["urls"]
+        else:
+            response = await get(f"http://{args.sglang_router_ip}:{args.sglang_router_port}/workers")
+            urls = [worker["url"] for worker in response["workers"]]
+        await abort_servers_until_idle(urls)
+    # Opaque endpoint + partial-rollout: the streaming tasks self-break on state.aborted and return
+    # their partials below; closing each stream disconnects, which aborts the request on the fleet.
 
     # make sure all the pending tasks are finished
     count = 0

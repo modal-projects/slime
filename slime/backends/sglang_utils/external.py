@@ -230,3 +230,24 @@ def start_external_rollout_servers(args, *, start_router) -> tuple[dict[str, Ext
         )
     }
     return servers, init_handles
+
+
+def normalize_rollout_endpoint_url(url: str) -> str:
+    """Normalize an opaque HTTP rollout endpoint base URL (drop trailing slash)."""
+    url = url.rstrip("/")
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or parsed.netloc == "":
+        raise ValueError(f"Invalid --rollout-endpoint-url {url!r}. Use an absolute http:// or https:// URL.")
+    return url
+
+
+def uses_rollout_endpoint(args) -> bool:
+    return bool(getattr(args, "rollout_endpoint_url", None))
+
+
+def rollout_endpoint_servers(args) -> tuple[dict[str, ExternalRolloutServer], list]:
+    """Rollout served by an opaque HTTP endpoint behind one URL. The fleet is elastic, so slime holds
+    no per-engine handles — hence no engines (weights are published to disk, not pushed) and generation
+    routes to the URL via get_model_url."""
+    logger.info("Rollout served by opaque HTTP endpoint: %s", args.rollout_endpoint_url)
+    return {"default": ExternalRolloutServer(engines=[], engine_gpu_counts=[], engine_gpu_offsets=[])}, []
