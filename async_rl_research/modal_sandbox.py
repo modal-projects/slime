@@ -420,7 +420,7 @@ class ModalSandbox:
 
         exit_code, stdout, stderr = await self._retry(f"exec({cmd[:48]!r})", self.rpc_retries, _run)
         if check and exit_code != 0:
-            raise RuntimeError(f"modal exec failed (exit={exit_code}): {cmd[:120]}\n{stderr[:400]}")
+            raise RuntimeError(f"modal exec failed (exit={exit_code}): {cmd[:120]}\n{stderr[-1000:]}")
         return exit_code, stdout, stderr
 
     async def write_file(self, sandbox_path: str, content: FileContent, *, user: str = "root") -> None:

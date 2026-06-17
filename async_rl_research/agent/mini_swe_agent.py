@@ -24,6 +24,10 @@ from .adapters import QwenOpenAIAdapter
 from .base import AgentRunResult, AgentRuntime
 
 MSWE_STEP_LIMIT = int(os.environ.get("MSWE_STEP_LIMIT", "50"))
+# Consecutive no-tool-call model turns before the runner ends the episode: a
+# stuck model that never reaches the context wall would otherwise format-error
+# its way to MSWE_STEP_LIMIT. See _StopAwareModel in MINI_RUNNER_PY.
+MSWE_MAX_EMPTY_TURNS = int(os.environ.get("MSWE_MAX_EMPTY_TURNS", "3"))
 # Which YAML config (prompts) the runner loads. Override ladder: MSWE_CONFIG
 # env (global) > metadata.agent_config (per-row) > universal config below.
 MSWE_CONFIG = os.environ.get("MSWE_CONFIG", "")
@@ -58,6 +62,7 @@ from pathlib import Path
 WORKDIR = os.environ["MSWE_WORKDIR"]
 MODEL = os.environ.get("MSWE_MODEL", "slime-actor")
 STEP_LIMIT = int(os.environ.get("MSWE_STEP_LIMIT", "50"))
+MAX_EMPTY_TURNS = int(os.environ.get("MSWE_MAX_EMPTY_TURNS", "3"))
 PATH_PREPEND = os.environ.get("MSWE_PATH_PREPEND", "")
 with open(os.environ["MSWE_PROBLEM_FILE"], encoding="utf-8") as fh:
     TASK = fh.read()
@@ -68,6 +73,42 @@ try:
     from minisweagent.config import builtin_config_dir
     from minisweagent.environments.local import LocalEnvironment
     from minisweagent.models.litellm_model import LitellmModel
+    from minisweagent.exceptions import FormatError, LimitsExceeded
+
+    class _StopAwareModel(LitellmModel):
+        """End the episode instead of looping when the model can't progress.
+
+        A no-tool-call response surfaces as FormatError from super().query()
+        (LitellmModel stashes the raw response, incl. finish_reason, on it). We
+        stop on finish_reason='length' (adapter signalled context/output budget
+        exhausted) or after MAX_EMPTY_TURNS consecutive no-tool-call turns,
+        raising LimitsExceeded -- mini-swe's own graceful 'exit' path, the same
+        one step_limit uses. Without this mini-swe retries the format error every
+        turn and burns the whole context to step_limit (49 dead turns seen on
+        eval); finish_reason is otherwise never inspected.
+        """
+
+        _empty = 0
+
+        def query(self, messages, **kwargs):
+            try:
+                msg = super().query(messages, **kwargs)
+            except FormatError as e:
+                resp = (e.messages[0].get("extra") or {}).get("response") or {}
+                fr = ((resp.get("choices") or [{}])[0] or {}).get("finish_reason")
+                self._empty += 1
+                if fr == "length" or self._empty >= MAX_EMPTY_TURNS:
+                    status = "ContextLengthExceeded" if fr == "length" else "NoProgress"
+                    raise LimitsExceeded(
+                        {
+                            "role": "exit",
+                            "content": f"ending session: finish_reason={fr}, no-tool-call streak={self._empty}",
+                            "extra": {"exit_status": status, "submission": ""},
+                        }
+                    )
+                raise
+            self._empty = 0
+            return msg
 
     # Default to the uploaded universal config; MSWE_CONFIG (if set) names a
     # BUILTIN packaged config. Read the builtin path directly -- the spec helper
@@ -106,7 +147,7 @@ try:
     if prepend:
         env_overrides["PATH"] = ":".join(prepend) + ":" + os.environ.get("PATH", "")
 
-    model = LitellmModel(**model_cfg)
+    model = _StopAwareModel(**model_cfg)
     env = LocalEnvironment(cwd=WORKDIR, env=env_overrides, timeout=int(env_cfg.get("timeout") or 60))
     agent = DefaultAgent(model, env, **agent_cfg)
     info = agent.run(TASK)
@@ -152,24 +193,33 @@ _VENV_SETUP = (
     f"rm -rf {shlex.quote(MSWE_AGENT_VENV)}\n"
     f'retry "uv venv --python {MSWE_AGENT_PYTHON_VERSION} {shlex.quote(MSWE_AGENT_VENV)}"\n'
     f'retry "uv pip install --python {shlex.quote(_VENV_PY)} {shlex.quote(MSWE_PIP_SPEC)}"\n'
-    # pydantic_core's compiled native module intermittently fails to land in the
-    # venv (partial wheel from a corrupt uv cache / index contention at high
-    # conc) -> the agent dies at `import minisweagent.agents.default` with zero
-    # turns (adapter_session_empty; ~46% of gravitational/teleport on one eval).
-    # Verify the agent's REAL import and force a clean reinstall (--reinstall
-    # --no-cache) to repair the partial wheel; a still-broken venv then fails
-    # LOUDLY here (set -e -> CalledProcessError) instead of as a silent empty.
-    f"for i in 1 2 3; do MSWEA_SILENT_STARTUP=1 {shlex.quote(_VENV_PY)} -c 'import minisweagent.agents.default' 2>/dev/null && break;"
+    # Verify the agent's REAL import (the top package doesn't pull in pydantic).
+    # Two distinct failure modes this guards against:
+    #  * `-P` (MANDATORY): the exec runs with cwd = the image WORKDIR (e.g.
+    #    /testbed), so a task repo whose root *is* an agent dependency shadows
+    #    the venv. The pydantic SWE-gym tasks ship /testbed/pydantic/, which the
+    #    bare `python -c` imports instead of the venv's pydantic -> repo-pydantic
+    #    vs venv-pydantic_core skew crashes ("no attribute 'dict_not_none'").
+    #    -P drops cwd from sys.path -- the SAME guard the runner launch uses
+    #    (see run_agent) -- so the venv wins. Deterministic: was hitting 100% of
+    #    pydantic tasks as a loud `exception:RuntimeError` from _ensure_provisioned.
+    #  * reinstall: a partial wheel (corrupt uv cache / index contention at high
+    #    conc) can leave a native ext unimportable; --reinstall --no-cache
+    #    repairs it. A still-broken venv then fails LOUDLY here (set -e) instead
+    #    of as a silent zero-turn adapter_session_empty.
+    f"for i in 1 2 3; do MSWEA_SILENT_STARTUP=1 {shlex.quote(_VENV_PY)} -P -c 'import minisweagent.agents.default' 2>/dev/null && break;"
     f' retry "uv pip install --python {shlex.quote(_VENV_PY)} --reinstall --no-cache {shlex.quote(MSWE_PIP_SPEC)}" || true; done\n'
-    f"MSWEA_SILENT_STARTUP=1 {shlex.quote(_VENV_PY)} -c 'import minisweagent.agents.default'\n"
+    f"MSWEA_SILENT_STARTUP=1 {shlex.quote(_VENV_PY)} -P -c 'import minisweagent.agents.default'\n"
 )
 
 # MSWEA_SILENT_STARTUP suppresses the import-time banner that would otherwise
 # corrupt the provisioning probe's marker comparison. Import the agent's real
 # entrypoint (not just the top package) so the probe also rejects a pre-baked
 # venv whose pydantic_core native module is missing -> re-provision instead of
-# launching a doomed agent.
-_VENV_CHECK = f"MSWEA_SILENT_STARTUP=1 {shlex.quote(_VENV_PY)} -c 'import minisweagent.agents.default'"
+# launching a doomed agent. `-P` keeps the image WORKDIR (e.g. /testbed) off
+# sys.path so a repo named like an agent dep (pydantic tasks) can't shadow the
+# venv and fail the probe; see _VENV_SETUP and the runner launch.
+_VENV_CHECK = f"MSWEA_SILENT_STARTUP=1 {shlex.quote(_VENV_PY)} -P -c 'import minisweagent.agents.default'"
 
 
 class MiniSweAgentRuntime(AgentRuntime):
@@ -214,6 +264,7 @@ class MiniSweAgentRuntime(AgentRuntime):
             "MSWE_CONFIG": MSWE_CONFIG or md.get("agent_config") or "",
             "MSWE_CONFIG_FILE": f"{workdir}/{_CONFIG_FILE}",
             "MSWE_STEP_LIMIT": str(MSWE_STEP_LIMIT),
+            "MSWE_MAX_EMPTY_TURNS": str(MSWE_MAX_EMPTY_TURNS),
             "MSWE_PATH_PREPEND": MSWE_PATH_PREPEND,
             "MSWEA_SILENT_STARTUP": "1",
         }

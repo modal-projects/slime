@@ -1,0 +1,6 @@
+# local launch scripts — machine-specific, never tracked
+*
+!.gitignore
+!qwen3_dapo_og.sh
+!qwen3_6_swe_eval.sh
+!qwen3_6_colocate.sh

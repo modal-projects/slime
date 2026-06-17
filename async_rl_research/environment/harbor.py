@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from ..modal_sandbox import DockerfileImage, ModalSandbox
+from ..profiles.profiling import PhaseTimer
 from .base import EnvMetadataError, RewardResult, RolloutEnv, coerce_prompt
 
 logger = logging.getLogger(__name__)
@@ -228,16 +229,20 @@ class HarborEnv(RolloutEnv):
         # leg, which runs solve.sh rather than the agent). Surfaced in extra so
         # a zero-turn adapter_session_empty self-explains in the rollout dump.
         last_agent = None
+        timer = PhaseTimer()
 
+        t0 = time.monotonic()
         async with self._sandbox(md) as sb:
+            timer.record("work_boot", time.monotonic() - t0)
             workdir = md["workdir"] or await self._detect_workdir(sb)
             q = shlex.quote
             # Test scripts assume /logs/{agent,verifier,artifacts} exist.
-            await sb.exec(
-                f"mkdir -p {q(workdir)} /logs/agent /logs/verifier /logs/artifacts",
-                check=True,
-                timeout=60,
-            )
+            with timer.phase("prep"):
+                await sb.exec(
+                    f"mkdir -p {q(workdir)} /logs/agent /logs/verifier /logs/artifacts",
+                    check=True,
+                    timeout=60,
+                )
 
             # Start the agent clock only once the sandbox is booted and prepped:
             # a cold per-instance image pull can take many minutes, and charging
@@ -257,20 +262,23 @@ class HarborEnv(RolloutEnv):
                 if TASK_TIMEOUT_OVERRIDE and step.get("agent_timeout_sec"):
                     budget = min(budget, int(step["agent_timeout_sec"]))
 
-                await self.write_problem_file(sb, workdir, step["instruction"])
+                with timer.phase("prep"):
+                    await self.write_problem_file(sb, workdir, step["instruction"])
                 leg_md = {**md, "workdir": workdir}
-                leg_result = await run_leg(sb, leg_md, budget)
+                with timer.phase("agent"):
+                    leg_result = await run_leg(sb, leg_md, budget)
                 if leg_result is not None:
                     last_agent = leg_result
 
-                rewards = await self._verify(
-                    sb,
-                    tests_dir=task_dir / step["tests_path"],
-                    workdir=workdir,
-                    verifier={**md["verifier"], **(step.get("verifier") or {})},
-                    eval_timeout_sec=eval_timeout_sec,
-                    instance_id=md["instance_id"],
-                )
+                with timer.phase("verifier"):
+                    rewards = await self._verify(
+                        sb,
+                        tests_dir=task_dir / step["tests_path"],
+                        workdir=workdir,
+                        verifier={**md["verifier"], **(step.get("verifier") or {})},
+                        eval_timeout_sec=eval_timeout_sec,
+                        instance_id=md["instance_id"],
+                    )
                 step_results.append({"name": step["name"], "rewards": rewards, "reward": _scalar_reward(rewards)})
                 if not _meets_min_reward(rewards, step.get("min_reward")):
                     logger.info(
@@ -285,6 +293,7 @@ class HarborEnv(RolloutEnv):
             "harbor_step_results": step_results,
             "harbor_steps_completed": len(step_results),
             "harbor_steps_total": len(steps),
+            "timing": timer.as_dict(),
         }
         if last_agent is not None:
             extra["agent_exit_code"] = last_agent.exit_code
