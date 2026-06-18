@@ -14,7 +14,11 @@ import torch
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from sglang.srt.constants import GPU_MEMORY_TYPE_CUDA_GRAPH, GPU_MEMORY_TYPE_KV_CACHE, GPU_MEMORY_TYPE_WEIGHTS
 
-from slime.backends.sglang_utils.external import start_external_rollout_servers
+from slime.backends.sglang_utils.external import (
+    rollout_endpoint_servers,
+    start_external_rollout_servers,
+    uses_rollout_endpoint,
+)
 from slime.backends.sglang_utils.sglang_config import ModelConfig, ServerGroupConfig, SglangConfig
 from slime.backends.sglang_utils.sglang_engine import SGLangEngine
 from slime.rollout.base_types import call_rollout_fn
@@ -1081,6 +1085,9 @@ def start_rollout_servers(args, pg) -> tuple[dict[str, Any], list[Any]]:
     Note: ``init_http_client`` should be called separately before this,
     as the HTTP client is shared across all servers.
     """
+    if uses_rollout_endpoint(args):
+        return rollout_endpoint_servers(args)
+
     if args.rollout_external:
         return start_external_rollout_servers(args, start_router=_start_router)
 

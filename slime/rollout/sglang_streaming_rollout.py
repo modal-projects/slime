@@ -32,7 +32,7 @@ from typing import Any
 import numpy as np
 import pybase64
 
-from slime.rollout.sglang_rollout import GenerateState, _prepare_prompt_ids
+from slime.rollout.sglang_rollout import GenerateState, _prepare_prompt_ids, apply_rollout_request_hook, get_model_url
 from slime.utils import http_utils
 from slime.utils.processing_utils import encode_image_for_rollout_engine
 from slime.utils.trace_utils import build_sglang_meta_trace_attrs, trace_span
@@ -53,7 +53,7 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
         assert isinstance(sample.prompt, str)
 
     state = GenerateState(args)
-    url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate"
+    url = get_model_url(args, "default", "/generate")
 
     assert sample.status in (
         Sample.Status.PENDING,
@@ -90,6 +90,14 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
     headers = None
     if sample.session_id and getattr(args, "router_policy", None) == "consistent_hashing":
         headers = {"X-SMG-Routing-Key": sample.session_id}
+
+    # Let a user hook mutate the request (e.g. custom headers or a weight_version gate) before the
+    # stream opens. Only when one is configured — the default path opens the stream unchanged. A
+    # stream is one connection, not a retry loop, so any max_retries/retry_sleep the hook sets are
+    # ignored here; only url/payload/headers apply.
+    if getattr(args, "custom_rollout_request_hook_path", None):
+        request = await apply_rollout_request_hook(args, url, payload, headers=headers, sample=sample)
+        url, payload, headers = request["url"], request["payload"], request["headers"]
 
     # Snapshot pre-call sample state. sglang's SSE chunks are cumulative
     # *within this call*; on each chunk we rebuild the post-call view of the
@@ -166,5 +174,9 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
         sample.update_from_meta_info(args, last_meta_info)
     elif state.aborted:
         sample.status = Sample.Status.ABORTED
+        # Record the version of the partial's tokens (every streaming chunk carries it) so off-policy
+        # correction can weight it — update_from_meta_info is skipped without a finish_reason.
+        if "weight_version" in last_meta_info:
+            sample.weight_versions.append(last_meta_info["weight_version"])
 
     return sample
