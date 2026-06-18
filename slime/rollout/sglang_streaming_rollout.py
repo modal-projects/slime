@@ -37,6 +37,7 @@ from slime.rollout.sglang_rollout import (
     _extract_rollout_top_p_token_data,
     _merge_rollout_top_p_token_data,
     _prepare_prompt_ids,
+    apply_rollout_request_hook,
     get_model_url,
 )
 from slime.utils import http_utils
@@ -96,6 +97,14 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
     headers = None
     if sample.session_id and getattr(args, "router_policy", None) == "consistent_hashing":
         headers = {"X-SMG-Routing-Key": sample.session_id}
+
+    # Let a user hook mutate the request (e.g. custom headers or a weight_version gate) before the
+    # stream opens. Only when one is configured — the default path opens the stream unchanged. A
+    # stream is one connection, not a retry loop, so any max_retries/retry_sleep the hook sets are
+    # ignored here; only url/payload/headers apply.
+    if getattr(args, "custom_rollout_request_hook_path", None):
+        request = await apply_rollout_request_hook(args, url, payload, headers=headers, sample=sample)
+        url, payload, headers = request["url"], request["payload"], request["headers"]
 
     # Snapshot pre-call sample state. sglang's SSE chunks are cumulative
     # *within this call*; on each chunk we rebuild the post-call view of the

@@ -569,6 +569,20 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                     "--update-weight-disk-dir for the fleet to pull (requires delta + disk transport)."
                 ),
             )
+            parser.add_argument(
+                "--custom-rollout-request-hook-path",
+                type=str,
+                default=None,
+                help=(
+                    "Path to a hook that can mutate each outgoing generate request before it is sent. "
+                    "Signature: def hook(args, sample, request) -> None | dict (may be async), where "
+                    "request holds 'url', 'payload', 'headers', 'max_retries' and 'retry_sleep'. Mutate "
+                    "request in place and return None, or return a dict of updates to apply. Use it to "
+                    "add custom headers, or for weight-version gating against an opaque rollout endpoint "
+                    "by setting request['payload']['weight_version'] (the hook supplies the target "
+                    "version) and raising max_retries/retry_sleep to wait for the fleet to load it."
+                ),
+            )
             return parser
 
         def add_fault_tolerance_arguments(parser):

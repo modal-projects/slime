@@ -10,6 +10,7 @@ Below is a summary of all available customization interfaces and their purposes.
 | :--- | :--- |
 | [`--rollout-function-path`](#1-rollout-function---rollout-function-path) | Override the entire rollout generation logic. |
 | [`--custom-generate-function-path`](#2-custom-generate-function---custom-generate-function-path) | Override only the generation step (e.g., for RAG or tool use). |
+| [`--custom-rollout-request-hook-path`](#mutating-the-outgoing-request---custom-rollout-request-hook-path) | Mutate each outgoing `/generate` request (e.g., custom headers). |
 | [`--custom-rm-path`](#3-reward-model---custom-rm-path) | Implement custom reward computation logic. |
 | [`--dynamic-sampling-filter-path`](#4-dynamic-sampling-filter---dynamic-sampling-filter-path) | Filter samples during dynamic sampling (e.g., DAPO). |
 | [`--buffer-filter-path`](#5-buffer-filter---buffer-filter-path) | Filter samples in the rollout buffer before training. |
@@ -117,6 +118,19 @@ async def custom_generate(args, sample: Sample, sampling_params: dict) -> list[S
 If one full trajectory has a single total reward but is split into `K` training segments, a common pattern is to distribute that reward across the segments, for example by assigning `reward / K` to each segment, so the same rollout reward is not amplified.
 
 **Example**: See [examples/search-r1/generate_with_search.py](../../../examples/search-r1/generate_with_search.py)
+
+#### Mutating the outgoing request (`--custom-rollout-request-hook-path`)
+
+When you keep the built-in generate function but need to adjust each `/generate` request just before it is sent, use `--custom-rollout-request-hook-path` instead of replacing the whole generate step. The hook receives a `request` dict describing how the call is sent — `url`, `payload`, `headers`, `max_retries`, `retry_sleep` — plus `args` and `sample`. It either mutates `request` in place (returning `None`) or returns a dict of updates:
+
+```python
+def hook(args, sample, request):
+    request["headers"] = {**(request["headers"] or {}), "Authorization": f"Bearer {get_token()}"}
+```
+
+Use it to add custom headers (auth tokens, routing keys), or for weight-version gating against an opaque rollout endpoint — set `request["payload"]["weight_version"]` so the fleet serves only a matching version, and raise `request["max_retries"]`/`request["retry_sleep"]` so slime backs off and waits for the fleet to load it.
+
+The hook may be `async`. It runs for both built-in generate paths (the default buffered one and `sglang_streaming_rollout.generate_streaming`) only when configured — otherwise the request is sent unchanged. Your own custom generate functions that post requests directly are responsible for their own request shaping (call `apply_rollout_request_hook` if you want the same behavior).
 
 ---
 

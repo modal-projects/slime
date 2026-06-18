@@ -159,6 +159,37 @@ def get_model_url(args: Namespace, model_name: str, endpoint: str = "/generate")
     return f"http://{args.sglang_router_ip}:{args.sglang_router_port}{endpoint}"
 
 
+async def apply_rollout_request_hook(
+    args: Namespace,
+    url: str,
+    payload: dict[str, Any],
+    *,
+    headers: dict | None,
+    sample: Sample,
+) -> dict[str, Any]:
+    """Run ``custom_rollout_request_hook_path`` on one outgoing /generate request.
+
+    The hook receives ``request = {"url", "payload", "headers", "max_retries", "retry_sleep"}`` along
+    with ``args`` and ``sample`` (which carries its own context, e.g. ``sample.index``) — everything
+    about how this one request is sent, and nothing about the rollout itself. It mutates ``request``
+    in place and returns None, or returns a dict of updates; this returns the resulting request.
+    Callers invoke this only when a hook is set, so the default path keeps calling ``post`` directly.
+    """
+    request = {"url": url, "payload": payload, "headers": headers, "max_retries": 60, "retry_sleep": 1.0}
+    hook = load_function(args.custom_rollout_request_hook_path)
+    result = hook(args, sample, request)
+    if inspect.isawaitable(result):
+        result = await result
+    if result is not None:
+        if not isinstance(result, dict):
+            raise TypeError(
+                f"{args.custom_rollout_request_hook_path} must return None or a dict of request updates, "
+                f"got {type(result).__name__}"
+            )
+        request.update(result)
+    return request
+
+
 class GenerateState(metaclass=SingletonMeta):
     """
     The global state for the generation process.
@@ -277,7 +308,17 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
             headers = {"X-SMG-Routing-Key": sample.session_id}
 
     with trace_span(sample, "sglang_generate", attrs={"max_new_tokens": sampling_params["max_new_tokens"]}) as span:
-        output = await post(url, payload, headers=headers)
+        if getattr(args, "custom_rollout_request_hook_path", None):
+            request = await apply_rollout_request_hook(args, url, payload, headers=headers, sample=sample)
+            output = await post(
+                request["url"],
+                request["payload"],
+                headers=request["headers"],
+                max_retries=request["max_retries"],
+                retry_sleep=request["retry_sleep"],
+            )
+        else:
+            output = await post(url, payload, headers=headers)
         span.update(build_sglang_meta_trace_attrs(output["meta_info"]))
 
     if "output_token_logprobs" in output["meta_info"]:
