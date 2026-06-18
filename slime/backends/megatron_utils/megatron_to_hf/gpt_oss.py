@@ -2,6 +2,8 @@ import re
 
 import torch
 
+from .dtype_utils import to_model_dtype
+
 
 def convert_gpt_oss_to_hf(args, name, param):
     """Convert Megatron GPT-OSS parameter names to HF format for weight update to SGLang."""
@@ -98,8 +100,8 @@ def convert_gpt_oss_to_hf(args, name, param):
             return [(f"model.layers.{layer_idx}.post_attention_layernorm.weight", param)]
         # Router
         elif rest == "mlp.router.weight":
-            return [(f"model.layers.{layer_idx}.mlp.router.weight", param)]
+            return [(f"model.layers.{layer_idx}.mlp.router.weight", to_model_dtype(args, param))]
         elif rest == "mlp.router.bias":
-            return [(f"model.layers.{layer_idx}.mlp.router.bias", param)]
+            return [(f"model.layers.{layer_idx}.mlp.router.bias", to_model_dtype(args, param))]
 
     raise ValueError(f"Unknown parameter name: {name}")

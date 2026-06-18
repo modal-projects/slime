@@ -2,6 +2,8 @@ import re
 
 import torch
 
+from .dtype_utils import to_model_dtype
+
 
 def convert_minimax_m2_to_hf(args, name, param):
     """Convert Megatron parameter names/tensors to HuggingFace format for MiniMax-M2.5.
@@ -79,8 +81,10 @@ def convert_minimax_m2_to_hf(args, name, param):
 
         # Router
         elif rest == "mlp.router.weight":
-            return [(f"model.layers.{layer_idx}.block_sparse_moe.gate.weight", param)]
+            return [(f"model.layers.{layer_idx}.block_sparse_moe.gate.weight", to_model_dtype(args, param))]
         elif rest == "mlp.router.expert_bias":
-            return [(f"model.layers.{layer_idx}.block_sparse_moe.e_score_correction_bias", param)]
+            return [
+                (f"model.layers.{layer_idx}.block_sparse_moe.e_score_correction_bias", to_model_dtype(args, param))
+            ]
 
     raise ValueError(f"Unknown parameter name: {name}")
