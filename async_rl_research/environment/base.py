@@ -5,10 +5,10 @@ validation, sandbox boot/prep, driving the agent across step(s), grading into a
 reward. Mirrors ``agent/base.py``'s AgentRuntime: one ``generate()``
 orchestrates ``runtime x env``.
 
-Schema-pair convention: ``env/<name>.py`` and ``env/convert2slime/<name>.py``
+Schema-pair convention: ``environment/<name>.py`` and ``environment/convert2slime/<name>.py``
 are paired -- the converter is the only writer of the ``metadata`` dict and
 ``normalize_metadata`` the only reader. Rows select their env via
-``metadata.task_type`` (absent -> ``swe_gym``).
+``metadata.task_type`` (absent -> ``harbor``).
 
 Writing a new env: subclass, declare ``name``, implement ``normalize_metadata``
 + ``rollout``, register in ``ENVS``. ``rollout`` owns the whole sandbox
@@ -150,11 +150,10 @@ def coerce_prompt(prompt) -> str:
 # ---------------------------------------------------------------------------
 # Registry + loader (mirrors agent.base.RUNTIMES / load_runtime)
 # ---------------------------------------------------------------------------
-DEFAULT_ENV = "swe_gym"
+DEFAULT_ENV = "harbor"
 
 # task_type -> "module:Class" (strings so importing base.py imports no env module).
 ENVS: dict[str, str] = {
-    "swe_gym": "async_rl_research.environment.swe_gym:SweGymEnv",
     "harbor": "async_rl_research.environment.harbor:HarborEnv",
 }
 

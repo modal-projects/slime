@@ -30,6 +30,12 @@ logger = logging.getLogger(__name__)
 # marker appeared (otherwise run_agent returns the agent's exit code).
 EXIT_BUDGET_EXCEEDED = -2
 
+# Recorded when the done-marker held no parseable exit code.
+EXIT_UNKNOWN = -1
+
+# Bytes of the agent log tail surfaced on a nonzero exit (host log + dump).
+LOG_TAIL_BYTES = 4000
+
 
 class AgentRunResult(NamedTuple):
     """Outcome of one agent leg: the process ``exit_code`` (or
@@ -141,14 +147,14 @@ class AgentRuntime(ABC):
             ec, out, _ = await sb.exec(f"test -f {q(done_path)} && cat {q(done_path)}", check=False, timeout=15)
             if ec == 0:
                 try:
-                    exit_code = int((out or "").strip() or "-1")
+                    exit_code = int((out or "").strip() or str(EXIT_UNKNOWN))
                 except ValueError:
-                    exit_code = -1
+                    exit_code = EXIT_UNKNOWN
                 break
         tail = ""
         if exit_code != 0:
             _, raw_tail, _ = await sb.exec(
-                f"tail -c 4000 {q(f'{workdir}/{log}')} 2>/dev/null", check=False, timeout=15
+                f"tail -c {LOG_TAIL_BYTES} {q(f'{workdir}/{log}')} 2>/dev/null", check=False, timeout=15
             )
             tail = (raw_tail or "").strip()
             if tail:

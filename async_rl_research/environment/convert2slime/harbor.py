@@ -1,6 +1,6 @@
 """Materialize a harbor dataset as slime prompt data + local task dirs.
 
-Schema pair of ``env/harbor.py`` and the ONLY writer of that schema: parses
+Schema pair of ``environment/harbor.py`` and the ONLY writer of that schema: parses
 each ``task.toml`` offline and bakes everything into ``metadata`` so the rollout
 never reads harbor config. Output goes under ``--out-dir`` (on the slime-data
 volume): ``<name>.jsonl`` + ``tasks/<instance_id>/``, referenced via

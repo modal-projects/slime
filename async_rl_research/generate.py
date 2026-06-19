@@ -5,7 +5,7 @@ Wire-up: ``--custom-generate-function-path async_rl_research.generate.generate``
 Agent- and task-agnostic per-sample orchestrator. Owns the parts identical for
 any in-sandbox agent on any task family (adapter/HTTP lifecycle, session
 management, trajectory merge, abort/timeout isolation) and delegates the rest to
-a runtime (``agent/base.py``) and an env (``env/base.py``, picked per row by
+a runtime (``agent/base.py``) and an env (``environment/base.py``, picked per row by
 metadata.task_type). Per sample: ``_State`` serves the runtime's adapter on a bg
 thread, a session is opened keyed by session_id, ``env.rollout`` runs the agent
 (which dials back to the adapter per model call), and the recorded token
@@ -229,7 +229,7 @@ def _merge_samples(
         "instance_id": instance_id,
         "is_solved": reward_result.is_solved,
         "elapsed_sec": elapsed_sec,
-        # Env-specific diagnostics (swe_gym: applied_cleanly; harbor: per-step).
+        # Env-specific diagnostics (harbor: per-step verify results).
         **reward_result.extra,
     }
     fanned = fan_out_sample_segments(

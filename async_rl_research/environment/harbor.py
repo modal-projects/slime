@@ -1,6 +1,6 @@
 """Harbor env: run harbor-format tasks (USACO, ...) as RL episodes on Modal.
 
-Schema pair of ``env/convert2slime/harbor.py`` (see ``base.py``); the converter
+Schema pair of ``environment/convert2slime/harbor.py`` (see ``base.py``); the converter
 bakes everything into ``metadata`` so this never reads ``task.toml`` at rollout.
 
 Episode (harbor "shared" verifier semantics): boot sandbox, then per step write
@@ -92,7 +92,7 @@ class HarborEnv(RolloutEnv):
     # No agent_config default: harbor instruction.md files carry their own
     # deliverable contract. Override per-row via metadata.agent_config.
 
-    # Row schema (written by env/convert2slime/harbor.py -- keep in sync)
+    # Row schema (written by environment/convert2slime/harbor.py -- keep in sync)
     def normalize_metadata(self, sample) -> dict[str, Any]:
         m = sample.metadata or {}
         task_path = m.get("task_path")
@@ -447,7 +447,7 @@ def _oracle_main() -> int:
     parser = argparse.ArgumentParser(
         description="Run harbor reference solutions through the rollout path (reward should be 1.0)."
     )
-    parser.add_argument("jsonl", help="converted slime prompt JSONL (env/convert2slime/harbor.py output)")
+    parser.add_argument("jsonl", help="converted slime prompt JSONL (environment/convert2slime/harbor.py output)")
     parser.add_argument("--task-root", help=f"task root (default: ${TASK_ROOT_ENV} or the JSONL's directory)")
     parser.add_argument("--limit", type=int, default=1, help="how many rows to check (default 1)")
     parser.add_argument("--index", type=int, help="check exactly this row")

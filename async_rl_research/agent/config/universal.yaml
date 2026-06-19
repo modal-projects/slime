@@ -13,8 +13,7 @@
 # format, subshell semantics, how to finish). The task's DELIVERABLE (patch
 # vs. artifacts vs. stdout) belongs in the instruction text the env writes to
 # PROBLEM_STATEMENT.md, which is rendered here as {{task}} -- harbor
-# instruction.md files already follow this; swe_gym appends its suffix in
-# env/swe_gym.py.
+# instruction.md files carry that deliverable contract.
 #
 # step_limit / cost_limit / sampling knobs are overridden host-side by the
 # runner regardless of what this file says.

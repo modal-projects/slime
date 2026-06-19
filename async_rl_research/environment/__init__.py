@@ -1,4 +1,4 @@
-"""Task environments (env) + their dataset converters (env/convert2slime)."""
+"""Task environments + their dataset converters (environment/convert2slime)."""
 
 from .base import PROBLEM_FILE, EnvMetadataError, RewardResult, RolloutEnv, load_env
 
