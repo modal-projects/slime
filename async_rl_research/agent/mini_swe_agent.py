@@ -1,238 +1,144 @@
-"""mini-swe-agent driver.
+"""mini-swe-agent runtime (the default AgentRuntime).
 
-This module is the agent-specific half of the rollout. The generic recipe
-(adapter/HTTP lifecycle, trajectory merge, abort isolation, dataset
-normalization, sandbox boot / git_diff / evaluate) lives in
-``async_rl_research.generate`` and ``async_rl_research.sandbox``. Here we
-own only what is unique to mini-swe-agent:
+Runs stock mini-swe-agent (v2) headless inside the sandbox in an isolated
+uv-venv, with every model call dialing back to the slime adapter over litellm's
+OpenAI-compatible API. Token capture + loss masking happen host-side; the
+runner never sees token ids. The adapter MUST use the served model's sglang
+tool-call parser (v2 drives bash via native tool-calls), e.g.
+``--sglang-tool-call-parser qwen25 --sglang-reasoning-parser qwen3``.
 
-    * ADAPTER_CLS / MODEL_NAME -- which slime adapter speaks this agent's wire
-      protocol (mini-swe-agent talks to litellm's OpenAI-compatible API, so we
-      intercept with OpenAIAdapter).
-    * the in-sandbox **headless runner** (``MINI_RUNNER_PY``) -- stock
-      mini-swe-agent (LitellmModel + LocalEnvironment + DefaultAgent) wired so
-      every model call dials back to the slime adapter.
-    * ``run_agent`` -- provision the package, upload the runner + task, launch
-      it detached, and poll a done-marker (sandbox gateways reset long-lived
-      HTTP/2 connections, so we cannot hold a multi-minute foreground exec).
-
-Token capture + loss masking happen entirely host-side in the adapter; this
-runner is "dumb" and never sees token ids. mini-swe-agent runs UNMODIFIED at
-its public OpenAI boundary -- the only requirement on the sandbox image is
-python + the ``mini-swe-agent`` package (prefer baking it in; the best-effort
-pip install below is a fallback for dev).
-
-Design A wire flow per turn::
-
-    in-sandbox: litellm.completion(messages, tools=[BASH_TOOL])
-                -> POST {adapter_url}/v1/chat/completions  Bearer <session_id>
-    host adapter: render messages -> input_ids -> SGLang /generate
-                  (return_logprob) -> record TurnRecord -> OpenAI JSON back
-    in-sandbox: run bash tool-call locally -> append observation -> loop
-
-The served model must support tool-call bash; set the matching SGLang parsers
-on the launcher, e.g. ``--sglang-tool-call-parser qwen3_coder`` and
-``--sglang-reasoning-parser qwen3``.
+The in-sandbox programs live in sibling files so they stay lint/format-able:
+``mini_swe_runner.py`` (the headless runner) and ``config/venv_setup.sh`` (uv
+provisioning); both are read at import and written into the sandbox at rollout.
 """
 
 from __future__ import annotations
 
-import asyncio
-import logging
 import os
 import shlex
-import time
+from pathlib import Path
 
-from slime.agent.adapters import OpenAIAdapter
 from slime.agent.sandbox import Sandbox
 
-logger = logging.getLogger(__name__)
+from ..environment.base import PROBLEM_FILE
 
+# Renders tool-call arguments as a dict so Qwen3.6's qwen3_coder chat template
+# doesn't crash on turn 2+ (safe for hermes-style Qwen3 too).
+from .adapters import QwenOpenAIAdapter
+from .base import AgentRunResult, AgentRuntime
 
-# --- driver declaration (read by async_rl_research.generate._State) ---------
-ADAPTER_CLS = OpenAIAdapter
-# Advertised to litellm as "openai/<MODEL_NAME>". The adapter ignores the name
-# (it routes to the SGLang-served actor); litellm only needs the provider
-# prefix so it speaks the OpenAI dialect at our adapter_url.
-MODEL_NAME = "slime-actor"
+_HERE = Path(__file__).parent
 
-
-# --- mini-swe-agent-specific knobs ------------------------------------------
 MSWE_STEP_LIMIT = int(os.environ.get("MSWE_STEP_LIMIT", "50"))
-# Prefer baking `pip install mini-swe-agent==<pin>` into the sandbox image. If
-# MSWE_PIP_INSTALL=1, run_agent will best-effort install it at boot (needs the
-# sandbox to have outbound PyPI access).
-MSWE_PIP_INSTALL = os.environ.get("MSWE_PIP_INSTALL", "0") == "1"
-MSWE_PIP_SPEC = os.environ.get("MSWE_PIP_SPEC", "mini-swe-agent")
+# Consecutive no-tool-call model turns before the runner ends the episode: a
+# stuck model that never reaches the context wall would otherwise format-error
+# its way to MSWE_STEP_LIMIT. See _StopAwareModel in mini_swe_runner.py.
+MSWE_MAX_EMPTY_TURNS = int(os.environ.get("MSWE_MAX_EMPTY_TURNS", "3"))
+# Which YAML config (prompts) the runner loads. Override ladder: MSWE_CONFIG
+# env (global) > metadata.agent_config (per-row) > universal config below.
+MSWE_CONFIG = os.environ.get("MSWE_CONFIG", "")
+# Read at import: the scaffold must be identical for every rollout in a run.
+UNIVERSAL_CONFIG_YAML = (_HERE / "config" / "universal.yaml").read_text(encoding="utf-8")
+# Exact-pinned: prompts + wire protocol are part of the RL task distribution,
+# and mini_swe_runner.py is written against the v2 API.
+MSWE_PIP_SPEC = os.environ.get("MSWE_PIP_SPEC", "mini-swe-agent==2.3.1")
+# Prepended to PATH for the agent's bash commands: LocalEnvironment runs via
+# /bin/sh so `conda activate testbed` never fires; this is how its python wins.
+MSWE_PATH_PREPEND = os.environ.get("MSWE_PATH_PREPEND", "/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/bin")
+# Isolated venv so the testbed conda env is never used or clobbered. Provisioned
+# at boot with uv; can be pre-baked into a derived image.
+MSWE_AGENT_VENV = os.environ.get("MSWE_AGENT_VENV", "/opt/mswe-agent")
+MSWE_AGENT_PYTHON_VERSION = os.environ.get("MSWE_AGENT_PYTHON_VERSION", "3.11")
 
-# Sandbox paths (kept under workdir; excluded from the captured diff).
+_VENV_PY = f"{MSWE_AGENT_VENV}/bin/python"
+
 _RUNNER = ".mswe_runner.py"
-_LAUNCH = ".mswe_run.sh"
-_DONE = ".mswe_done"
-_LOG = ".mswe_log"
-_PROBLEM = "PROBLEM_STATEMENT.md"
+_CONFIG_FILE = ".mswe_config.yaml"
 
 
-# ---------------------------------------------------------------------------
-# Headless in-sandbox runner.
-#
-# NOTE: PIN + VERIFY the imports / kwargs against the mini-swe-agent version
-# baked into the image -- class names and config kwargs have shifted across
-# releases. The wiring that must hold regardless: litellm points at the slime
-# adapter (OPENAI_API_BASE/OPENAI_API_KEY), and we DO NOT set temperature here
-# (the adapter's per-session sampling defaults must win, keeping RL on-policy).
-# ---------------------------------------------------------------------------
-MINI_RUNNER_PY = r'''"""Headless mini-swe-agent runner -- runs INSIDE the sandbox (design A)."""
-import os
-import sys
-import traceback
-
-WORKDIR = os.environ["MSWE_WORKDIR"]
-MODEL = os.environ.get("MSWE_MODEL", "slime-actor")
-STEP_LIMIT = int(os.environ.get("MSWE_STEP_LIMIT", "50"))
-with open(os.environ["MSWE_PROBLEM_FILE"], encoding="utf-8") as fh:
-    TASK = fh.read()
-
-try:
-    from minisweagent.agents.default import DefaultAgent
-    from minisweagent.environments.local import LocalEnvironment
-    from minisweagent.models.litellm_model import LitellmModel
-
-    # api_base / api_key come from OPENAI_API_BASE / OPENAI_API_KEY in the env
-    # (litellm's openai provider reads them). No temperature/top_p here.
-    model = LitellmModel(model_name="openai/" + MODEL)
-    env = LocalEnvironment(cwd=WORKDIR)
-    # cost_limit=0 disables cost tracking (meaningless against a local actor).
-    agent = DefaultAgent(model, env, step_limit=STEP_LIMIT, cost_limit=0.0)
-    agent.run(TASK)
-    sys.exit(0)
-except SystemExit:
-    raise
-except Exception:
-    traceback.print_exc()
-    sys.exit(1)
-'''
+# Headless in-sandbox runner (mini-swe-agent v2, exact-pinned). NO sampling
+# knobs reach the request body -- the adapter applies them OVER its per-session
+# defaults, so a client-sent temperature would silently turn rollouts greedy.
+MINI_RUNNER_PY = (_HERE / "mini_swe_runner.py").read_text(encoding="utf-8")
 
 
-# ---------------------------------------------------------------------------
-# run_agent: provision + launch + poll (the only entrypoint generate.py calls)
-# ---------------------------------------------------------------------------
-async def run_agent(
-    sb: Sandbox,
-    *,
-    md: dict,
-    session_id: str,
-    adapter_url: str,
-    time_budget_sec: int,
-) -> int:
-    """Provision mini-swe-agent in ``sb``, run it on the task, poll to done.
+# uv-venv provisioning script. The host exports the resolved config in front of
+# config/venv_setup.sh so operator env overrides (MSWE_AGENT_VENV, ...) still
+# propagate into the sandbox; the script's own defaults keep it runnable
+# standalone. See the script header + profiles/PROVISIONING_VENV_VS_VOLUME.md.
+_VENV_SETUP = (
+    f"export MSWE_AGENT_VENV={shlex.quote(MSWE_AGENT_VENV)}\n"
+    f"export MSWE_AGENT_PYTHON_VERSION={shlex.quote(MSWE_AGENT_PYTHON_VERSION)}\n"
+    f"export MSWE_PIP_SPEC={shlex.quote(MSWE_PIP_SPEC)}\n"
+) + (_HERE / "config" / "venv_setup.sh").read_text(encoding="utf-8")
 
-    Returns the runner's exit code, or ``-2`` if the wallclock budget elapses
-    first. The agent dials back to ``adapter_url`` for every model call and
-    authenticates with ``session_id`` so the adapter groups its turns.
-    """
-    workdir = md["workdir"]
-    await _prepare_workspace(sb, workdir, md)
-    await _ensure_installed(sb)
-    return await _launch_and_poll(
-        sb,
-        workdir=workdir,
-        session_id=session_id,
-        adapter_url=adapter_url,
-        time_budget_sec=time_budget_sec,
-    )
+# MSWEA_SILENT_STARTUP suppresses the import-time banner that would otherwise
+# corrupt the provisioning probe's marker comparison. Import the agent's real
+# entrypoint (not just the top package) so the probe also rejects a pre-baked
+# venv whose pydantic_core native module is missing -> re-provision instead of
+# launching a doomed agent. `-P` keeps the image WORKDIR (e.g. /testbed) off
+# sys.path so a repo named like an agent dep (pydantic tasks) can't shadow the
+# venv and fail the probe; see config/venv_setup.sh and the runner launch.
+_VENV_CHECK = f"MSWEA_SILENT_STARTUP=1 {shlex.quote(_VENV_PY)} -P -c 'import minisweagent.agents.default'"
 
 
-async def _prepare_workspace(sb: Sandbox, workdir: str, md: dict) -> None:
-    # git operations inside the sandbox need the repo marked safe; the diff is
-    # captured by sandbox.git_diff later.
-    await sb.exec("git config --system --add safe.directory '*'", check=False, timeout=60)
-    if md.get("pre_commands"):
-        await _apply_pre_commands(sb, workdir, md["pre_commands"])
-    await sb.write_file(f"{workdir}/{_PROBLEM}", md.get("problem_statement") or "")
-    await sb.write_file(f"{workdir}/{_RUNNER}", MINI_RUNNER_PY)
+class MiniSweAgentRuntime(AgentRuntime):
+    name = "mini-swe"
+    adapter_cls = QwenOpenAIAdapter
+    # model_name inherits AgentRuntime's "slime-actor" default.
+    scratch_prefix = ".mswe"
+    # "patch.txt": submission artifact the builtin swebench prompt tells the
+    # agent to create, which `git add -N .` would otherwise sweep into the diff.
+    diff_exclude = (_RUNNER, _CONFIG_FILE, "patch.txt")
 
-
-async def _apply_pre_commands(sb: Sandbox, workdir: str, pre) -> None:
-    # Keep the work sandbox baseline aligned with eval (sweb-style pre_commands
-    # are typically `git checkout <base_sha> -f`); skipping them makes the
-    # model's diff context mismatch the eval base -> apply failures.
-    body = pre.replace("\\n", "\n") if isinstance(pre, str) else "\n".join(c for c in (pre or []) if c)
-    await sb.write_file(f"{workdir}/.mswe_pre.sh", "set -e\n" + body)
-    await sb.exec(f"cd {shlex.quote(workdir)} && bash .mswe_pre.sh", check=False, timeout=600)
-
-
-async def _ensure_installed(sb: Sandbox) -> None:
-    ec, out, _ = await sb.exec(
-        'python -c "import minisweagent" 2>/dev/null && echo MSWE_OK', check=False, timeout=60
-    )
-    if "MSWE_OK" in (out or ""):
-        return
-    if not MSWE_PIP_INSTALL:
-        raise RuntimeError(
-            "mini-swe-agent is not installed in the sandbox image. Bake "
-            f"`pip install {MSWE_PIP_SPEC}` into the image, or set "
-            "MSWE_PIP_INSTALL=1 to install at boot (needs outbound PyPI)."
+    async def run_agent(
+        self,
+        sb: Sandbox,
+        *,
+        md: dict,
+        session_id: str,
+        adapter_url: str,
+        time_budget_sec: int,
+    ) -> AgentRunResult:
+        """Provision mini-swe-agent in ``sb``, run it on the task, poll to done."""
+        workdir = md["workdir"]
+        await sb.write_file(f"{workdir}/{_RUNNER}", MINI_RUNNER_PY)
+        await sb.write_file(f"{workdir}/{_CONFIG_FILE}", UNIVERSAL_CONFIG_YAML)
+        await self._ensure_provisioned(
+            sb,
+            spec=MSWE_PIP_SPEC,
+            marker_path=f"{MSWE_AGENT_VENV}/.mswe_spec",
+            setup_script=_VENV_SETUP,
+            check_cmd=_VENV_CHECK,
         )
-    logger.info("[mini_swe_agent] installing %s in sandbox %s", MSWE_PIP_SPEC, sb.sandbox_id[:8])
-    await sb.exec(f"pip install --no-input {shlex.quote(MSWE_PIP_SPEC)}", check=True, timeout=600)
+
+        base = f"{adapter_url}/v1"
+        env = {
+            "OPENAI_API_BASE": base,
+            "OPENAI_BASE_URL": base,
+            "OPENAI_API_KEY": session_id,
+            "MSWE_MODEL": self.model_name,
+            "MSWE_WORKDIR": workdir,
+            "MSWE_PROBLEM_FILE": f"{workdir}/{PROBLEM_FILE}",
+            # Override ladder: global env > per-row builtin > universal config.
+            "MSWE_CONFIG": MSWE_CONFIG or md.get("agent_config") or "",
+            "MSWE_CONFIG_FILE": f"{workdir}/{_CONFIG_FILE}",
+            "MSWE_STEP_LIMIT": str(MSWE_STEP_LIMIT),
+            "MSWE_MAX_EMPTY_TURNS": str(MSWE_MAX_EMPTY_TURNS),
+            "MSWE_PATH_PREPEND": MSWE_PATH_PREPEND,
+            "MSWEA_SILENT_STARTUP": "1",
+        }
+        # Run with the ISOLATED venv interpreter; -P keeps the workdir off
+        # sys.path so a repo sharing a name with an agent dep can't shadow it.
+        return await self._detached_run(
+            sb,
+            workdir=workdir,
+            command=f"{shlex.quote(_VENV_PY)} -P {shlex.quote(_RUNNER)}",
+            env=env,
+            time_budget_sec=time_budget_sec,
+            log_tag=f"session={session_id}",
+        )
 
 
-async def _launch_and_poll(
-    sb: Sandbox,
-    *,
-    workdir: str,
-    session_id: str,
-    adapter_url: str,
-    time_budget_sec: int,
-) -> int:
-    """Launch the runner detached + poll a done-marker file.
-
-    Sandbox gateways reset HTTP/2 around ~6.5 min, so we cannot keep a
-    long-lived foreground exec. The launcher writes the exit code into a marker
-    file; we poll it every 5s via short RPCs (which also keeps the sandbox
-    alive against idle GC).
-    """
-    q = shlex.quote
-    base = q(f"{adapter_url}/v1")
-    launcher_body = (
-        "#!/bin/bash\n"
-        f"cd {q(workdir)}\n"
-        # litellm's openai provider reads these for base URL + bearer auth.
-        f"export OPENAI_API_BASE={base}\n"
-        f"export OPENAI_BASE_URL={base}\n"
-        f"export OPENAI_API_KEY={q(session_id)}\n"
-        f"export MSWE_MODEL={q(MODEL_NAME)}\n"
-        f"export MSWE_WORKDIR={q(workdir)}\n"
-        f"export MSWE_PROBLEM_FILE={q(f'{workdir}/{_PROBLEM}')}\n"
-        f"export MSWE_STEP_LIMIT={q(str(MSWE_STEP_LIMIT))}\n"
-        f"python {q(_RUNNER)} > {q(_LOG)} 2>&1\n"
-        f"echo $? > {q(_DONE)}\n"
-    )
-    await sb.write_file(f"{workdir}/{_LAUNCH}", launcher_body)
-    await sb.exec(f"cd {q(workdir)} && chmod +x {q(_LAUNCH)}", check=False, timeout=30)
-    # Detach so the exec RPC returns immediately; the marker file is the signal.
-    await sb.exec(
-        f"cd {q(workdir)} && setsid bash {q(_LAUNCH)} < /dev/null > /dev/null 2>&1 &",
-        check=False,
-        timeout=30,
-    )
-
-    done_path = f"{workdir}/{_DONE}"
-    deadline = time.time() + time_budget_sec
-    exit_code = -2  # convention: -2 = budget exceeded
-    while time.time() < deadline:
-        await asyncio.sleep(5)
-        ec, out, _ = await sb.exec(f"test -f {q(done_path)} && cat {q(done_path)}", check=False, timeout=15)
-        if ec == 0:
-            try:
-                exit_code = int((out or "").strip() or "-1")
-            except ValueError:
-                exit_code = -1
-            break
-    logger.info("[mini_swe_agent] session=%s exit=%s elapsed<=%ds", session_id, exit_code, time_budget_sec)
-    return exit_code
-
-
-# sandbox.git_diff should exclude these scratch files from the captured diff:
-DIFF_EXCLUDE = (_PROBLEM, _RUNNER, _LAUNCH, _DONE, _LOG, ".mswe_pre.sh")
+# Module export for dotted-module-path loading (see load_runtime).
+RUNTIME = MiniSweAgentRuntime

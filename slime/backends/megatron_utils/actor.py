@@ -591,6 +591,26 @@ class MegatronTrainRayActor(TrainRayActor):
         if self.args.offload_train:
             self.sleep()
 
+    def save_hf(self, rollout_id: int = 0) -> None:
+        """DEBUG: dump HF via the real resync converter only (no megatron ckpt).
+
+        Used by the qwen3.6 resync probe to test the live TP/EP gather+convert in
+        isolation. Resolves hf_checkpoint to a local dir (raw save_hf requires it).
+        """
+        import os
+
+        if self.args.offload_train:
+            self.wake_up()
+        if not os.path.isdir(self.args.hf_checkpoint):
+            from huggingface_hub import snapshot_download
+
+            self.args.hf_checkpoint = snapshot_download(self.args.hf_checkpoint, local_files_only=True)
+        from slime.backends.megatron_utils.model import save_hf_model
+
+        save_hf_model(self.args, rollout_id, self.model)
+        if self.args.offload_train:
+            self.sleep()
+
     @timer
     def update_weights(self) -> None:
         if self.args.debug_train_only or self.args.debug_rollout_only:

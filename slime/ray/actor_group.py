@@ -141,6 +141,10 @@ class RayTrainGroup:
         """Save actor model"""
         return ray.get([actor.save_model.remote(rollout_id, force_sync=force_sync) for actor in self._actor_handlers])
 
+    def save_hf(self, rollout_id=0):
+        """DEBUG (qwen3.6 resync probe): dump HF via the real resync converter."""
+        return ray.get([actor.save_hf.remote(rollout_id) for actor in self._actor_handlers])
+
     def update_weights(self):
         """Broadcast weights from rank 0 to all other ranks."""
         return ray.get([actor.update_weights.remote() for actor in self._actor_handlers])

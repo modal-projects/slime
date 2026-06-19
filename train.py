@@ -1,3 +1,5 @@
+import os
+
 import ray
 
 from slime.ray.placement_group import create_placement_groups, create_rollout_manager, create_training_models
@@ -16,12 +18,33 @@ def train(args):
     # need to initialize rollout manager first to calculate num_rollout
     rollout_manager, num_rollout_per_epoch = create_rollout_manager(args, pgs["rollout"])
 
-    # Update primary W&B with SGLang metrics endpoint now that servers are up.
-    router_addr = ray.get(rollout_manager.get_metrics_router_addr.remote())
-    update_tracking_open_metrics(args, router_addr)
+    # DEBUG (qwen3.6 resync probe): skip sglang-metrics wiring for the HF-dump probes.
+    _hf_probe = os.environ.get("SLIME_SAVE_HF_AND_EXIT") or os.environ.get("SLIME_SAVE_HF_AFTER_TRAIN")
+    if not _hf_probe:
+        # Update primary W&B with SGLang metrics endpoint now that servers are up.
+        router_addr = ray.get(rollout_manager.get_metrics_router_addr.remote())
+        update_tracking_open_metrics(args, router_addr)
 
     # create the actor and critic models
     actor_model, critic_model = create_training_models(args, pgs, rollout_manager)
+
+    # DEBUG (qwen3.6 resync probe): the model is loaded at the real TP/EP layout;
+    # dump HF via the live resync converter and exit BEFORE any train — tests the
+    # gather+convert on the clean model only.
+    if os.environ.get("SLIME_SAVE_HF_AND_EXIT"):
+        actor_model.save_hf(0)
+        finish_tracking(args)
+        return
+
+    # DEBUG (qwen3.6 resync probe): train EXACTLY ONE step on dumped rollout data
+    # (load_debug_rollout_data → no sglang), then dump HF — tests whether the
+    # optimizer/backward step corrupts the Megatron weights.
+    if os.environ.get("SLIME_SAVE_HF_AFTER_TRAIN"):
+        rollout_data_ref = ray.get(rollout_manager.generate.remote(0))
+        ray.get(actor_model.async_train(0, rollout_data_ref))
+        actor_model.save_hf(0)
+        finish_tracking(args)
+        return
 
     if args.offload_rollout:
         ray.get(rollout_manager.onload_weights.remote())

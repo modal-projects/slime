@@ -5,7 +5,8 @@ import torch
 
 from slime.utils.misc import load_function
 from slime.utils.ppo_utils import compute_policy_loss
-from slime_plugins.losses.cispo import cispo_policy_loss_function, compute_policy_loss as compute_cispo_policy_loss
+from slime_plugins.losses.cispo import cispo_policy_loss_function
+from slime_plugins.losses.cispo import compute_policy_loss as compute_cispo_policy_loss
 
 
 @pytest.mark.unit
