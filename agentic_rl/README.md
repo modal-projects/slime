@@ -1,73 +1,97 @@
-# agentic_rl — async agentic SWE RL for slime
+# agentic_rl — fully-async agentic RL for slime
 
-Fully-async RL on SWE-rebench-V2 coding tasks with the mini-swe-agent harness,
-Modal sandboxes for execution, and slime for training. Injected entirely via
-slime's hooks — no edits to `slime/`.
+Fully-async RL on agentic coding/competitive-programming tasks with the
+mini-swe-agent harness, Modal sandboxes for execution, and slime for training.
+Injected entirely via slime's hooks — **no edits to `slime/`**.
 
 ## Design (first principles)
 
 The harness **is** the agent loop, so we don't reimplement it. We intercept at
-the one thing every harness has — the model API — and let the harness run
-unmodified. mini-swe's "model" is a pluggable object, so for a Python harness the
-intercept is simply an in-process model that calls sglang and records the exact
-prompt/output token ids per call (token-in-token-out — no re-tokenization, no
-litellm, no proxy). This is the Polar / Agent Lightning / verl pattern, minus the
-HTTP hop (which only a non-Python / out-of-process harness would need).
+the one thing every harness has — the model API — and run stock mini-swe-agent
+unmodified, **in-process on the head node**. Its "model" is a pluggable object,
+so the intercept is an in-process model that calls sglang `/generate` with raw
+token ids and records the exact prompt/output ids per call (token-in-token-out —
+no re-tokenization, no litellm, no HTTP proxy, no second event loop). Only bash
+commands cross into the sandbox.
 
 ```
-slime fully_async_rollout ──┬─> generate() [one call = one episode]
-                            │      ├─ boot Modal sandbox from task.image_name
-                            │      ├─ run stock mini-swe-agent (its own loop):
-                            │      │     model calls ─→ RecordingModel ─→ sglang   (records exact ids)
-                            │      │     bash  calls ─→ sandbox.exec
-                            │      ├─ git diff → patch ; grade vs FAIL/PASS_TO_PASS
-                            │      └─ prefix-merge recorded calls → Sample(s)
-                            └─< trains on the returned Samples
+slime fully_async_rollout ──> generate() [one call = one episode, in a worker thread]
+   │  env = load_env(metadata.task_type)            # harbor | frontier_cs | swerebench
+   │  env.rollout(md, model=RecordingModel, limits):
+   │     ├─ boot a bash-only Modal Sandbox from the task image
+   │     ├─ run stock mini-swe DefaultAgent(model, sandbox) in-process:
+   │     │     model.query ─→ RecordingModel ─→ sglang /generate   (records exact ids + weight_version)
+   │     │     bash tool   ─→ sandbox.execute
+   │     └─ grade -> reward (env-specific)
+   └─ build token-faithful Sample(s) with per-turn weight_versions
 ```
 
 | file | role |
 | --- | --- |
-| `model.py` | mini-swe Model that calls sglang directly and records `(input_ids, output_ids, logprobs, weight_version)` per call |
-| `sandbox.py` | Modal sandbox as mini-swe's bash `Environment` |
-| `generate.py` | the slime hook: drive one episode (in a worker thread), reconstruct + grade |
-| `grade.py` | apply patch + test patch, run tests, parse pytest log (SWE-rebench recipe) |
-| `prompts.py` | mini-swe prompts + text protocol constants (pinned) |
+| `model.py` | `RecordingModel`: in-process mini-swe Model; calls sglang `/generate`, records `(tokens, loss_mask, logprobs, weight_version)`, parses native tool-calls, splices the new-context delta (no assistant re-render). |
+| `sandbox.py` | Modal sandbox as mini-swe's bash `Environment` + grading executor; Dockerfile build, env injection, vm_runtime, boot retries. |
+| `generate.py` | the slime hook: dispatch by `task_type`, run one episode in a thread pool, build Sample(s). |
+| `metrics.py` | `agentic/*` episode + `async/*` off-policy-health metrics (`--custom-rollout-log-function-path`). |
+| `prompts.py` | mini-swe tool-call scaffold + `BASH_TOOL` + submit sentinel (pinned). |
+| `environment/` | the task-family abstraction (see below). |
+| `environment/convert2slime/` | dataset → slime prompt-jsonl converters. |
 
-Data prep lives with the launcher config (`download_data` writes the prompt_data
-jsonl), not here — this package is the generic agent loop. Episode limits
-(`agentic_max_steps`, timeouts) come from `args` via slime's `--custom-config-path`.
+## Environment abstraction
 
-v1 grades pytest tasks (the launcher filters the dataset to `parse_log_pytest`);
-add other frameworks' parsers (SWE-rebench-V2 `lib/agent/log_parsers.py`) to widen.
-GLM-4.7-Flash context is ~198k, so generation has headroom; long trajectories are
-bounded by `agentic_max_steps` and become large single training micro-batches.
+A `RolloutEnv` (`environment/base.py`) owns one task family's whole episode —
+row validation, sandbox boot, driving the agent leg(s), and grading — while the
+`RecordingModel` + `Sandbox` are the shared tools it composes. Rows pick their
+env by `metadata.task_type`:
 
-**Token-in-token-out.** Assistant tokens are the exact ids sglang emitted
-(`loss_mask=1`); observation tokens come from slicing the next call's prompt
-(`loss_mask=0`). Nothing is re-tokenized.
+- **`harbor`** — harbor-format tasks (USACO, SWE-rebench-V2-as-harbor, ...).
+  Multi-step episodes, **in-place** grading (`test.sh` → `reward.json`; the
+  deliverable is the sandbox state, so there is no patch to transplant), reward
+  shaping via `rewards.py`, optional per-step `min_reward` gates.
+- **`frontier_cs`** — Frontier-CS competitive programming on top of `harbor`:
+  a per-worker Node + go-judge verifier server, judge-env injected into the
+  sandbox so the agent's iterative `submit.sh` can self-grade mid-episode.
+- **`swerebench`** — SWE-rebench-native single-shot tasks: capture the git diff,
+  grade in a **fresh** sandbox (anti reward-hack) with pytest.
 
-**Reconstruction / compaction.** Calls whose prompts extend the running sequence
-merge into one chain (one Sample). A broken prefix — context compaction, a new
-sub-agent — starts a new chain (a sibling Sample sharing `rollout_id`).
-mini-swe is append-only, so today every episode is one chain → one Sample.
+`rewards.py` is the one place to design/A-B reward shapes (fractional | binary |
+thresholded) without touching envs.
 
-**Off-policy (per-turn versioning).** Each turn carries the `weight_version` live
-when it was generated, plus its rollout logprobs — enough for TIS/clipping under
-fully-async drift. On a weight update slime aborts in-flight generations; we
-discard that episode (fully-async recycles it). Keeping + resuming the partial
-trajectory (true partial rollout) is future work and hooks into the same path.
+## Fully-async / off-policy
 
-**Failure policy.** An episode that errors mid-run still trains on the turns it
-produced (reward 0). An episode with no turns (e.g. sandbox boot failure) or an
-aborted turn → `ABORTED` → recycled by fully-async.
+Each turn records the `weight_version` live at generation
+(`Sample.weight_versions`), so a multi-turn episode that straddles weight updates
+carries enough for TIS/clipping and the `async/version_span|version_lag|
+sample_age` metrics. A weight update aborts in-flight generations → the turn's
+`finish_reason == "abort"` → `Sample.Status.ABORTED` → slime recycles the
+episode. Blocking episodes are offloaded to a wide dedicated thread pool (sized
+to `sglang_server_concurrency × num_engines`), since `asyncio.to_thread` caps at
+~32.
 
-## Run (from ~/multinode-training-guide/slime)
+## Qwen
 
-```bash
-export EXPERIMENT_CONFIG=glm47_flash_agentic_async
-modal run slime/modal_train.py::download_data     # SWE-rebench-V2 (Python) → /data
-modal run -d slime/modal_train.py::train
+Native bash tool-calls (set `--sglang-tool-call-parser qwen3_coder
+--sglang-reasoning-parser qwen3`). Because the recorder keeps one running token
+sequence and only ever renders the *new observation* delta — never re-rendering a
+prior assistant turn — Qwen's `<think>` history-stripping and the tool-call-arg
+whitespace rstrip cannot drift the prompt from the training target. The old
+chat-completions adapter's `_dictify_tool_arguments` fix is therefore obsolete
+here. `agentic_max_empty_turns` / `finish_reason == "length"` end an episode
+cleanly instead of format-erroring to the step limit.
+
+## Run
+
+```
+--custom-generate-function-path    agentic_rl.generate.generate
+--custom-rollout-log-function-path agentic_rl.metrics.log_rollout_data
+--custom-config-path               agentic_rl/config_example.yaml
+--sglang-tool-call-parser qwen3_coder --sglang-reasoning-parser qwen3
 ```
 
-Episode limits come from env vars (`AGENTIC_MAX_STEPS`, `AGENTIC_EPISODE_TIMEOUT`,
-`AGENTIC_EXEC_TIMEOUT`, `AGENTIC_GRADE_TIMEOUT`).
+with `train_async.py` + `fully_async_rollout` (non-colocated). `ASYNC_RL_TASK_ROOT`
+points at the dir that `metadata.task_path`s resolve against (harbor/frontier_cs).
+
+Oracle check (reference solution through the exact rollout path, reward → 1.0):
+
+```
+python -m agentic_rl.environment.harbor out/usaco.jsonl --task-root out --limit 3
+```

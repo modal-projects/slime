@@ -1,63 +1,84 @@
-"""Agent prompts, copied verbatim from mini-swe-agent's bundled default.yaml.
+"""Agent prompts and the tool-call protocol, pinned here so the rollout's prompt
+distribution is version-controlled rather than loaded from the installed package.
 
-Kept here (rather than loaded from the installed package) so the rollout's
-prompts are pinned and visible. To use a different harness, point at its prompts
-instead — nothing else in the loop changes.
+One universal scaffold for every task family: response format, subshell
+semantics, and how to finish. The task's *deliverable* (patch vs artifacts vs
+stdout) lives in the per-row instruction text rendered as ``{{task}}``.
+
+The harness drives bash via native tool-calls, so the served model must expose
+``--sglang-tool-call-parser`` and ``--sglang-reasoning-parser``. ``BASH_TOOL`` is
+mini-swe's single bash tool schema.
 """
 
-SYSTEM_TEMPLATE = """\
-You are a helpful assistant that can interact with a computer.
+from minisweagent.models.utils.actions_toolcall import BASH_TOOL  # noqa: F401
 
-Your response must contain exactly ONE bash code block with ONE command (or commands connected with && or ||).
-Include a THOUGHT section before your command where you explain your reasoning process.
-Format your response as shown in <format_example>.
+SUBMIT_SENTINEL = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 
-<format_example>
-Your reasoning and analysis here. Explain why you want to perform the action.
-
-```mswea_bash_command
-your_command_here
-```
-</format_example>
-
-Failure to follow these rules will cause your response to be rejected.
-"""
+SYSTEM_TEMPLATE = "You are a helpful assistant that can interact with a computer.\n"
 
 INSTANCE_TEMPLATE = """\
-Please solve this issue: {{task}}
+Please solve the following task:
 
-You can execute bash commands and edit files to implement the necessary changes.
+<task>
+{{task}}
+</task>
 
-## Recommended Workflow
+You can execute bash commands and edit files to accomplish it. The task
+description above defines what you must produce and any task-specific submission
+steps; follow it exactly.
 
-This workflow should be done step-by-step so that you can iterate on your changes and any possible problems.
+## Command Execution Rules
 
-1. Analyze the codebase by finding and reading relevant files
-2. Create a script to reproduce the issue
-3. Edit the source code to resolve the issue
-4. Verify your fix works by running your script again
-5. Test edge cases to ensure your fix is robust
-6. Submit your changes and finish your work by issuing the following command: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`.
-   Do not combine it with any other command. <important>After this command, you cannot continue working on this task.</important>
+You are operating in an environment where
 
-## Important Rules
+1. You issue at least one command
+2. The system executes the command(s) in a subshell
+3. You see the result(s)
+4. You write your next command(s)
 
-1. Every response must contain exactly one action
-2. The action must be enclosed in triple backticks
-3. Directory or environment variable changes are not persistent. Every action is executed in a new subshell.
-   However, you can prefix any action with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...` or write/load environment variables from files
+Each response should include:
 
-## Formatting your response
+1. Reasoning text where you explain your analysis and plan
+2. At least one call to the `bash` tool with the shell command to run
 
-Here is an example of a correct response:
+**CRITICAL REQUIREMENTS:**
 
-<example_response>
-THOUGHT: I need to understand the structure of the repository first. Let me check what files are in the current directory to get a better understanding of the codebase.
+- Your response SHOULD include reasoning text explaining what you're doing
+- Your response MUST include AT LEAST ONE call to the `bash` tool
+- Directory or environment variable changes are not persistent. Every action is executed in a new subshell.
+- However, you can prefix any action with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...` or write/load environment variables from files
 
-```mswea_bash_command
-ls -la
-```
-</example_response>
+## Environment Details
+
+- You have a full Linux shell environment
+- Always use non-interactive flags (-y, -f) for commands
+- Avoid interactive tools like vi, nano, or any that require user input
+- You can create new tools or scripts to help you; if a tool isn't available, you can install it
+
+<system_information>
+{{system}} {{release}} {{version}} {{machine}}
+</system_information>
+
+## Useful shell idioms
+
+The following are commands you pass to the `bash` tool (its `command` argument);
+they are NOT a response format. Adapt as needed.
+
+- Create a file with a heredoc:
+  cat <<'EOF' > newfile.py
+  import numpy as np
+  print("hello")
+  EOF
+- Edit in place with sed: `sed -i 's/old/new/g' filename.py`.
+- View specific lines with numbers: `nl -ba filename.py | sed -n '10,20p'`.
+
+## Finishing
+
+Once you have verified your work and completed any submission steps the task
+description requires, finish by issuing the following command:
+`echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`.
+Do not combine it with any other command. <important>After this command, you
+cannot continue working on this task.</important>
 """
 
 OBSERVATION_TEMPLATE = """\
@@ -75,6 +96,7 @@ The output of your last command was too long.
 Please try a different command that produces less output.
 If you're looking at a file you can try use head, tail or sed to view a smaller number of lines selectively.
 If you're using grep or find and it produced too much output, you can use a more selective search pattern.
+If you really need to see something from the full command's output, you can redirect output to a file and then search in that file.
 </warning>
 {%- set elided_chars = output.output | length - 10000 -%}
 <output_head>
@@ -89,10 +111,23 @@ If you're using grep or find and it produced too much output, you can use a more
 {%- endif -%}
 """
 
-# Text protocol: the model emits one ```mswea_bash_command block; the env detects
-# the submit sentinel. Kept here next to the templates that define them.
-ACTION_REGEX = r"```mswea_bash_command\s*\n(.*?)\n```"
-FORMAT_ERROR_TEMPLATE = (
-    "Please always provide EXACTLY ONE action in triple backticks, found {{actions|length}} actions."
-)
-SUBMIT_SENTINEL = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+FORMAT_ERROR_TEMPLATE = """\
+<tool_response>
+Tool call error:
+
+<error>
+{{error}}
+</error>
+
+Here is general guidance on how to submit correct toolcalls:
+
+Every response needs to use the 'bash' tool at least once to execute commands.
+
+Call the bash tool with your command as the argument:
+- Tool: bash
+- Arguments: {"command": "your_command_here"}
+
+If you want to end the task, please issue the following command: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
+without any other command.
+</tool_response>
+"""

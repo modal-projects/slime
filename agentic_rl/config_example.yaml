@@ -1,0 +1,19 @@
+# Example --custom-config-path for agentic_rl. These keys are set on `args`
+# (slime merges the YAML onto the parsed args), so generate.py reads them via
+# getattr. Pair with:
+#   --custom-generate-function-path   agentic_rl.generate.generate
+#   --custom-rollout-log-function-path agentic_rl.metrics.log_rollout_data
+#   --sglang-tool-call-parser qwen3_coder   (native bash tool-calls)
+#   --sglang-reasoning-parser qwen3
+# and run the fully-async trainer (train_async.py + fully_async_rollout), e.g.
+# non-colocated so rollout and training overlap.
+
+# Episode limits (per sample).
+agentic_max_steps: 30           # mini-swe step_limit per agent leg
+agentic_episode_timeout: 1800   # wall-clock agent budget per episode (post-boot)
+agentic_exec_timeout: 120       # per bash command in the sandbox
+agentic_grade_timeout: 1800     # grading sandbox lifetime / per grade
+agentic_eval_timeout: 600       # per harbor test.sh command
+agentic_query_timeout: 600      # per-turn /generate cap (bounds hung generations)
+agentic_max_empty_turns: 3      # consecutive no-tool-call turns before ending the episode
+agentic_max_boot_retries: 3     # ABORTED retries before shipping a masked reward-0 sample
