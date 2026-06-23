@@ -11,6 +11,7 @@ retries, and separate stdout/stderr with an output cap.
 
 from __future__ import annotations
 
+import os
 import shlex
 import time
 from dataclasses import dataclass
@@ -60,6 +61,13 @@ class Sandbox:
         vm_runtime: bool = False,
         boot_retries: int = 2,
     ):
+        # Default sandbox resources from env when the task doesn't size them
+        # (Modal's defaults are too small for running tests/builds).
+        if cpu is None and os.environ.get("SLIME_AGENT_SANDBOX_CPU"):
+            cpu = float(os.environ["SLIME_AGENT_SANDBOX_CPU"])
+        if memory_mb is None and os.environ.get("SLIME_AGENT_SANDBOX_MEMORY_MB"):
+            memory_mb = int(os.environ["SLIME_AGENT_SANDBOX_MEMORY_MB"])
+
         app = modal.App.lookup(app_name, create_if_missing=True)
         kwargs: dict = {"image": _build_image(image), "app": app, "timeout": lifetime}
         if env:
