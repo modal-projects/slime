@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SWE Rollout Dumps</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <aside id="sidebar">
+        <div class="sidebar-header">
+          <h1>SWE rollouts</h1>
+          <button id="refresh-btn" title="Re-list runs and rollouts">↻</button>
+        </div>
+        <div id="dump-root" class="dump-root"></div>
+        <nav id="run-list"></nav>
+      </aside>
+      <main id="main">
+        <div id="content" class="placeholder">Select a rollout dump on the left.</div>
+      </main>
+    </div>
+    <script type="module" src="./app.ts"></script>
+  </body>
+</html>

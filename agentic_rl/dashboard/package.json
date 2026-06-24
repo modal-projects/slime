@@ -1,0 +1,13 @@
+{
+  "name": "swe-rollout-dashboard",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch server.ts",
+    "start": "NODE_ENV=production bun run server.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.14",
+    "happy-dom": "^20.10.2"
+  }
+}

@@ -1,0 +1,6 @@
+# Track the dashboard source (public/, server.ts, convert.py, app.py, test/, ...).
+# Ignore only regenerable / machine-specific artifacts.
+node_modules/
+__pycache__/
+*.pyc
+.DS_Store
