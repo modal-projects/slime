@@ -393,7 +393,9 @@ export class JudgeEngine {
                 }
             }
         } catch (e) {
-            const err = { status: 'error', error: String(e) };
+            const _gj = e?.response?.data;
+            const _det = _gj ? (typeof _gj === 'string' ? _gj : JSON.stringify(_gj)) : '';
+            const err = { status: 'error', error: String(e) + (_det ? ' | gojudge: ' + _det : '') };
             this.results.set(sid, err);
             await fs.writeFile(path.join(subDir, 'result.json'), JSON.stringify(err, null, 2));
         } finally {
@@ -483,7 +485,9 @@ export class JudgeEngine {
                 }
             }
         } catch (e) {
-            const err = { status: 'error', error: String(e) };
+            const _gj = e?.response?.data;
+            const _det = _gj ? (typeof _gj === 'string' ? _gj : JSON.stringify(_gj)) : '';
+            const err = { status: 'error', error: String(e) + (_det ? ' | gojudge: ' + _det : '') };
             this.results.set(sid, err);
             await fs.writeFile(path.join(subDir, 'result.json'), JSON.stringify(err, null, 2));
         } finally {

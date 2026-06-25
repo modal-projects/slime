@@ -22,7 +22,9 @@ Env knobs
     FRONTIER_CS_DATA_VOLUME            Volume holding frontier_cs/problems/ (default slime-data)
     FRONTIER_CS_PROBLEMS_ROOT          problemsRoot inside the judge (default /data/frontier_cs/problems)
     FRONTIER_CS_JUDGE_APP              Modal app name (default frontier-cs-judge)
-    FRONTIER_CS_JUDGE_CPU / _MEMORY_MB sandbox resources (default 8 / 16384)
+    FRONTIER_CS_JUDGE_CPU / _MEMORY_MB sandbox resources (default 32 / 65536; gives go-judge
+                                       32 workers — profiled sweet spot for burst grading, with
+                                       the gojudge.js queue-full retry. 2GB/worker.)
     FRONTIER_CS_JUDGE_LIFETIME_SEC     sandbox max lifetime (default 86400)
     FRONTIER_CS_JUDGE_BOOT_TIMEOUT_SEC wait for /health (default 900; covers first image build)
 """
@@ -103,8 +105,8 @@ def _boot_judge_sandbox():
         app=app,
         image=image,
         volumes={_DATA_MOUNT: data_vol},
-        cpu=float(_int_env("FRONTIER_CS_JUDGE_CPU", 8)),
-        memory=_int_env("FRONTIER_CS_JUDGE_MEMORY_MB", 16384),
+        cpu=float(_int_env("FRONTIER_CS_JUDGE_CPU", 32)),
+        memory=_int_env("FRONTIER_CS_JUDGE_MEMORY_MB", 65536),
         timeout=_int_env("FRONTIER_CS_JUDGE_LIFETIME_SEC", 86400),
         encrypted_ports=[_JUDGE_PORT],
         experimental_options={"vm_runtime": True},

@@ -10,15 +10,39 @@ export class GoJudgeClient {
         this.baseURL = baseURL;
     }
 
+    // POST /run with bounded retry on transient backpressure. go-judge has a bounded
+    // work queue; when a burst of /run requests exceeds (parallelism + queue) it rejects
+    // with HTTP 500 "worker queue is full" BEFORE executing — so the request never ran and
+    // retrying is safe/idempotent. Without this, high worker counts (nproc 32+) let many
+    // submissions' per-case fan-out flood go-judge at once and grades spuriously fail.
+    async _postRun(payload) {
+        const maxAttempts = 8;
+        let delay = 150;
+        for (let attempt = 1; ; attempt++) {
+            try {
+                const { data } = await axios.post(`${this.baseURL}/run`, payload, { timeout: 300000 });
+                return data;
+            } catch (e) {
+                const body = e?.response?.data;
+                const msg = typeof body === 'string' ? body : JSON.stringify(body || '');
+                const retriable = (e?.response?.status >= 500 && /queue is full|too many/i.test(msg))
+                    || e?.code === 'ECONNRESET' || e?.code === 'ECONNREFUSED' || e?.code === 'ECONNABORTED';
+                if (!retriable || attempt >= maxAttempts) throw e;
+                const wait = delay + Math.floor(Math.random() * delay);
+                await new Promise(r => setTimeout(r, wait));
+                delay = Math.min(delay * 2, 3000);
+            }
+        }
+    }
+
     // Basic invocation
     async runOne(cmd) {
-        const { data } = await axios.post(`${this.baseURL}/run`, { cmd: [cmd] }, { timeout: 300000 });
+        const data = await this._postRun({ cmd: [cmd] });
         return data[0];
     }
 
     async run(cmds) {
-        const { data } = await axios.post(`${this.baseURL}/run`, cmds, { timeout: 300000 });
-        return data;
+        return await this._postRun(cmds);
     }
 
     // Delete file
