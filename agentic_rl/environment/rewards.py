@@ -2,7 +2,7 @@
 
 Every env's verifier reports a raw signal (``RewardSignal``); the scalar reward
 used for training is a separate, swappable decision made here. Pick the shape
-with ``AGENTIC_REWARD_SHAPE`` (global) or per-row via ``metadata.reward_shape``;
+with ``ASYNC_RL_REWARD_SHAPE`` (global) or per-row via ``metadata.reward_shape``;
 default ``fractional``. This is the one place to design/A-B reward shapes without
 touching envs or re-converting data.
 """
@@ -17,8 +17,8 @@ from typing import Any, Callable
 logger = logging.getLogger("agentic_rl")
 
 DEFAULT_SHAPE = "fractional"
-SHAPE_ENV = "AGENTIC_REWARD_SHAPE"
-_THRESHOLD_FLOOR = float(os.environ.get("AGENTIC_REWARD_THRESHOLD", "0.1"))
+SHAPE_ENV = "ASYNC_RL_REWARD_SHAPE"
+_THRESHOLD_FLOOR = float(os.environ.get("ASYNC_RL_REWARD_THRESHOLD", "0.1"))
 
 
 @dataclass(frozen=True)

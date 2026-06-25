@@ -33,6 +33,10 @@ from .prompts import BASH_TOOL, FORMAT_ERROR_TEMPLATE, OBSERVATION_TEMPLATE
 
 _RENDER_KEYS = ("role", "content", "tool_calls", "tool_call_id", "reasoning_content", "name")
 
+# Cap the stored rolled-back-generation text (debug/dashboard only) so a runaway
+# 24k-token think doesn't bloat the dump; keep head + tail with an elision marker.
+_MAX_TAIL_CHARS = 60000
+
 
 @dataclass
 class Chain:
@@ -49,6 +53,14 @@ class Chain:
     prompt_len: int = 0
     seen_msgs: int = 0
     msg_hashes: list[str] = field(default_factory=list)
+    # Decoded text of a rolled-back terminal generation (a turn with no tool call,
+    # dropped from the trained token stream). Kept for the dashboard so a runaway /
+    # length-truncated <think> is visible instead of lost. {"text","tokens","finish"}.
+    truncated_tail: dict | None = None
+    # Decoded first-turn model input (system + tools + instance + the injected
+    # generation prompt) — convert.py ships torch only and can't re-decode, so record
+    # it here for the dashboard's "exact prompt" view.
+    full_prompt: str | None = None
 
     @property
     def has_response(self) -> bool:
@@ -114,6 +126,7 @@ class RecordingModel:
         if c.seen_msgs == 0:
             self._extend(self._render_initial(messages), 0)
             c.prompt_len = len(c.tokens)
+            c.full_prompt = self.tokenizer.decode(c.tokens, skip_special_tokens=False)
         else:
             self._extend(self._render_continuation(messages[c.seen_msgs :]), 0)
         c.seen_msgs = len(messages)
@@ -135,6 +148,9 @@ class RecordingModel:
         try:
             actions, tool_calls = self._actions_from_tool_uses(parsed.tool_uses)
         except FormatError:
+            # Record the about-to-be-discarded generation (esp. a length-truncated
+            # runaway think) so the dashboard can show it; then drop it from training.
+            c.truncated_tail = {"text": self._clip_tail(raw), "tokens": len(out_ids), "finish": finish}
             self._rollback_generated(len(out_ids))
             self.n_format_errors += 1
             self._empty_streak += 1
@@ -251,6 +267,13 @@ class RecordingModel:
         if n:
             del c.tokens[-n:], c.loss_mask[-n:], c.logprobs[-n:]
         c.versions.pop()
+
+    @staticmethod
+    def _clip_tail(text: str) -> str:
+        """Bound the stored rolled-back-generation text (debug/dashboard only)."""
+        if len(text) <= _MAX_TAIL_CHARS:
+            return text
+        return f"{text[: _MAX_TAIL_CHARS - 10000]}\n\n…[{len(text) - _MAX_TAIL_CHARS} chars elided]…\n\n{text[-10000:]}"
 
     def _generate(self, input_ids: list[int]) -> tuple[list[int], list[float], str, str | None]:
         sp = dict(self.sampling_params)

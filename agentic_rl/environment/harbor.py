@@ -66,6 +66,9 @@ def _meets_min_reward(rewards: dict[str, Any] | None, min_reward: float | dict[s
 
 class HarborEnv(RolloutEnv):
     name = "harbor"
+    # Drop the step instruction into the workdir as PROBLEM_STATEMENT.md before each
+    # leg. FrontierCsEnv turns this off — it folds the statement into the prompt.
+    writes_problem_statement_file = True
 
     def normalize_metadata(self, sample) -> dict[str, Any]:
         m = sample.metadata or {}
@@ -153,6 +156,7 @@ class HarborEnv(RolloutEnv):
         timer = PhaseTimer()
 
         t0 = time.monotonic()
+        artifacts: dict[str, Any] = {}
         with self._sandbox(md, lifetime=agent_budget_sec + limits.grade_timeout + 300, exec_timeout=limits.exec_timeout) as sb:
             timer.record("boot", sb.boot_time)
             workdir = md["workdir"] or self._detect_workdir(sb)
@@ -171,7 +175,8 @@ class HarborEnv(RolloutEnv):
                     break
                 leg_md = {**md, "workdir": workdir}
                 with timer.phase("prep"):
-                    self.write_problem_file(sb, workdir, step["instruction"])
+                    if self.writes_problem_statement_file:
+                        self.write_problem_file(sb, workdir, step["instruction"])
                     self._pre_agent_setup(sb, task_dir, leg_md)
                 with timer.phase("agent"):
                     run_leg(sb, step["instruction"], remaining)
@@ -191,6 +196,13 @@ class HarborEnv(RolloutEnv):
                     logger.info("[harbor] %s: step %r below min_reward; aborting remaining steps", md["instance_id"], step["name"])
                     break
 
+            # Pull post-episode artifacts off the still-live sandbox (the env tears
+            # it down on __exit__); must never fail the episode.
+            try:
+                artifacts = self._collect_artifacts(sb, workdir)
+            except Exception:  # noqa: BLE001
+                logger.exception("[harbor] %s: artifact collection failed", md["instance_id"])
+
         reward = self._aggregate(steps, step_results, md["reward_strategy"])
         is_solved = bool(step_results) and len(step_results) == len(steps) and all(r.get("is_solved") for r in step_results)
         timer.record("episode", time.monotonic() - t0)
@@ -202,6 +214,7 @@ class HarborEnv(RolloutEnv):
                 "harbor_steps_completed": len(step_results),
                 "harbor_steps_total": len(steps),
                 "timing": timer.as_dict(),
+                **artifacts,
             },
         )
 
@@ -224,6 +237,12 @@ class HarborEnv(RolloutEnv):
     def _pre_agent_setup(self, sb, task_dir: Path, md: dict[str, Any]) -> None:
         """Hook run in the workdir before each agent leg. Default no-op;
         FrontierCsEnv overrides it to stage statement.txt / submit.sh into /app."""
+
+    def _collect_artifacts(self, sb, workdir: str) -> dict[str, Any]:
+        """Hook run on the still-live sandbox after the agent leg(s); its return is
+        merged into ``RewardResult.extra`` (→ ``sample.metadata``). Default none;
+        FrontierCsEnv overrides it to pull back the agent's iterative-submit log."""
+        return {}
 
     def _verify(self, sb, *, tests_dir: Path, workdir: str, verifier: dict[str, Any], eval_timeout_sec: int, instance_id: str) -> dict[str, Any] | None:
         timeout = int(verifier.get("timeout_sec") or eval_timeout_sec)

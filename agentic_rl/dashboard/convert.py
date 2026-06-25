@@ -146,6 +146,33 @@ def parse_turns(response: str, token_stats: list | None = None) -> list[dict]:
     return turns
 
 
+def _attach_truncated_tail(turns: list[dict], tail: dict) -> None:
+    """Surface a rolled-back terminal generation (model.py drops it from the token
+    stream when a turn has no tool call). In thinking mode the prompt opens
+    ``<think>`` so the raw output begins *inside* the think block (no leading tag);
+    split on a closing ``</think>`` if the model emitted one, else treat it all as
+    unclosed reasoning. Attach to the trailing dangling-``<think>`` stub turn so the
+    dashboard shows the real (often huge) reasoning instead of the 5-token stub."""
+    text = tail.get("text") or ""
+    if "</think>" in text:
+        think, _, after = text.partition("</think>")
+        post = _parse_turn_body("assistant", after)
+    else:
+        think, post = text, {}
+    entry = {
+        "tokens": tail.get("tokens"),
+        "finish": tail.get("finish"),
+        "closed_think": "</think>" in text,
+        "think": think.strip() or None,
+        "text": post.get("text"),
+        "tool_calls": post.get("tool_calls"),
+    }
+    if turns and turns[-1].get("role") == "assistant" and not turns[-1].get("tool_calls"):
+        turns[-1]["truncated_generation"] = entry
+    else:
+        turns.append({"role": "assistant", "truncated_generation": entry})
+
+
 def parse_spans(trace) -> list[dict]:
     """Pair span_start/span_end trace events into a flat span list."""
     if not isinstance(trace, dict):
@@ -194,6 +221,27 @@ def _slim_steps(steps) -> list | None:
         {"name": st.get("name"), "reward": st.get("reward")}
         for st in steps
         if isinstance(st, dict)
+    ]
+    return out or None
+
+
+def _slim_submissions(subs) -> list | None:
+    """Trim the iterative-submission trace (frontier_cs) to the fields the UI shows."""
+    if not isinstance(subs, list):
+        return None
+    out = [
+        {
+            "ordinal": s.get("ordinal"),
+            "status": s.get("status"),
+            "score": s.get("score"),
+            "score_raw": s.get("score_raw"),
+            "code_chars": s.get("code_chars"),
+            "is_solved": s.get("is_solved"),
+            "ts": s.get("ts_done") or s.get("ts_started"),
+            "detail": ((s.get("detail") or "")[:200] or None),
+        }
+        for s in subs
+        if isinstance(s, dict)
     ]
     return out or None
 
@@ -266,6 +314,9 @@ def sample_view(s: dict) -> dict:
     resp_tokens = tokens[-len(loss_mask):] if loss_mask else []
     token_stats = _per_turn_token_stats(resp_tokens, loss_mask)
     turns = parse_turns(s.get("response") or "", token_stats)
+    tail = md.get("truncated_tail")
+    if isinstance(tail, dict) and tail.get("text"):
+        _attach_truncated_tail(turns, tail)
     timing = md.get("timing") or {}
     verifier = md.get("verifier") or {}
     budgets = md.get("budgets") or {}  # enforced budgets; fall back to task.toml values
@@ -312,6 +363,9 @@ def sample_view(s: dict) -> dict:
         "weight_versions": sorted(set(s.get("weight_versions") or [])),
         "prefix_cache": s.get("prefix_cache_info"),
         "n_turns": len(turns),
+        # Rolled-back terminal generation summary (tokens/finish); the text rides on
+        # the trailing turn's "truncated_generation". None when the run ended cleanly.
+        "truncated_tail": {k: tail.get(k) for k in ("tokens", "finish")} if isinstance(tail, dict) else None,
         # --- timing / latency profile (md.timing; absent on old dumps) ---
         "gen_s": gen_s,
         "overhead_sec": overhead_sec,
@@ -331,6 +385,9 @@ def sample_view(s: dict) -> dict:
         "harbor_steps_completed": md.get("harbor_steps_completed"),
         "harbor_steps_total": md.get("harbor_steps_total"),
         "harbor_step_results": _slim_steps(md.get("harbor_step_results")),
+        # --- iterative submissions (frontier_cs); None for other task families ---
+        "submissions": _slim_submissions(md.get("submissions")),
+        "submission_summary": md.get("submission_summary"),
         # --- training bookkeeping ---
         "remove_sample": s.get("remove_sample"),
         "label": s.get("label"),

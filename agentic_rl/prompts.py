@@ -48,6 +48,12 @@ Each response should include:
 - Directory or environment variable changes are not persistent. Every action is executed in a new subshell.
 - However, you can prefix any action with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...` or write/load environment variables from files
 
+## Reasoning discipline
+
+- You have MANY turns. Keep each message's reasoning short — gather info with commands and reason further in later turns once you've seen results.
+- A message that contains only reasoning and no `bash` call is wasted: your turn will be cut off at the token limit and all of that reasoning is THROWN AWAY. Always end with a command.
+- If you find yourself deriving a complete algorithm before running anything, STOP and instead write a good enough proof of concept and iterate on it.
+
 ## Environment Details
 
 - You have a full Linux shell environment

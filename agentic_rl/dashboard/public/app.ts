@@ -37,6 +37,13 @@ type RunSummary = { run: string; files: SummaryEntry[]; pending: number };
 
 type ToolCall = { name?: string; arguments?: Record<string, unknown>; raw?: string };
 type ToolResponse = { returncode?: number | null; output?: string; raw?: string; command?: string };
+type TruncatedGeneration = {
+  tokens?: number | null;
+  finish?: string | null;
+  closed_think?: boolean;
+  think?: string | null;
+  text?: string | null;
+};
 type Turn = {
   role: string;
   text?: string;
@@ -45,6 +52,9 @@ type Turn = {
   tool_responses?: ToolResponse[];
   tok?: number;
   trained?: number;
+  // A terminal generation that was rolled back (no tool call) and dropped from the
+  // trained token stream — recorded so the runaway/unfinished reasoning is visible.
+  truncated_generation?: TruncatedGeneration;
 };
 type Span = {
   name: string;
@@ -104,6 +114,27 @@ type SampleView = {
   harbor_steps_completed: number | null;
   harbor_steps_total: number | null;
   harbor_step_results: { name: string | null; reward: number | null }[] | null;
+  submissions:
+    | {
+        ordinal: number | null;
+        status: string | null;
+        score: number | null;
+        score_raw: number | null;
+        code_chars: number | null;
+        is_solved: boolean | null;
+        ts: string | null;
+        detail: string | null;
+      }[]
+    | null;
+  submission_summary: {
+    n: number;
+    n_scored: number;
+    best_score: number | null;
+    final_score: number | null;
+    solved: boolean;
+    first_solved_ordinal: number | null;
+    truncated?: boolean;
+  } | null;
   remove_sample: boolean | null;
   label: string | null;
   turns: Turn[];
@@ -908,7 +939,36 @@ function renderTurn(turn: Turn, idx: number, cumTokens?: number): HTMLElement {
     body.append(renderTerminal(turn.tool_responses));
   }
 
+  if (turn.truncated_generation) {
+    body.append(renderTruncated(turn.truncated_generation));
+  }
+
   box.append(body);
+  return box;
+}
+
+// A rolled-back terminal generation: the model produced no tool call (usually a
+// length-truncated runaway <think>), so model.py drops it from the trained tokens.
+// We recorded its decoded text; show it here so the dashboard doesn't just display
+// the 5-token "<think>" prompt stub left behind.
+function renderTruncated(t: TruncatedGeneration): HTMLElement {
+  const box = el("div", "truncated-gen");
+  const bits = [
+    t.tokens != null ? `${t.tokens} tok` : "",
+    t.finish === "length" ? "hit length cap" : t.finish ?? "",
+  ].filter(Boolean);
+  box.append(el("div", "tg-banner", `⚠ rolled-back generation — no tool call, not trained${bits.length ? ` (${bits.join(", ")})` : ""}`));
+  if (t.think) {
+    const d = el("details", "think tg-think") as HTMLDetailsElement;
+    d.open = true;
+    const label = t.closed_think
+      ? `reasoning before cutoff (${t.think.length} chars)`
+      : `unfinished reasoning — never closed </think> (${t.think.length} chars)`;
+    d.append(el("summary", "", label));
+    d.append(clippedPre(t.think, ""));
+    box.append(d);
+  }
+  if (t.text) box.append(clippedPre(t.text, "turn-text"));
   return box;
 }
 
@@ -1056,6 +1116,16 @@ function renderSample(run: string, file: string, view: RolloutView, sampleIdx: n
   if (s.verifier_timeout_sec != null) metaCell(grid, "verifier timeout", fmtDur(s.verifier_timeout_sec));
   if (s.harbor_steps_total != null)
     metaCell(grid, "harbor steps", `${s.harbor_steps_completed ?? "?"}/${s.harbor_steps_total}`);
+  if (s.submission_summary) {
+    const sm = s.submission_summary;
+    const fmt = (v: number | null) => (v == null ? "—" : v.toFixed(2));
+    metaCell(
+      grid,
+      "submissions",
+      `${sm.n} · best ${fmt(sm.best_score)} · final ${fmt(sm.final_score)}`,
+      sm.solved ? "good" : "",
+    );
+  }
   if (s.segment_kind) metaCell(grid, "segment kind", s.segment_kind);
   if (s.task_path) metaCell(grid, "task path", s.task_path);
   if (s.remove_sample) metaCell(grid, "remove sample", "true", "warn");
@@ -1086,6 +1156,29 @@ function renderSample(run: string, file: string, view: RolloutView, sampleIdx: n
     list.style.padding = "4px 14px 10px";
     for (const st of s.harbor_step_results) {
       list.append(el("div", st.reward ? "v good" : "v", `${st.name ?? "(step)"} — ${st.reward ?? "—"}`));
+    }
+    d.append(list);
+    contentEl.append(d);
+  }
+
+  // Frontier-CS iterative-submit trace: the agent's intermediate judge attempts
+  // (score-vs-attempt), distinct from the single final-solution reward above.
+  if (s.submissions && s.submissions.length) {
+    const sm = s.submission_summary;
+    const d = el("details", "block") as HTMLDetailsElement;
+    const head = `submission attempts (${s.submissions.length}${sm?.truncated ? " of more" : ""})`;
+    d.append(el("summary", "", head));
+    const list = el("div");
+    list.style.padding = "4px 14px 10px";
+    for (const sub of s.submissions) {
+      const score = sub.score == null ? "—" : sub.score.toFixed(3);
+      const cls = sub.is_solved ? "v good" : sub.status === "error" ? "v bad" : "v";
+      const bits = [`#${sub.ordinal ?? "?"}`, `score ${score}`];
+      if (sub.code_chars != null) bits.push(`${sub.code_chars} chars`);
+      if (sub.status) bits.push(sub.status);
+      const row = el("div", cls, bits.join(" · "));
+      if (sub.detail) row.title = sub.detail;
+      list.append(row);
     }
     d.append(list);
     contentEl.append(d);

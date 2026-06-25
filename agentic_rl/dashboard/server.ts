@@ -37,7 +37,7 @@ const CONVERT_PY = new URL("./convert.py", import.meta.url).pathname;
 const ROOT_RUN = "(root)";
 
 // Bump when convert.py's output shape changes so stale caches re-convert.
-const CONVERT_VERSION = "v8"; // v8: read env diagnostics (is_solved/timing/...) from metadata.agentic
+const CONVERT_VERSION = "v10"; // v10: truncated_generation (rolled-back terminal turn text) on the trailing turn
 
 mkdirSync(CACHE_DIR, { recursive: true });
 

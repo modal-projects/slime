@@ -142,17 +142,24 @@ async def generate(args, sample: Sample, sampling_params: dict[str, Any], evalua
         logger.error("[agentic_rl] %s: rollout failed: %s", md["instance_id"], e)
         return _abort(sample, f"exception:{type(e).__name__}")
 
-    if model.aborted:  # weight update aborted a turn mid-flight -> recycle
+    if model.aborted and not evaluation:  # weight update aborted a turn mid-flight -> recycle (train only)
         sample.status = Sample.Status.ABORTED
         return sample
 
-    return _build_samples(sample, model, result, state.tokenizer, md, args, elapsed=time.time() - t0)
+    return _build_samples(
+        sample, model, result, state.tokenizer, md, args, elapsed=time.time() - t0, evaluation=evaluation
+    )
 
 
-def _build_samples(sample, model, result, tokenizer, md, args, *, elapsed: float):
+def _build_samples(sample, model, result, tokenizer, md, args, *, elapsed: float, evaluation: bool = False):
     key = sample.label or md.get("instance_id") or ""
     usable = [c for c in model.chains if c.has_response]
     if not usable:
+        # Eval has no recycle loop, so an unusable episode (boot failure, empty
+        # response) can't be retried: ship a well-formed reward-0 sample instead
+        # of an ABORTED one, whose reward=None crashes eval reward logging.
+        if evaluation:
+            return _ship_null(sample, tokenizer, md, "ImageUnusable")
         _boot_fails[key] = _boot_fails.get(key, 0) + 1
         if _boot_fails[key] <= getattr(args, "agentic_max_boot_retries", 3):
             sample.status = Sample.Status.ABORTED
@@ -190,7 +197,12 @@ def _build_samples(sample, model, result, tokenizer, md, args, *, elapsed: float
         s.response = tokenizer.decode(c.tokens[c.prompt_len :], skip_special_tokens=False)
         s.status = Sample.Status.COMPLETED
         s.rollout_id = sample.index  # siblings share rollout_id so reducers don't over-count
-        s.metadata = {**(sample.metadata or {}), "instance_id": md["instance_id"], "agentic": stats}
+        # Per-chain debug surfaces for the dashboard: the exact rendered prompt, and a
+        # rolled-back terminal generation (length-truncated think, etc.) if any.
+        agentic = {**stats, "full_prompt": c.full_prompt}
+        if c.truncated_tail is not None:
+            agentic["truncated_tail"] = c.truncated_tail
+        s.metadata = {**(sample.metadata or {}), "instance_id": md["instance_id"], "agentic": agentic}
         samples.append(s)
 
     # prefix-cache info is per episode; attribute it to the primary sample.
