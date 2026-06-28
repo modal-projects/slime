@@ -13,8 +13,7 @@ skipped. Train and eval take the same path.
 
 Episode limits come from ``args`` (``--custom-config-path``): ``agentic_max_steps``,
 ``agentic_episode_timeout``, ``agentic_exec_timeout``, ``agentic_grade_timeout``,
-``agentic_eval_timeout``, ``agentic_query_timeout``, ``agentic_max_empty_turns``,
-``agentic_max_boot_retries``.
+``agentic_eval_timeout``, ``agentic_query_timeout``, ``agentic_max_empty_turns``.
 """
 
 from __future__ import annotations
@@ -36,11 +35,6 @@ from .environment.base import EnvMetadataError, EpisodeLimits, RewardResult, loa
 from .model import RecordingModel
 
 logger = logging.getLogger("agentic_rl")
-
-# Per-instance boot-failure tally: a task whose image won't build returns
-# ABORTED and slime requeues the same group forever; after the cap we ship a
-# masked reward-0 sample to drop it.
-_boot_fails: dict[str, int] = {}
 
 # Episodes are long I/O-bound chains; asyncio.to_thread caps at min(32, cpu+4)
 # threads, which throttles in-flight episodes regardless of sglang concurrency.
@@ -155,18 +149,26 @@ def _build_samples(sample, model, result, tokenizer, md, args, *, elapsed: float
     key = sample.label or md.get("instance_id") or ""
     usable = [c for c in model.chains if c.has_response]
     if not usable:
-        # Eval has no recycle loop, so an unusable episode (boot failure, empty
-        # response) can't be retried: ship a well-formed reward-0 sample instead
-        # of an ABORTED one, whose reward=None crashes eval reward logging.
-        if evaluation:
-            return _ship_null(sample, tokenizer, md, "ImageUnusable")
-        _boot_fails[key] = _boot_fails.get(key, 0) + 1
-        if _boot_fails[key] <= getattr(args, "agentic_max_boot_retries", 3):
-            sample.status = Sample.Status.ABORTED
-            return sample
-        logger.warning("[agentic_rl] %s unusable after %d boot failures; dropping", key, _boot_fails[key])
-        return _ship_null(sample, tokenizer, md, "ImageUnusable")
-    _boot_fails.pop(key, None)
+        # No surviving generation -- two flavors, told apart by the model's terminal
+        # reason: it ran but every turn was a no-tool-call rolled back out of the stream
+        # (ContextLengthExceeded / NoProgress), or it never reached an LLM call at all
+        # (empty chains => boot/image/provision/sandbox-death failure). Carry the real
+        # reason plus the rolled-back generation/prompt so the dashboard shows *why*
+        # there's no trajectory instead of a blanket "ImageUnusable".
+        last = model.chains[-1] if model.chains else None
+        reason = model.exit_status or "ImageUnusable"
+        tail = last.truncated_tail if last else None
+        full_prompt = last.full_prompt if last else None
+        # Ship a well-formed, fully-masked reward-0 sample (remove_sample=True), never a
+        # bare ABORTED. Neither eval nor the train loop (generate_rollout_async) recycles
+        # ABORTED -- the loop appends every finished group straight to the training batch
+        # -- so a bare ABORTED leaks reward=None into _post_process_rewards and crashes the
+        # step (observed: rollout_0 dump, a sandbox that died before the first LLM call ->
+        # empty chains -> 2/256 samples reward=None). _ship_null also keeps the group at
+        # n_samples_per_prompt, which slime's GRPO reshape requires. Train == eval here.
+        if not evaluation:
+            logger.warning("[agentic_rl] %s unusable (%s); shipping masked reward-0", key, reason)
+        return _ship_null(sample, tokenizer, md, reason, tail=tail, full_prompt=full_prompt)
 
     k = len(usable)
     stats = {
@@ -211,9 +213,23 @@ def _build_samples(sample, model, result, tokenizer, md, args, *, elapsed: float
     return samples[0] if k == 1 else samples
 
 
-def _ship_null(sample: Sample, tokenizer, md: dict[str, Any], reason: str) -> Sample:
+def _ship_null(
+    sample: Sample,
+    tokenizer,
+    md: dict[str, Any],
+    reason: str,
+    *,
+    tail: dict | None = None,
+    full_prompt: str | None = None,
+) -> Sample:
     """A valid but fully-masked reward-0 sample for a permanently-failing task:
-    ships to leave the buffer, contributes no gradient (remove_sample=True)."""
+    ships to leave the buffer, contributes no gradient (remove_sample=True).
+
+    ``reason`` is the real terminal cause (the model's ``exit_status``, or an
+    ``ImageUnusable`` fallback when no LLM call ran). ``tail``/``full_prompt`` carry
+    the rolled-back terminal generation and the exact prompt so the dashboard can
+    show what the episode did before it was discarded -- convert.py renders the tail
+    as a synthetic turn, so a turn-1 runaway ``<think>`` is visible instead of blank."""
     ptoks = tokenizer.encode(md.get("problem_statement", "") or reason, add_special_tokens=False)[:512]
     eos = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else (ptoks[-1] if ptoks else 0)
     sample.tokens = ptoks + [eos]
@@ -226,7 +242,12 @@ def _ship_null(sample: Sample, tokenizer, md: dict[str, Any], reason: str) -> Sa
     sample.status = Sample.Status.COMPLETED
     sample.remove_sample = True
     sample.rollout_id = sample.index
-    sample.metadata = {**(sample.metadata or {}), "agentic": {"exit_status": reason, "turns": 0, "gen_timestamp": time.time()}}
+    agentic: dict[str, Any] = {"exit_status": reason, "turns": 0, "gen_timestamp": time.time()}
+    if tail is not None:
+        agentic["truncated_tail"] = tail
+    if full_prompt is not None:
+        agentic["full_prompt"] = full_prompt
+    sample.metadata = {**(sample.metadata or {}), "agentic": agentic}
     return sample
 
 

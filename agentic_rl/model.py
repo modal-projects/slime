@@ -104,6 +104,10 @@ class RecordingModel:
 
         self.chains: list[Chain] = []
         self.aborted = False
+        # Terminal reason this model stopped the episode (the LimitsExceeded status:
+        # Aborted / ContextLengthExceeded / NoProgress). Read by generate.py to label
+        # a no-usable-turn episode with the real cause instead of a blanket fallback.
+        self.exit_status: str | None = None
         self.gen_time = 0.0
         self.cached_tokens = 0
         self.input_tokens = 0
@@ -136,6 +140,7 @@ class RecordingModel:
         self._append_generated(out_ids, logps, version)
         if finish == "abort":
             self.aborted = True
+            self.exit_status = "Aborted"
             raise LimitsExceeded(self._exit_message("Aborted", "generation aborted by weight update"))
 
         raw = self.tokenizer.decode(out_ids, skip_special_tokens=False) if out_ids else ""
@@ -156,6 +161,7 @@ class RecordingModel:
             self._empty_streak += 1
             if finish == "length" or self._empty_streak >= self.max_empty_turns:
                 status = "ContextLengthExceeded" if finish == "length" else "NoProgress"
+                self.exit_status = status
                 raise LimitsExceeded(self._exit_message(status, f"no tool call (finish={finish})"))
             raise
 

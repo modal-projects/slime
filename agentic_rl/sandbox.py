@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import threading
 import time
 from dataclasses import dataclass
 
@@ -127,12 +128,25 @@ class Sandbox:
     def write_file(self, path: str, content) -> None:
         # RPC, not a shell arg: patches/tarballs exceed ARG_MAX.
         if isinstance(content, (bytes, bytearray)):
-            self.sb.filesystem.write_bytes(bytes(content), path)
+            data, is_text = bytes(content), False
         elif hasattr(content, "read") or self._is_pathlike(content):
             with open(content, "rb") as fh:
-                self.sb.filesystem.write_bytes(fh.read(), path)
+                data, is_text = fh.read(), False
         else:
-            self.sb.filesystem.write_text(content, path)
+            data, is_text = content, True
+
+        def _write() -> None:
+            if is_text:
+                self.sb.filesystem.write_text(data, path)
+            else:
+                self.sb.filesystem.write_bytes(data, path)
+
+        # Modal's filesystem write API takes no timeout, and a dead/unresponsive sandbox
+        # wedges the underlying gRPC stream with no client deadline -- a write_problem_file
+        # once hung ~3h until Modal tore the stream down, stalling the whole rollout and
+        # shipping the episode with zero usable turns. Bound it client-side so the episode
+        # fails fast (-> caught upstream, graded 0) instead of hanging.
+        _run_with_timeout(_write, self.exec_timeout, f"write_file({path})")
 
     @staticmethod
     def _is_pathlike(content) -> bool:
@@ -172,6 +186,32 @@ class Sandbox:
 
     def __exit__(self, *exc) -> None:
         self.terminate()
+
+
+def _run_with_timeout(fn, timeout_sec: float, what: str):
+    """Run a blocking, uninterruptible Modal RPC under a client-side wall-clock deadline.
+
+    Modal's sync filesystem API exposes no timeout and a dead sandbox can wedge the
+    underlying gRPC stream indefinitely; raise ``TimeoutError`` instead so the episode
+    fails fast. The orphaned worker thread is a daemon -- it can't be cancelled, but it
+    dies with the process and only ever leaks for an already-dead sandbox."""
+    result: dict = {}
+    done = threading.Event()
+
+    def _run() -> None:
+        try:
+            result["value"] = fn()
+        except BaseException as exc:  # noqa: BLE001 - re-raised to the caller below
+            result["error"] = exc
+        finally:
+            done.set()
+
+    threading.Thread(target=_run, name="modal-fs-write", daemon=True).start()
+    if not done.wait(timeout_sec):
+        raise TimeoutError(f"{what} exceeded {timeout_sec}s; sandbox unresponsive")
+    if "error" in result:
+        raise result["error"]
+    return result.get("value")
 
 
 def _cap(text: str) -> str:
