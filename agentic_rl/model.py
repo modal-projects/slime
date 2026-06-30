@@ -5,13 +5,27 @@ Sample, no re-tokenization). One instance per episode; read tokens/loss_mask/log
 """
 
 import json
+import re
 import time
 import urllib.request
 
 from minisweagent.exceptions import FormatError, InterruptAgentFlow
 from minisweagent.models.utils.actions_text import parse_regex_actions
 
-from .prompts import ACTION_REGEX, FORMAT_ERROR_TEMPLATE
+from .prompts import ACTION_REGEX, BASH_TOOL, FORMAT_ERROR_TEMPLATE
+
+# Qwen3.6 native tool-call is the qwen3_xml format (NOT JSON), e.g.:
+#   <tool_call>
+#   <function=bash>
+#   <parameter=command>
+#   ls -la
+#   </parameter>
+#   </function>
+#   </tool_call>
+# Count <tool_call> blocks, then pull the function name and the command parameter from inside.
+_TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
+_FUNCTION_RE = re.compile(r"<function\s*=\s*([^>\s]+)\s*>(.*?)</function>", re.DOTALL)
+_PARAM_CMD_RE = re.compile(r"<parameter\s*=\s*command\s*>\s*(.*?)\s*</parameter>", re.DOTALL)
 
 # Per-turn generation budget against the served context window.
 _CONTEXT_MARGIN = 256  # headroom for stop/special tokens
@@ -37,6 +51,7 @@ class RecordingModel:
         session_id,
         query_timeout=600,
         max_context_len=131072,
+        action_format=None,
     ):
         self.tokenizer = tokenizer
         self.sampling_params = sampling_params
@@ -60,29 +75,46 @@ class RecordingModel:
         self.n_length_truncations = 0  # turns the model overran the per-turn cap (finish_reason=length)
         self.reasoning_tokens = 0  # tokens spent inside <think>…</think>, summed over turns
         self._consumed = ""  # rendered text of the conversation already in `tokens`
-        # Model-aware thinking-render + stop tokens, detected from the chat template. Keeping each turn's
-        # reasoning in-context makes the render a stable prefix across turns (required by the Sample→Sample
-        # append): GLM uses clear_thinking=False; Qwen3.x interleaved thinking uses preserve_thinking=True
-        # (both verified prefix-stable). Stop on the turn-end token(s) for the model's format.
+        # 1) Thinking-render + stop tokens, by model family (detected from the chat template). Keeping each
+        # turn's reasoning in-context makes the render a stable prefix across turns (required by the
+        # Sample→Sample append): GLM uses clear_thinking=False; Qwen3.x interleaved thinking uses
+        # preserve_thinking=True. Stop on the turn-end token(s) for the model's format. Each family also has a
+        # natural default action channel.
         ct = getattr(tokenizer, "chat_template", "") or ""
         if "preserve_thinking" in ct:  # Qwen3.x
             self._think_kwargs = {"preserve_thinking": True}
             ids = [tokenizer.convert_tokens_to_ids(t) for t in ("<|im_end|>", "<|endoftext|>")]
             self._stop = {"stop_token_ids": [i for i in ids if isinstance(i, int) and i >= 0]}
+            default_action_format = "tool_call"  # tool-call-trained → ```bash fence gave ~45% format errors
         elif "clear_thinking" in ct:  # GLM
             self._think_kwargs = {"clear_thinking": False}
             self._stop = {"stop": _STOP_STRINGS}
+            default_action_format = "bash_block"  # emits the ```bash fence reliably
         else:
             self._think_kwargs = {}
             self._stop = {"stop": _STOP_STRINGS}
+            default_action_format = "bash_block"
+        # 2) Action channel — an explicit, first-class choice (override via --agentic-action-format), defaulting
+        # per family. Both are supported: "bash_block" parses a ```bash text fence (ACTION_REGEX); "tool_call"
+        # renders the bash tool schema (apply_chat_template tools=) and parses the model's native <tool_call>.
+        # Either way the unit of execution is the same bash command — only how the model expresses it differs.
+        self._action_format = action_format or default_action_format
+        assert self._action_format in ("bash_block", "tool_call"), f"bad action_format {self._action_format!r}"
+        self._tools = [BASH_TOOL] if self._action_format == "tool_call" else None
 
     def _render(self, messages: list[dict], add_generation_prompt: bool) -> str:
         clean = [{"role": m["role"], "content": m["content"]} for m in messages]
         # Keep each turn's reasoning in-context so the render stays a stable prefix across turns — required by
         # the Sample→Sample append below. The kwarg is model-specific (detected in __init__); without it the
         # past <think> blocks get stripped on re-render, making the render non-monotonic and desyncing recording.
+        # tools= renders the bash schema into the (stable) system section for the Qwen tool-call path;
+        # None for GLM. Constant across turns, so the rendered prefix stays monotonic.
         return self.tokenizer.apply_chat_template(
-            clean, add_generation_prompt=add_generation_prompt, tokenize=False, **self._think_kwargs
+            clean,
+            add_generation_prompt=add_generation_prompt,
+            tokenize=False,
+            tools=self._tools,
+            **self._think_kwargs,
         )
 
     def _extend(self, text: str, mask: int) -> int:
@@ -91,6 +123,55 @@ class RecordingModel:
         self.loss_mask += [mask] * len(ids)
         self.logprobs += [0.0] * len(ids)
         return len(ids)
+
+    def _tool_call_format_error(self, n_found: int, segment: str, msg: str, finish: str) -> FormatError:
+        """Build a mini-swe FormatError (dict payload, matching parse_regex_actions) for a bad tool call —
+        DefaultAgent appends `content` as the next user turn and counts it toward max_consecutive_format_errors."""
+        if finish == "length":
+            msg = "your response hit the output-token limit before a complete `bash` tool call"
+        content = (
+            f"Format error: {msg}.\n\n"
+            "Provide a THOUGHT, then make EXACTLY ONE call to the `bash` tool with a single command. "
+            "To finish the task, call `bash` with `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt`."
+        )
+        return FormatError(
+            {
+                "role": "user",
+                "content": content,
+                "extra": {"interrupt_type": "FormatError", "n_actions": n_found, "model_response": segment},
+            }
+        )
+
+    def _parse_actions(self, segment: str, finish: str) -> list[dict]:
+        """Extract the action from the post-</think> segment as [{"command": ...}]. GLM uses the ```bash
+        regex; Qwen3.x parses its native qwen3_xml <tool_call><function=bash><parameter=command>…</parameter>… .
+        Raises mini-swe FormatError on a malformed action so DefaultAgent feeds it back and retries."""
+        if self._action_format == "bash_block":
+            return parse_regex_actions(
+                segment,
+                action_regex=ACTION_REGEX,
+                format_error_template=FORMAT_ERROR_TEMPLATE,
+                template_kwargs={"finish_reason": finish},
+            )
+        calls = _TOOL_CALL_RE.findall(segment)
+        if len(calls) != 1:
+            raise self._tool_call_format_error(
+                len(calls), segment, f"expected exactly one tool call, found {len(calls)}", finish
+            )
+        fn = _FUNCTION_RE.search(calls[0])
+        if not fn:
+            raise self._tool_call_format_error(1, segment, "tool call had no <function=...> block", finish)
+        if fn.group(1) != "bash":
+            raise self._tool_call_format_error(
+                1, segment, f"called tool {fn.group(1)!r}; only 'bash' is available", finish
+            )
+        cmd_match = _PARAM_CMD_RE.search(fn.group(2))
+        cmd = cmd_match.group(1) if cmd_match else None
+        if not isinstance(cmd, str) or not cmd.strip():
+            raise self._tool_call_format_error(
+                1, segment, "the bash tool call had no <parameter=command> value", finish
+            )
+        return [{"command": cmd}]
 
     def query(self, messages: list[dict], **kwargs) -> dict:
         self.n_calls += 1
@@ -143,14 +224,9 @@ class RecordingModel:
         if "</think>" in text:  # reasoning the policy spent before its answer
             self.reasoning_tokens += len(self.tokenizer.encode(text.split("</think>")[0], add_special_tokens=False))
 
-        # Parse the action from the post-reasoning segment only — a ```bash inside <think> is not an action.
+        # Parse the action from the post-reasoning segment only — a tool call inside <think> is not an action.
         try:
-            actions = parse_regex_actions(
-                text.split("</think>")[-1],
-                action_regex=ACTION_REGEX,
-                format_error_template=FORMAT_ERROR_TEMPLATE,
-                template_kwargs={"finish_reason": finish},
-            )
+            actions = self._parse_actions(text.split("</think>")[-1], finish)
         except FormatError:
             # mini-swe drops the malformed turn; drop BOTH this turn's generated ids AND the context
             # tokens appended above so `tokens` stays a faithful prefix of the next render (and

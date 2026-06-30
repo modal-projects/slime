@@ -35,6 +35,7 @@ import time
 from slime.rollout.sglang_rollout import GenerateState, generate_and_rm_group
 from slime.utils.async_utils import run
 from slime.utils.http_utils import get_rollout_num_engines
+from slime.utils.misc import load_function
 from slime.utils.types import Sample
 
 __all__ = [
@@ -222,6 +223,19 @@ async def _generate_rollout_async(args, rollout_id: int, data_buffer) -> list[li
         worker.queue_size(),
     )
 
+    # Dynamic sampling (DAPO): if a filter is configured, discard groups it rejects (e.g. zero reward-variance
+    # → no GRPO gradient) and keep pulling until `target` groups PASS. Over-generation is free here — the
+    # windowed-FIFO already runs the generation pool ahead of the trainer — so we just filter the pool rather
+    # than launch extra rounds. raw_reward is logged over ALL examined groups (pre-filter) so the metric is the
+    # unbiased generation signal, not the selected-only (upward-biased) subset.
+    dyn_filter = None
+    fpath = getattr(args, "dynamic_sampling_filter_path", None)
+    if fpath:
+        dyn_filter = load_function(fpath)
+    # Starvation guard: if the policy can't produce `target` passing groups even after a large over-sample,
+    # accept rejected groups rather than hang the trainer (and the low kept_frac will show in the metrics).
+    over_sample_cap = target * 8
+
     # Windowed-FIFO consumption: keep sampling the freshest completed groups — oldest-COMPLETED first —
     # from the generation pool; never block on an in-flight straggler (the staleness window is enforced on
     # the GENERATION side via the worker's oldest-in-flight lead-cap, so a slow head throttles new work but
@@ -232,12 +246,27 @@ async def _generate_rollout_async(args, rollout_id: int, data_buffer) -> list[li
     LOG_EVERY = 30.0
 
     collected: list[list[Sample]] = []
+    n_examined = 0  # groups passed through the filter this rollout (pre-filter denominator)
+    n_kept = 0  # groups the filter accepted
+    reward_sum_all = 0.0  # sum of per-group mean reward over ALL examined groups (pre-filter)
     while len(collected) < target:
         for gid, group in worker.get_completed_groups():
             buf[gid] = group
 
-        for gid in sorted(buf)[: target - len(collected)]:  # oldest-completed first
-            collected.append(buf.pop(gid))
+        for gid in sorted(buf):  # oldest-completed first
+            if len(collected) >= target:
+                break
+            group = buf.pop(gid)
+            if dyn_filter is None:
+                collected.append(group)
+                continue
+            n_examined += 1
+            reward_sum_all += _group_mean_reward(group, args)
+            if dyn_filter(args, group).keep:
+                collected.append(group)
+                n_kept += 1
+            elif n_examined >= over_sample_cap:
+                collected.append(group)  # starvation fallback — take a rejected group rather than hang
 
         if len(collected) < target:
             await asyncio.sleep(0.05)  # pool not yet deep enough — wait for more completions
@@ -245,13 +274,14 @@ async def _generate_rollout_async(args, rollout_id: int, data_buffer) -> list[li
         now = time.time()
         if now - last_log > LOG_EVERY:
             logger.info(
-                "fully-async rollout %d: collected %d/%d, buffered=%d, in_flight=%d, queue=%d, elapsed=%.1fs",
+                "fully-async rollout %d: collected %d/%d, examined=%d kept=%d, buffered=%d, in_flight=%d, elapsed=%.1fs",
                 rollout_id,
                 len(collected),
                 target,
+                n_examined,
+                n_kept,
                 len(buf),
                 len(worker.inflight_gids),
-                worker.queue_size(),
                 now - started,
             )
             last_log = now
@@ -265,6 +295,8 @@ async def _generate_rollout_async(args, rollout_id: int, data_buffer) -> list[li
         return 0
 
     out = sorted(collected, key=_key)
+    if dyn_filter is not None and n_examined:
+        _log_dynamic_sampling(args, rollout_id, n_examined, n_kept, reward_sum_all / n_examined)
     logger.info(
         "fully-async rollout %d: done in %.1fs, buffered_left=%d, in_flight=%d",
         rollout_id,
@@ -273,6 +305,40 @@ async def _generate_rollout_async(args, rollout_id: int, data_buffer) -> list[li
         len(worker.inflight_gids),
     )
     return out
+
+
+def _group_mean_reward(group: list[Sample], args) -> float:
+    rs = [s.get_reward_value(args) for s in group if getattr(s, "reward", None) is not None]
+    return sum(rs) / len(rs) if rs else 0.0
+
+
+def _log_dynamic_sampling(args, rollout_id: int, n_examined: int, n_kept: int, raw_reward_all: float) -> None:
+    """Emit dynamic-sampling telemetry. raw_reward_all is the UNBIASED mean reward over every generated group
+    (pre-filter) — the true learning signal; slime's rollout/raw_reward is over the kept (non-zero-std) subset
+    and reads high once the filter is active."""
+    try:
+        from slime.ray.rollout import compute_rollout_step
+        from slime.utils import logging_utils
+
+        kept_frac = n_kept / n_examined
+        metrics = {
+            "dynamic_sampling/kept_frac": kept_frac,
+            "dynamic_sampling/filtered_frac": 1.0 - kept_frac,
+            "dynamic_sampling/groups_examined": float(n_examined),
+            "dynamic_sampling/raw_reward_all": raw_reward_all,
+            "rollout/step": compute_rollout_step(args, rollout_id),
+        }
+        logging_utils.log(args, metrics, step_key="rollout/step")
+        logger.info(
+            "fully-async rollout %d: dynamic-sampling kept %d/%d (%.0f%%), raw_reward_all=%.3f",
+            rollout_id,
+            n_kept,
+            n_examined,
+            100 * kept_frac,
+            raw_reward_all,
+        )
+    except Exception:  # noqa: BLE001 — telemetry must never crash the rollout
+        logger.exception("dynamic-sampling logging failed (non-fatal)")
 
 
 def generate_rollout_fully_async(args, rollout_id, data_buffer, evaluation: bool = False):

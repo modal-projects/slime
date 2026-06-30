@@ -157,6 +157,7 @@ def _run_episode(
         session_id,
         query_timeout=limits["query_timeout"],
         max_context_len=limits["max_context_len"],
+        action_format=limits["action_format"],
     )
     workdir = "/" + task["repo"].split("/")[1]
     patch, reward, solved, exit_status, grade_time, reward_source = None, 0.0, 0.0, "none", 0.0, "none"
@@ -182,6 +183,9 @@ def _run_episode(
             step_limit=limits["max_steps"],
             cost_limit=0.0,
             wall_time_limit_seconds=limits["episode_timeout"],
+            # mini-swe defaults to 3 consecutive format errors → episode death. Qwen's occasional tool-call
+            # miss shouldn't kill a long episode; raise it well above the per-episode miss rate (Tmax uses 64).
+            max_consecutive_format_errors=limits["max_format_errors"],
         )
         exit_info = agent.run(task=task["problem_statement"]) or {}
         exit_status = exit_info.get("exit_status", "?")
@@ -209,9 +213,10 @@ def _run_episode(
 
     stats = {
         "turns": len(model.versions),  # productive (non-format-error) turns
+        "hit_step_cap": float(len(model.versions) >= limits["max_steps"]),  # ran out of turns (vs other exits)
         "n_calls": model.n_calls,  # total model calls; n_calls - turns = the format-error tax
         "format_errors": model.n_format_errors,
-        "length_truncations": model.n_length_truncations,
+        "length_truncations": model.n_length_truncations,  # turns the model's output was cut at the per-turn cap
         "exit_status": exit_status,
         "solved": float(solved),  # strict binary (all required pass) → solved_frac; reward is dense
         "reward_source": reward_source,  # "submission" (curated) vs "fallback_diff" (git add -A) vs "none"
@@ -277,6 +282,8 @@ async def generate(args, sample: Sample, sampling_params, evaluation: bool = Fal
         "grade_timeout": getattr(args, "agentic_grade_timeout", 1800),
         "query_timeout": getattr(args, "agentic_query_timeout", 600),  # per-turn cap; bounds hung generations
         "max_context_len": getattr(args, "rollout_max_context_len", 131072),  # served window; per-turn gen cap
+        "max_format_errors": getattr(args, "agentic_max_format_errors", 30),  # consecutive before episode dies
+        "action_format": getattr(args, "agentic_action_format", None),  # "tool_call"|"bash_block"; None=per-model
         "diag_dump": getattr(args, "agentic_diag_dump", False),  # dump per-episode patch+grade detail (diagnostic)
     }
     router_url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}"

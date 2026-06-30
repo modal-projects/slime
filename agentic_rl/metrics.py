@@ -61,6 +61,20 @@ def _agentic_metrics(samples) -> dict:
     turns_list = [s["turns"] for s in stats if "turns" in s]  # turn distribution (decide max_steps)
     for p in (50, 90, 99):
         out[f"agentic/turns/p{p}"] = float(np.percentile(turns_list, p)) if turns_list else 0.0
+    # Truncation in the BROAD sense — an episode cut off by a RESOURCE LIMIT before a clean finish:
+    #   turns   (hit max_steps → LimitsExceeded),
+    #   tokens  (trajectory filled the 128k context window → ContextExceeded), or
+    #   time    (wall / hard cap → TimeExceeded).
+    # truncated_frac is the union; the sub-fracs say WHICH limit binds so we know what to raise. Separately,
+    # length_turn_frac = episodes where a single turn's output was cut at the per-turn cap (finish_reason=length)
+    # → the signal for rollout_max_response_len. Target: keep truncated_frac under ~0.10 (ideally 0.05).
+    n = len(stats) or 1
+    _trunc_exits = {"LimitsExceeded", "TimeExceeded", "ContextExceeded"}
+    out["agentic/truncated_frac"] = sum(s.get("exit_status") in _trunc_exits for s in stats) / n
+    out["agentic/truncated/step_cap_frac"] = mean("hit_step_cap")  # turns: hit max_steps
+    out["agentic/truncated/context_frac"] = sum(s.get("exit_status") == "ContextExceeded" for s in stats) / n
+    out["agentic/truncated/time_frac"] = sum(s.get("exit_status") == "TimeExceeded" for s in stats) / n
+    out["agentic/truncated/length_turn_frac"] = sum(s.get("length_truncations", 0) > 0 for s in stats) / n
     gens = [(s["output_tokens"], s["gen_time"]) for s in stats if s.get("gen_time", 0) > 0 and "output_tokens" in s]
     if gens:
         out["agentic/decode_tok_per_s/mean"] = float(np.mean([o / g for o, g in gens]))
