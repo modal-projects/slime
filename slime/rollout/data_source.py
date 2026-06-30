@@ -60,7 +60,10 @@ class RolloutDataSource(DataSource):
 
         if args.rollout_global_dataset and args.prompt_data is not None:
             tokenizer = load_tokenizer(args.hf_checkpoint, trust_remote_code=True)
-            processor = load_processor(args.hf_checkpoint, trust_remote_code=True)
+            # Only load a processor when the dataset actually declares multimodal columns. Some text models
+            # (e.g. Qwen3.6) ship a ProcessorMixin in their HF repo; loading it for a text-only run wrongly
+            # forces the data pipeline into multimodal/list-prompt mode (process_vision_info asserts a list).
+            processor = load_processor(args.hf_checkpoint, trust_remote_code=True) if args.multimodal_keys else None
 
             # TODO move (during the refactor)
             if (d := args.dump_details) is not None:

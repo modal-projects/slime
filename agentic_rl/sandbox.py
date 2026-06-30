@@ -1,6 +1,7 @@
 """Modal sandbox booted from the task image; also mini-swe-agent's bash Environment
 (duck-typed). One per rollout, run synchronously in a worker thread."""
 
+import shlex
 import time
 
 import modal
@@ -24,9 +25,12 @@ class Sandbox:
     ):
         app = modal.App.lookup(app_name, create_if_missing=True)
         t0 = time.perf_counter()
-        self.sb = modal.Sandbox.create(
-            "sleep", "infinity", image=modal.Image.from_registry(image), app=app, timeout=lifetime
-        )
+        # Sandbox v2 (_experimental_create): higher create throughput + lower/tighter time-to-interactive,
+        # designed for our >256-concurrent-sandbox regime where v1's control plane flaked. We use only the
+        # v2-supported surface (create/exec/wait/terminate/stdout/stderr/stdin) — see write_file, which streams
+        # via stdin because v2 drops the v1 `.filesystem` API. Fall back to v1 if the image's modal lacks v2.
+        _create = getattr(modal.Sandbox, "_experimental_create", modal.Sandbox.create)
+        self.sb = _create("sleep", "infinity", image=modal.Image.from_registry(image), app=app, timeout=lifetime)
         self.boot_time = time.perf_counter() - t0
         self.cwd = cwd
         self.exec_timeout = exec_timeout
@@ -43,7 +47,13 @@ class Sandbox:
         return rc, out
 
     def write_file(self, path: str, content: str) -> None:
-        self.sb.filesystem.write_text(content, path)  # RPC, not a shell arg (patches exceed ARG_MAX)
+        # Stream via stdin (not a shell arg) so large patches don't hit ARG_MAX. Avoids the `.filesystem`
+        # RPC, which Sandbox v2 does not expose — this path works on both v1 and v2 sandboxes.
+        p = self.sb.exec("bash", "-lc", f"cat > {shlex.quote(path)}", text=False)
+        p.stdin.write(content.encode())
+        p.stdin.write_eof()
+        p.stdin.drain()
+        p.wait()
 
     # mini-swe Environment protocol
     def execute(self, action: dict, cwd: str = "", *, timeout: int | None = None) -> dict:

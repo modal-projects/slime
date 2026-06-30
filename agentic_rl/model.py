@@ -60,14 +60,29 @@ class RecordingModel:
         self.n_length_truncations = 0  # turns the model overran the per-turn cap (finish_reason=length)
         self.reasoning_tokens = 0  # tokens spent inside <think>…</think>, summed over turns
         self._consumed = ""  # rendered text of the conversation already in `tokens`
+        # Model-aware thinking-render + stop tokens, detected from the chat template. Keeping each turn's
+        # reasoning in-context makes the render a stable prefix across turns (required by the Sample→Sample
+        # append): GLM uses clear_thinking=False; Qwen3.x interleaved thinking uses preserve_thinking=True
+        # (both verified prefix-stable). Stop on the turn-end token(s) for the model's format.
+        ct = getattr(tokenizer, "chat_template", "") or ""
+        if "preserve_thinking" in ct:  # Qwen3.x
+            self._think_kwargs = {"preserve_thinking": True}
+            ids = [tokenizer.convert_tokens_to_ids(t) for t in ("<|im_end|>", "<|endoftext|>")]
+            self._stop = {"stop_token_ids": [i for i in ids if isinstance(i, int) and i >= 0]}
+        elif "clear_thinking" in ct:  # GLM
+            self._think_kwargs = {"clear_thinking": False}
+            self._stop = {"stop": _STOP_STRINGS}
+        else:
+            self._think_kwargs = {}
+            self._stop = {"stop": _STOP_STRINGS}
 
     def _render(self, messages: list[dict], add_generation_prompt: bool) -> str:
         clean = [{"role": m["role"], "content": m["content"]} for m in messages]
-        # clear_thinking=False keeps each turn's reasoning in-context so the render stays a stable
-        # prefix across turns — required by the Sample→Sample append below (GLM strips past <think>
-        # by default, which would make the render non-monotonic and desync the recording).
+        # Keep each turn's reasoning in-context so the render stays a stable prefix across turns — required by
+        # the Sample→Sample append below. The kwarg is model-specific (detected in __init__); without it the
+        # past <think> blocks get stripped on re-render, making the render non-monotonic and desyncing recording.
         return self.tokenizer.apply_chat_template(
-            clean, add_generation_prompt=add_generation_prompt, tokenize=False, clear_thinking=False
+            clean, add_generation_prompt=add_generation_prompt, tokenize=False, **self._think_kwargs
         )
 
     def _extend(self, text: str, mask: int) -> int:
@@ -100,7 +115,7 @@ class RecordingModel:
             )
         sp = {
             **self.sampling_params,
-            "stop": _STOP_STRINGS,
+            **self._stop,
             "max_new_tokens": min(self.sampling_params.get("max_new_tokens", remaining), remaining),
         }
 
