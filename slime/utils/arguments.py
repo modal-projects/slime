@@ -529,6 +529,20 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 help="Interval for updating the weights",
             )
             parser.add_argument(
+                "--rollout-pause-generation-mode",
+                type=str,
+                choices=["abort", "retract", "in_place"],
+                default="abort",
+                help=(
+                    "How sglang handles in-flight requests when generation is paused for a weight "
+                    "update. 'abort' (default) kills them (they recycle); 'retract' frees their KV and "
+                    "re-prefills on resume; 'in_place' freezes the event loop and resumes the same "
+                    "requests with the new weights (no abort, no re-prefill). Use 'in_place' for "
+                    "non-colocate fully-async rollout to avoid wasting long in-flight episodes; keep "
+                    "'abort' for colocate, where the engine memory must be released for training."
+                ),
+            )
+            parser.add_argument(
                 "--keep-old-actor",
                 action="store_true",
                 help="Whether to keep the rollout model on training process",
@@ -687,6 +701,17 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             )
             parser.add_argument(
                 "--n-samples-per-prompt", type=int, default=1, help="Number of responses for each prompt in generation"
+            )
+            parser.add_argument(
+                "--rollout-max-staleness",
+                type=int,
+                default=None,
+                help=(
+                    "Windowed-FIFO staleness bound for fully-async rollout (Forge-style). Caps the "
+                    "rollout worker's in-flight+buffered lead to (rollout_max_staleness * rollout_batch_size) "
+                    "groups; with one weight version consumed per step this keeps any trained sample within "
+                    "this many weight versions of the trainer. Consumed oldest-first (FIFO). None = unbounded."
+                ),
             )
 
             # gbs of the training, note that the gbs is of sample, not of prompts,

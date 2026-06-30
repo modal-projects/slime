@@ -85,6 +85,17 @@ class AsyncRolloutWorker:
         self.output_queue: queue.Queue[tuple[int, list[Sample]]] = queue.Queue(maxsize=1000)
         self.worker_thread: threading.Thread | None = None
         self.state = GenerateState(args)
+        # Windowed-FIFO staleness control (Forge-style). The staleness window throttles GENERATION, not
+        # consumption: the worker won't submit a group more than ``max_lead`` gids ahead of the OLDEST
+        # in-flight group (``inflight_gids``), so a slow straggler holds back new generation — pinning the
+        # window — but never blocks the trainer. The collector keeps sampling the freshest completed groups
+        # (oldest-completed first) from the larger generation pool. Because generation can't run more than
+        # max_lead = max_staleness × rollout_batch_size ahead of the oldest unfinished request, every trained
+        # sample (including a slow head, once it finishes) is within max_staleness weight versions.
+        self.completed_buffer: dict[int, list[Sample]] = {}
+        self.inflight_gids: set[int] = set()  # gids currently generating; worker-thread-only
+        _K = getattr(args, "rollout_max_staleness", None)
+        self.max_lead = _K * args.rollout_batch_size if _K else None
 
     # -- public --------------------------------------------------------------
 
@@ -132,14 +143,21 @@ class AsyncRolloutWorker:
                             logger.warning("fully-async task crashed: %r", e)
                     active_tasks -= done
 
-                # Top up.
+                # Top up — but not past the staleness window: don't submit a group more than max_lead gids
+                # ahead of the OLDEST in-flight group. A slow straggler pins the oldest gid → throttles new
+                # generation (bounding its staleness) without blocking the trainer, which keeps sampling the
+                # freshest completed groups. Window is relative to the oldest UNFINISHED request, per Forge.
                 while len(active_tasks) < max_concurrent and self.running:
+                    if self.max_lead is not None and self.inflight_gids:
+                        if gid_counter - min(self.inflight_gids) >= self.max_lead:
+                            break
                     groups = self.data_buffer.get_samples(1)
                     if not groups:
                         break
                     for group in groups:
                         gid = gid_counter
                         gid_counter += 1
+                        self.inflight_gids.add(gid)
                         task = asyncio.create_task(
                             generate_and_rm_group(
                                 self.args,
@@ -168,6 +186,7 @@ class AsyncRolloutWorker:
 
     def _make_done_cb(self, gid: int):
         def _cb(done_task: asyncio.Task) -> None:
+            self.inflight_gids.discard(gid)  # no longer generating → unpins the staleness window
             try:
                 result = done_task.result()
             except Exception:  # noqa: BLE001
@@ -179,7 +198,7 @@ class AsyncRolloutWorker:
                     type(result).__name__,
                 )
                 return
-            # Aborted group → requeue, don't ship to training.
+            # Aborted group → requeue for redo under a fresh gid, don't ship to training.
             if any(getattr(s, "status", None) == Sample.Status.ABORTED for s in result):
                 try:
                     self.data_buffer.add_samples([result])
@@ -203,28 +222,35 @@ async def _generate_rollout_async(args, rollout_id: int, data_buffer) -> list[li
         worker.queue_size(),
     )
 
-    collected: dict[int, list[Sample]] = {}
+    # Windowed-FIFO consumption: keep sampling the freshest completed groups — oldest-COMPLETED first —
+    # from the generation pool; never block on an in-flight straggler (the staleness window is enforced on
+    # the GENERATION side via the worker's oldest-in-flight lead-cap, so a slow head throttles new work but
+    # not the trainer). Leftover completed groups stay buffered across steps. See [[project_windowed_fifo_staleness]].
+    buf = worker.completed_buffer
     started = time.time()
     last_log = started
     LOG_EVERY = 30.0
 
+    collected: list[list[Sample]] = []
     while len(collected) < target:
-        # Pull whatever's done.
-        drained = 0
         for gid, group in worker.get_completed_groups():
-            collected[gid] = group
-            drained += 1
+            buf[gid] = group
 
-        if not drained:
-            await asyncio.sleep(0.05)
+        for gid in sorted(buf)[: target - len(collected)]:  # oldest-completed first
+            collected.append(buf.pop(gid))
+
+        if len(collected) < target:
+            await asyncio.sleep(0.05)  # pool not yet deep enough — wait for more completions
 
         now = time.time()
         if now - last_log > LOG_EVERY:
             logger.info(
-                "fully-async rollout %d: collected %d/%d, queue=%d, elapsed=%.1fs",
+                "fully-async rollout %d: collected %d/%d, buffered=%d, in_flight=%d, queue=%d, elapsed=%.1fs",
                 rollout_id,
                 len(collected),
                 target,
+                len(buf),
+                len(worker.inflight_gids),
                 worker.queue_size(),
                 now - started,
             )
@@ -238,12 +264,13 @@ async def _generate_rollout_async(args, rollout_id: int, data_buffer) -> list[li
                 return int(idx)
         return 0
 
-    out = sorted(collected.values(), key=_key)[:target]
+    out = sorted(collected, key=_key)
     logger.info(
-        "fully-async rollout %d: done in %.1fs, queue_left=%d",
+        "fully-async rollout %d: done in %.1fs, buffered_left=%d, in_flight=%d",
         rollout_id,
         time.time() - started,
-        worker.queue_size(),
+        len(buf),
+        len(worker.inflight_gids),
     )
     return out
 

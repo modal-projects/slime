@@ -5,7 +5,9 @@ sample.metadata['agentic'] for metrics.py; episode limits come from args (--cust
 """
 
 import asyncio
+import collections
 import concurrent.futures
+import json
 import logging
 import threading
 import time
@@ -15,7 +17,7 @@ from slime.rollout.sglang_rollout import GenerateState
 from slime.utils.types import Sample
 
 from . import prompts
-from .grade import grade
+from .grade import grade_detailed
 from .model import RecordingModel
 from .sandbox import Sandbox
 
@@ -24,6 +26,102 @@ logger = logging.getLogger("agentic_rl")
 # Per-instance boot-failure tally. A task whose image won't build returns ABORTED and slime
 # requeues the same group forever; after the cap we ship a masked reward-0 sample to drop it.
 _boot_fails: dict[str, int] = {}
+
+# A small ring of recent transcripts, drained by metrics.log_rollout_data, to inspect trajectory
+# quality offline. Bounded: last 8, each truncated (~4KB).
+_recent_trajectories: collections.deque = collections.deque(maxlen=8)
+
+# Per-episode SCALAR rows for EVERY episode (not just the 8-transcript ring) — drained per rollout by
+# metrics to agentic_episodes/*.jsonl. Cheap (~250B/episode); the per-(task, time) record the wandb
+# aggregates can't give: solve-by-task, length↔solve correlation, drift per episode — and it bootstraps
+# the deferred difficulty curriculum (needs per-instance solve history). Bounded large for safety.
+_episode_records: collections.deque = collections.deque(maxlen=8192)
+
+
+def _capture_transcript(agent, task: dict, reward: float, stats: dict) -> None:
+    try:
+        text = "\n".join(f"[{m.get('role', '?')}] {m.get('content', '')}" for m in agent.messages)
+        if len(text) > 4000:
+            text = text[:2000] + "\n...[truncated]...\n" + text[-2000:]
+        _recent_trajectories.append(
+            {
+                "instance": task.get("instance_id", "?"),
+                "reward": reward,
+                "turns": stats.get("turns", 0),
+                "exit_status": stats.get("exit_status", "?"),
+                "transcript": text,
+            }
+        )
+    except Exception:
+        pass
+
+
+def _record_episode(instance: str, reward: float, stats: dict) -> None:
+    """One lightweight scalar row per episode (all of them) for offline analysis + curriculum bootstrap."""
+    try:
+        _episode_records.append(
+            {
+                "instance": instance,
+                "solved": stats.get("solved", 1.0 if reward >= 1.0 else 0.0),  # raw 0/1 correctness
+                "reward": round(float(reward), 4),  # shaped (post overlong)
+                "exit_status": stats.get("exit_status", "?"),
+                "turns": stats.get("turns", 0),
+                "output_tokens": stats.get("output_tokens", 0),
+                "total_length": stats.get("total_length", 0),
+                "reward_source": stats.get("reward_source", "?"),
+                "overlong_penalty": stats.get("overlong_penalty", 0.0),
+                "grade_time": stats.get("grade_time", 0.0),  # measure per-episode to right-size grade_timeout
+                "boot_time": stats.get("boot_time", 0.0),  # grade_time is boot-dominated (tests run <1s)
+                "episode_time": stats.get("episode_time", 0.0),
+                "gen_time": stats.get("gen_time", 0.0),
+                "gen_timestamp": stats.get("gen_timestamp"),
+            }
+        )
+    except Exception:
+        pass
+
+
+def _overlong_penalty(total_len: int, args) -> float:
+    """Soft overlong penalty as a CONTEXT-CAP GUARD (DAPO ramp shape): 0 until the trajectory nears the
+    served window, linear to -1 between (l_max - l_cache) and l_max, clamped beyond. Keyed on
+    total_length — the quantity that actually hits the 128k cap and ends the episode (ContextExceeded) —
+    NOT generated tokens, so a long-but-fine episode well inside the budget is untouched (a 32k episode
+    in a 128k window is fine). The caller floors this for CORRECT episodes so a solve is never zeroed.
+    Targets the drift→128k collapse seen last run (total_length max hit 129357). Disabled when
+    agentic_overlong_max is 0/unset."""
+    l_max = getattr(args, "agentic_overlong_max", 0) or 0
+    if not l_max:
+        return 0.0
+    l_cache = getattr(args, "agentic_overlong_cache", 40960)
+    if total_len <= l_max - l_cache:
+        return 0.0
+    if total_len >= l_max:
+        return -1.0
+    return (l_max - l_cache - total_len) / l_cache
+
+
+def _diag_dump(task: dict, patch: str, reward: float, exit_status: str, reward_source: str, detail: dict) -> None:
+    """Diagnostic only (--agentic-diag-dump): emit one JSON log line per episode so the submitted
+    patch + grading outcome can be grepped from the run log and zero-reward episodes classified as
+    real-fix-rejected (harness leak) vs wrong-patch (true difficulty). Off in production."""
+    try:
+        out = detail.get("output", "")
+        rec = {
+            "instance": task.get("instance_id", "?"),
+            "reward": reward,
+            "exit_status": exit_status,
+            "reward_source": reward_source,
+            "n_required": len(detail.get("required", [])),
+            "n_passed": len(detail.get("passed", [])),
+            "missing": detail.get("missing", [])[:8],
+            "patch": patch[:6000],
+            "grade_head": out[:1200],  # apply result (set -e aborts here on apply failure)
+            "grade_tail": out[-1800:],  # test summary when apply succeeded
+        }
+        logger.info("AGENTIC_DIAG %s", json.dumps(rec))
+    except Exception:
+        pass
+
 
 # Episodes are long I/O-bound chains; asyncio.to_thread caps at min(32, cpu+4) threads, which
 # throttles in-flight episodes regardless of sglang_server_concurrency. Use a wide dedicated pool.
@@ -58,18 +156,22 @@ def _run_episode(
         prompts.OBSERVATION_TEMPLATE,
         session_id,
         query_timeout=limits["query_timeout"],
+        max_context_len=limits["max_context_len"],
     )
     workdir = "/" + task["repo"].split("/")[1]
-    patch, reward, exit_status, grade_time = None, 0.0, "none", 0.0
+    patch, reward, solved, exit_status, grade_time, reward_source = None, 0.0, 0.0, "none", 0.0, "none"
     sandbox = None
+    agent = None
     t0 = time.perf_counter()
     try:
-        # lifetime covers episode + grade: grading runs tests in a fresh sandbox, but a long agent
-        # loop near episode_timeout would otherwise see this one reaped mid-run ("already shut down").
+        # lifetime must cover the full agent run: the wall limit (episode_timeout) is checked BETWEEN steps,
+        # so a slow FINAL turn can run another query_timeout past it → max episode ≈ episode_timeout +
+        # query_timeout. Grading runs in its own fresh sandbox, so it's not this sandbox's concern. Using
+        # grade_timeout (600) here under-sized it, reaping long episodes mid-final-turn ("already shut down").
         sandbox = Sandbox(
             task["image_name"],
             cwd=workdir,
-            lifetime=limits["episode_timeout"] + limits["grade_timeout"] + 300,
+            lifetime=limits["episode_timeout"] + limits["query_timeout"] + 300,
             exec_timeout=limits["exec_timeout"],
         )
         agent = DefaultAgent(
@@ -81,9 +183,12 @@ def _run_episode(
             cost_limit=0.0,
             wall_time_limit_seconds=limits["episode_timeout"],
         )
-        exit_info = agent.run(task=task["problem_statement"])
-        exit_status = (exit_info or {}).get("exit_status", "?")
-        _, patch = sandbox.exec("git add -A && git diff --cached HEAD", cwd=workdir, timeout=120)
+        exit_info = agent.run(task=task["problem_statement"]) or {}
+        exit_status = exit_info.get("exit_status", "?")
+        patch = exit_info.get("submission") or ""  # agent's curated source-only patch (on Submitted)
+        reward_source = "submission" if patch.strip() else "fallback_diff"
+        if not patch.strip():  # no clean submission → grade the working-tree diff (grade.py resets test files)
+            _, patch = sandbox.exec("git add -A && git diff --cached HEAD", cwd=workdir, timeout=120)
     except Exception:
         logger.exception("episode failed (instance=%s)", task.get("instance_id"))
     finally:
@@ -93,15 +198,23 @@ def _run_episode(
     if patch is not None and not model.aborted:
         g0 = time.perf_counter()
         try:
-            reward = grade(task, patch, timeout=limits["grade_timeout"])
+            detail = grade_detailed(task, patch, timeout=limits["grade_timeout"])
+            reward = detail["dense"]  # train on baseline-relative partial credit (variance even when unsolved)
+            solved = detail["reward"]  # strict binary → solved_frac
+            if limits.get("diag_dump"):
+                _diag_dump(task, patch, solved, exit_status, reward_source, detail)
         except Exception:
             logger.exception("grading failed (instance=%s)", task.get("instance_id"))
         grade_time = time.perf_counter() - g0
 
     stats = {
-        "turns": len(model.versions),
+        "turns": len(model.versions),  # productive (non-format-error) turns
+        "n_calls": model.n_calls,  # total model calls; n_calls - turns = the format-error tax
         "format_errors": model.n_format_errors,
+        "length_truncations": model.n_length_truncations,
         "exit_status": exit_status,
+        "solved": float(solved),  # strict binary (all required pass) → solved_frac; reward is dense
+        "reward_source": reward_source,  # "submission" (curated) vs "fallback_diff" (git add -A) vs "none"
         "gen_time": round(model.gen_time, 1),
         "exec_time": round(sandbox.exec_time if sandbox is not None else 0.0, 1),
         "boot_time": round(sandbox.boot_time if sandbox is not None else 0.0, 1),
@@ -109,8 +222,13 @@ def _run_episode(
         "episode_time": round(time.perf_counter() - t0, 1),
         "output_tokens": sum(model.loss_mask),
         "response_tokens": len(model.tokens) - (model.prompt_len or len(model.tokens)),
+        "reasoning_tokens": model.reasoning_tokens,
+        "total_length": len(model.tokens),  # full trajectory length → context utilization vs the 128k window
+        "prefix_cache_hit": round(model.cached_tokens / model.input_tokens, 3) if model.input_tokens else 0.0,
         "gen_timestamp": time.time(),  # for sample-age (staleness) at train time
     }
+    if agent is not None:
+        _capture_transcript(agent, task, reward, stats)
     return reward, model, stats
 
 
@@ -128,14 +246,27 @@ def _ship_null(sample: Sample, tokenizer, problem_statement: str, reason: str) -
     sample.status = Sample.Status.COMPLETED
     sample.remove_sample = True
     sample.metadata = {**sample.metadata, "agentic": {"exit_status": reason, "turns": 0, "gen_timestamp": time.time()}}
+    _record_episode(sample.metadata.get("instance_id", sample.label or "?"), 0.0, sample.metadata["agentic"])
     return sample
+
+
+def _recycle_or_drop(args, sample, tokenizer, problem_statement, reason):
+    """A status=ABORTED sample means 'requeue me'. The fully-async orchestrator honors that; the SYNC
+    generate_rollout ships EVERY returned sample straight to training, where a status=ABORTED sample's
+    reward=None crashes _post_process_rewards (torch.tensor(None)). So: async → ABORTED (recycle);
+    sync → a masked reward-0 sample (valid reward, remove_sample=True so it contributes no gradient)."""
+    if "fully_async" in getattr(args, "rollout_function_path", ""):
+        sample.status = Sample.Status.ABORTED
+        return sample
+    return _ship_null(sample, tokenizer, problem_statement, reason)
 
 
 async def generate(args, sample: Sample, sampling_params, evaluation: bool = False):
     state = GenerateState(args)
     if state.aborted:
-        sample.status = Sample.Status.ABORTED
-        return sample
+        return _recycle_or_drop(
+            args, sample, state.tokenizer, sample.prompt if isinstance(sample.prompt, str) else "", "StateAborted"
+        )
 
     task = dict(sample.metadata)
     task["problem_statement"] = sample.prompt if isinstance(sample.prompt, str) else task["problem_statement"]
@@ -145,12 +276,14 @@ async def generate(args, sample: Sample, sampling_params, evaluation: bool = Fal
         "exec_timeout": getattr(args, "agentic_exec_timeout", 120),
         "grade_timeout": getattr(args, "agentic_grade_timeout", 1800),
         "query_timeout": getattr(args, "agentic_query_timeout", 600),  # per-turn cap; bounds hung generations
+        "max_context_len": getattr(args, "rollout_max_context_len", 131072),  # served window; per-turn gen cap
+        "diag_dump": getattr(args, "agentic_diag_dump", False),  # dump per-episode patch+grade detail (diagnostic)
     }
     router_url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}"
     session_id = sample.session_id or str(uuid.uuid4())  # pin an episode's turns to one worker (prefix cache)
 
     loop = asyncio.get_running_loop()
-    reward, model, stats = await loop.run_in_executor(
+    fut = loop.run_in_executor(
         _episode_executor(args),
         _run_episode,
         task,
@@ -160,20 +293,34 @@ async def generate(args, sample: Sample, sampling_params, evaluation: bool = Fal
         limits,
         session_id,
     )
+    # Hard wall-cap on the whole episode. mini-swe's wall_time_limit only fires between turns, so a
+    # single slow/streaming generation on a congested engine can overshoot it by hours (observed
+    # episode_time up to ~12000s vs the 1800s budget), which then poisons the batch with extreme
+    # staleness. Cap it here from the rollout side and recycle; the orphan thread unwinds on its own.
+    # A legit episode runs to wall_limit + ONE final turn (bounded by query_timeout) + grade. The outer cap
+    # must cover all three or it preempts legit episodes mid-final-turn (false-negatives). +120 slack only.
+    hard_cap = limits["episode_timeout"] + limits["query_timeout"] + limits["grade_timeout"] + 120
+    try:
+        reward, model, stats = await asyncio.wait_for(fut, timeout=hard_cap)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "episode exceeded hard cap %ds (instance=%s); recycling/dropping", hard_cap, task.get("instance_id")
+        )
+        return _recycle_or_drop(args, sample, state.tokenizer, task.get("problem_statement", ""), "HardCapTimeout")
 
     key = sample.label or task.get("instance_id") or ""
 
-    if model.aborted:  # weight update aborted a turn mid-flight → recycle
-        sample.status = Sample.Status.ABORTED
-        return sample
+    if model.aborted:  # weight update aborted a turn mid-flight → recycle (async) / drop (sync)
+        return _recycle_or_drop(
+            args, sample, state.tokenizer, task.get("problem_statement", ""), "WeightUpdateAborted"
+        )
 
     # No usable trajectory (boot failed / every turn rolled back): retry a few times for transient
     # failures, then ship a masked sample so the group leaves the buffer instead of recycling forever.
     if model.prompt_len is None or len(model.tokens) <= model.prompt_len:
         _boot_fails[key] = _boot_fails.get(key, 0) + 1
         if _boot_fails[key] <= getattr(args, "agentic_max_boot_retries", 3):
-            sample.status = Sample.Status.ABORTED
-            return sample
+            return _recycle_or_drop(args, sample, state.tokenizer, task.get("problem_statement", ""), "BootRetry")
         logger.warning("instance %s unusable after %d boot failures; dropping", key, _boot_fails[key])
         return _ship_null(sample, state.tokenizer, task.get("problem_statement", ""), "ImageUnusable")
 
@@ -183,9 +330,18 @@ async def generate(args, sample: Sample, sampling_params, evaluation: bool = Fal
     sample.loss_mask = model.loss_mask[model.prompt_len :]
     sample.rollout_log_probs = model.logprobs[model.prompt_len :]
     sample.weight_versions = [v for v in model.versions if v is not None]
-    sample.reward = reward
+    # Context-cap guard: penalize only trajectories nearing the 128k window (keyed on total_length),
+    # and never zero a CORRECT episode — floor keeps any full solve above any partial. reward is the dense
+    # baseline-relative signal; stats["solved"] is the strict 0/1 (set in _run_episode) for solved_frac.
+    penalty = _overlong_penalty(stats["total_length"], args)
+    shaped = reward + penalty
+    if stats.get("solved", 0.0) >= 1.0:
+        shaped = max(shaped, getattr(args, "agentic_overlong_correct_floor", 0.5))
+    stats["overlong_penalty"] = round(shaped - reward, 4)
+    sample.reward = shaped
     sample.status = Sample.Status.COMPLETED
     sample.prefix_cache_info.cached_tokens = model.cached_tokens
     sample.prefix_cache_info.total_prompt_tokens = model.input_tokens
     sample.metadata = {**sample.metadata, "agentic": stats}
+    _record_episode(key, sample.reward, stats)
     return sample

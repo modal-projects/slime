@@ -452,7 +452,11 @@ class SGLangEngine(RayActor):
     def pause_generation(self):
         if self.node_rank != 0:
             return
-        response = requests.post(f"http://{self.server_host}:{self.server_port}/pause_generation", json={})
+        # Mode decides the fate of in-flight requests during a weight update (see
+        # --rollout-pause-generation-mode). sglang defaults to "abort"; non-colocate fully-async
+        # should use "in_place" so long in-flight episodes resume instead of being thrown away.
+        mode = getattr(self.args, "rollout_pause_generation_mode", "abort")
+        response = requests.post(f"http://{self.server_host}:{self.server_port}/pause_generation", json={"mode": mode})
         response.raise_for_status()
         return response
 

@@ -48,9 +48,16 @@ class Sandbox:
     # mini-swe Environment protocol
     def execute(self, action: dict, cwd: str = "", *, timeout: int | None = None) -> dict:
         rc, output = self.exec(action.get("command", ""), cwd=cwd or self.cwd, timeout=timeout or self.exec_timeout)
-        lines = output.lstrip().splitlines()
+        lines = output.lstrip().splitlines(keepends=True)
         if lines and lines[0].strip() == SUBMIT_SENTINEL and rc == 0:
-            raise Submitted({"role": "exit", "content": "", "extra": {"exit_status": "Submitted", "submission": ""}})
+            submission = "".join(lines[1:])  # the curated patch the agent cat-ed after the sentinel
+            raise Submitted(
+                {
+                    "role": "exit",
+                    "content": submission,
+                    "extra": {"exit_status": "Submitted", "submission": submission},
+                }
+            )
         return {"output": output, "returncode": rc, "exception_info": ""}
 
     def get_template_vars(self, **kwargs) -> dict:

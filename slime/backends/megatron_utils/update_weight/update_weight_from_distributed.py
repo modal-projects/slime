@@ -107,7 +107,12 @@ class UpdateWeightFromDistributed:
 
         if dist.get_rank() == 0:
             ray.get([engine.pause_generation.remote() for engine in self.rollout_engines])
-            ray.get([engine.flush_cache.remote() for engine in self.rollout_engines])
+            # flush_cache requires the engine to be idle, but in_place pause holds the running batch
+            # (frozen event loop) → flush_cache blocks waiting for idle → deadlock/timeout. Skip it for
+            # in_place: keeping the KV + prefix cache is the whole point (the stale prefix-cache KV is
+            # the accepted mixed-weight approximation). abort/retract drain first, so flush is safe there.
+            if getattr(self.args, "rollout_pause_generation_mode", "abort") != "in_place":
+                ray.get([engine.flush_cache.remote() for engine in self.rollout_engines])
 
             # int4/fp4 pre_process
             if self.quantization_config and self.quantization_config["quant_method"] in ["compressed-tensors"]:
