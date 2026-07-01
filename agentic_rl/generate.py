@@ -9,6 +9,7 @@ import collections
 import concurrent.futures
 import json
 import logging
+import random
 import threading
 import time
 import uuid
@@ -149,6 +150,13 @@ def _run_episode(
     """Run stock mini-swe in a sandbox. Never raises; returns (reward, model, stats)."""
     from minisweagent.agents.default import DefaultAgent
 
+    # Cold-start ramp: jitter each episode's start so the thundering herd of sandbox-boots + first queries
+    # doesn't burst-overwhelm Modal's sandbox control plane (exec HTTPErrors ~1024 concurrent) or the sgl-
+    # router (503s). Spreading the start over a window lets us run HIGH steady-state concurrency instead of
+    # retreating to a low cap (GLM's fix). Held inside the sglang semaphore, so it also throttles the burst.
+    if (ramp := limits.get("ramp_window", 0.0)) > 0:
+        time.sleep(random.uniform(0.0, ramp))
+
     model = RecordingModel(
         tokenizer,
         sampling_params,
@@ -285,6 +293,7 @@ async def generate(args, sample: Sample, sampling_params, evaluation: bool = Fal
         "max_format_errors": getattr(args, "agentic_max_format_errors", 30),  # consecutive before episode dies
         "action_format": getattr(args, "agentic_action_format", None),  # "tool_call"|"bash_block"; None=per-model
         "diag_dump": getattr(args, "agentic_diag_dump", False),  # dump per-episode patch+grade detail (diagnostic)
+        "ramp_window": getattr(args, "agentic_ramp_window", 0.0),  # cold-start stagger (s); spread the herd
     }
     router_url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}"
     session_id = sample.session_id or str(uuid.uuid4())  # pin an episode's turns to one worker (prefix cache)
