@@ -5,8 +5,10 @@ Sample, no re-tokenization). One instance per episode; read tokens/loss_mask/log
 """
 
 import json
+import random
 import re
 import time
+import urllib.error
 import urllib.request
 
 from minisweagent.exceptions import FormatError, InterruptAgentFlow
@@ -204,8 +206,24 @@ class RecordingModel:
         payload = {"input_ids": self.tokens, "sampling_params": sp, "return_logprob": True}
         req = urllib.request.Request(self.url, data=json.dumps(payload).encode(), headers=self.headers)
         t0 = time.perf_counter()
-        with urllib.request.urlopen(req, timeout=self.query_timeout) as resp:
-            out = json.loads(resp.read())
+        # 5xx / connection errors = transient engine|router overload (esp. the cold-start concurrency ramp,
+        # where thousands of episodes hit at once). Jittered backoff both waits out the load-shed AND
+        # disperses the thundering herd so retries don't re-synchronize into another burst.
+        for attempt in range(5):
+            try:
+                with urllib.request.urlopen(req, timeout=self.query_timeout) as resp:
+                    out = json.loads(resp.read())
+                break
+            except urllib.error.HTTPError as e:
+                if e.code >= 500 and attempt < 4:
+                    time.sleep(random.uniform(1.0, 2.0 ** (attempt + 1)))
+                    continue
+                raise
+            except urllib.error.URLError:
+                if attempt < 4:
+                    time.sleep(random.uniform(1.0, 2.0 ** (attempt + 1)))
+                    continue
+                raise
         self.gen_time += time.perf_counter() - t0
         meta = out["meta_info"]
         self.cached_tokens += meta.get("cached_tokens", 0)
