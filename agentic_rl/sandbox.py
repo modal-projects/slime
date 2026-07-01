@@ -50,7 +50,11 @@ class Sandbox:
         # Stream via stdin (not a shell arg) so large patches don't hit ARG_MAX. Avoids the `.filesystem`
         # RPC, which Sandbox v2 does not expose — this path works on both v1 and v2 sandboxes.
         p = self.sb.exec("bash", "-lc", f"cat > {shlex.quote(path)}", text=False)
-        p.stdin.write(content.encode())
+        data = content.encode()
+        chunk = 1 << 20  # 1 MiB: drain per chunk so large patches don't exceed Modal's stdin buffer limit
+        for i in range(0, len(data), chunk):
+            p.stdin.write(data[i : i + chunk])
+            p.stdin.drain()
         p.stdin.write_eof()
         p.stdin.drain()
         p.wait()
