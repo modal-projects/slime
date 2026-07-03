@@ -211,8 +211,14 @@ def _run_episode(
         g0 = time.perf_counter()
         try:
             detail = grade_detailed(task, patch, timeout=limits["grade_timeout"])
-            reward = detail["dense"]  # train on baseline-relative partial credit (variance even when unsolved)
-            solved = detail["reward"]  # strict binary → solved_frac
+            # TRAIN REWARD only on SUBMITTED episodes. The fallback (non-submit, git-diff) dense credit was
+            # reinforcing rambling: MEASURED 59% of dynamic-sampling KEPT-group winners were non-submitters, so
+            # the gradient taught "ramble for partial credit", not "submit-and-solve" (Submit 0.8→0.4, solved
+            # flat). Non-submit → 0 forces the submit discipline; dynamic sampling then filters the all-fail
+            # groups so every kept group's winner is a real submitter. solved (metric) stays the working-tree
+            # strict binary for diagnostics (shows the capability-vs-submission gap).
+            reward = detail["dense"] if reward_source == "submission" else 0.0
+            solved = detail["reward"]  # strict binary → solved_frac (working-tree; informative)
             if limits.get("diag_dump"):
                 _diag_dump(task, patch, solved, exit_status, reward_source, detail)
         except Exception:
