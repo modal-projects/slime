@@ -39,9 +39,9 @@ def grade_detailed(task: dict, model_patch: str, *, timeout: int = 1800) -> dict
     apply = "git apply -v --3way --recount --ignore-space-change --whitespace=nowarn"  # upstream eval flags
     # Files the held-out test patch touches. After applying the model patch, reset these to base so the
     # agent's edits to them can't conflict with test.patch (the SWE-bench eval approach). Without it, a
-    # model patch that modified a held-out test file makes `git apply test.patch` fail -> the fix never
-    # gets scored -> false-negative reward 0 (verified: 2/3 sampled tasks). Existing files revert to HEAD;
-    # files test.patch creates are removed so the create applies cleanly.
+    # model patch that modified a held-out test file makes `git apply test.patch` fail → the fix never gets
+    # scored → false-negative reward 0. Existing files revert to HEAD; files test.patch creates are removed
+    # so the create applies cleanly.
     test_files = [ln[6:].strip() for ln in task["test_patch"].splitlines() if ln.startswith("+++ b/")]
     reset = [f'git checkout HEAD -- "{f}" 2>/dev/null || rm -f "{f}"' for f in test_files]
 
@@ -110,15 +110,16 @@ _R2E_REPO = "/testbed"
 
 def _parse_r2e(output: str) -> dict:
     """pytest -rA lines ('PASSED <nodeid>') → {normalized_id: PASSED|FAILED}. Normalize the nodeid
-    'r2e_tests/test_1.py::Class::method' → 'Class.method' to match expected_output_json keys
-    (validated 64/64 against R2E's own stored old_commit results)."""
+    'r2e_tests/test_1.py::Class::method' → 'Class.method' to match expected_output_json keys."""
     res = {}
     for ln in output.splitlines():
         m = re.match(r"^(PASSED|FAILED|ERROR)\s+(\S+)", ln.strip())
         if not m:
             continue
         st, nid = m.groups()
-        key = nid.split("::", 1)[-1].replace("::", ".") if "::" in nid else nid
+        # drop the file part ('r2e_tests/test_1.py::') and join Class::method as Class.method; a bare
+        # nodeid with no '::' passes through unchanged.
+        key = nid.split("::", 1)[-1].replace("::", ".")
         res[key] = "PASSED" if st == "PASSED" else "FAILED"
     return res
 

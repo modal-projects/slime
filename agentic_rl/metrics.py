@@ -17,7 +17,7 @@ import numpy as np
 logger = logging.getLogger("agentic_rl")
 
 
-def _vnum(v):
+def _version_num(v):
     m = re.search(r"\d+", str(v))
     return int(m.group()) if m else None
 
@@ -105,7 +105,12 @@ def _async_metrics(samples, now) -> dict:
         spans = [len(set(vs)) for vs in versioned]
         out["async/version_span/mean"] = float(np.mean(spans))
         out["async/version_span/max"] = float(max(spans))
-        nums = [ns for ns in ([n for n in (_vnum(v) for v in vs) if n is not None] for vs in versioned) if ns]
+        # per-episode parsed version numbers, dropping episodes with none parseable
+        nums = []
+        for vs in versioned:
+            parsed = [n for n in (_version_num(v) for v in vs) if n is not None]
+            if parsed:
+                nums.append(parsed)
         if nums:
             fresh = max(max(ns) for ns in nums)
             lags = [fresh - min(ns) for ns in nums]
@@ -124,30 +129,22 @@ def _async_metrics(samples, now) -> dict:
 
 
 def _dump_trajectories(args, rollout_id) -> None:
-    """Persist two JSONL streams to the checkpoint volume for offline analysis (wandb Tables can't be
-    logged from slime's shared-mode rollout run): agentic_trajectories/ = the last-8 full(ish) transcripts
-    for qualitative spot-checks; agentic_episodes/ = one scalar row per EVERY episode (solve, exit, turns,
-    lengths, reward_source, overlong) — the per-(task,time) record for quantitative analysis + curriculum."""
+    """Persist the recent-transcripts ring to the checkpoint volume for offline qualitative spot-checks
+    (wandb Tables can't be logged from slime's shared-mode rollout run) → agentic_trajectories/*.jsonl."""
     import json
     import os
 
     from . import generate
 
-    base = getattr(args, "save", None) or "/checkpoints"
-
-    def _drain(ring, subdir):
-        rows = list(ring)
-        ring.clear()
-        if not rows:
-            return
-        d = os.path.join(base, subdir)
-        os.makedirs(d, exist_ok=True)
-        with open(os.path.join(d, f"rollout_{rollout_id}.jsonl"), "w") as f:
-            for r in rows:
-                f.write(json.dumps(r) + "\n")
-
-    _drain(generate._recent_trajectories, "agentic_trajectories")
-    _drain(generate._episode_records, "agentic_episodes")
+    rows = list(generate._recent_trajectories)
+    generate._recent_trajectories.clear()
+    if not rows:
+        return
+    d = os.path.join(getattr(args, "save", None) or "/checkpoints", "agentic_trajectories")
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, f"rollout_{rollout_id}.jsonl"), "w") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
 
 
 def log_rollout_data(rollout_id, args, samples, rollout_extra_metrics, rollout_time) -> bool:

@@ -95,8 +95,8 @@ class AsyncRolloutWorker:
         # sample (including a slow head, once it finishes) is within max_staleness weight versions.
         self.completed_buffer: dict[int, list[Sample]] = {}
         self.inflight_gids: set[int] = set()  # gids currently generating; worker-thread-only
-        _K = getattr(args, "rollout_max_staleness", None)
-        self.max_lead = _K * args.rollout_batch_size if _K else None
+        max_staleness = getattr(args, "rollout_max_staleness", None)
+        self.max_lead = max_staleness * args.rollout_batch_size if max_staleness else None
 
     # -- public --------------------------------------------------------------
 
@@ -144,10 +144,8 @@ class AsyncRolloutWorker:
                             logger.warning("fully-async task crashed: %r", e)
                     active_tasks -= done
 
-                # Top up — but not past the staleness window: don't submit a group more than max_lead gids
-                # ahead of the OLDEST in-flight group. A slow straggler pins the oldest gid → throttles new
-                # generation (bounding its staleness) without blocking the trainer, which keeps sampling the
-                # freshest completed groups. Window is relative to the oldest UNFINISHED request, per Forge.
+                # Top up — but not past the staleness window (see __init__): don't submit a group more than
+                # max_lead gids ahead of the oldest in-flight group.
                 while len(active_tasks) < max_concurrent and self.running:
                     if self.max_lead is not None and self.inflight_gids:
                         if gid_counter - min(self.inflight_gids) >= self.max_lead:
@@ -236,10 +234,9 @@ async def _generate_rollout_async(args, rollout_id: int, data_buffer) -> list[li
     # accept rejected groups rather than hang the trainer (and the low kept_frac will show in the metrics).
     over_sample_cap = target * 8
 
-    # Windowed-FIFO consumption: keep sampling the freshest completed groups — oldest-COMPLETED first —
-    # from the generation pool; never block on an in-flight straggler (the staleness window is enforced on
-    # the GENERATION side via the worker's oldest-in-flight lead-cap, so a slow head throttles new work but
-    # not the trainer). Leftover completed groups stay buffered across steps. See [[project_windowed_fifo_staleness]].
+    # Windowed-FIFO consumption: sample the oldest-completed groups first from the generation pool; never
+    # block on an in-flight straggler (staleness is bounded on the generation side — see the worker's
+    # __init__). Leftover completed groups stay buffered across steps.
     buf = worker.completed_buffer
     started = time.time()
     last_log = started

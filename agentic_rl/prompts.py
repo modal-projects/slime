@@ -1,16 +1,16 @@
 """Agent prompts + the bash tool schema.
 
 Qwen3.x is tool-call-trained (reasoning_parser=qwen3, tool_call_parser=qwen). Asked to emit a
-```bash text fence (mini-swe's default), it instead emits its native <tool_call>{...}</tool_call>
-~half the time → ~45% of episodes died to RepeatedFormatError (solve ~0%). Following Tmax
-(arXiv 2606.23321, Qwen3.6-27B on open-instruct), we switch the action channel to native
-tool-calling: render the `bash` tool schema into the prompt (apply_chat_template tools=…) so the
-model emits <tool_call>, which model.py parses. The mini-swe THOUGHT / workflow / submit protocol
-is otherwise preserved. GLM (clear_thinking path) keeps the ```bash fence via ACTION_REGEX below.
+```bash text fence (mini-swe's default), it often emits its native <tool_call>…</tool_call> instead,
+which fails the fence parser and kills episodes on RepeatedFormatError. So (following Tmax, Qwen3.6-27B
+on open-instruct) we switch the action channel to native tool-calling: render the `bash` tool schema
+into the prompt (apply_chat_template tools=…) so the model emits <tool_call>, which model.py parses.
+The mini-swe THOUGHT / workflow / submit protocol is otherwise preserved. GLM (clear_thinking path)
+keeps the ```bash fence via ACTION_REGEX below.
 """
 
-# The single tool we expose. Standard OpenAI function schema (matches Tmax's TOOL_SCHEMAS); Qwen's
-# chat template renders this into the system section and the model replies with <tool_call>{json}</tool_call>.
+# The single tool we expose. Standard OpenAI function schema; Qwen's chat template renders it into the
+# system section and the model replies with a native <tool_call> block (parsed in model.py).
 BASH_TOOL = {
     "type": "function",
     "function": {
@@ -159,9 +159,9 @@ If you really need to see something from the full command's output, you can redi
 {%- endif -%}
 """
 
-# Tool-call protocol (Qwen): model.py parses the native <tool_call>{"name":"bash",
-# "arguments":{"command":...}}</tool_call> from the generated text. The submit sentinel is echoed
-# via the bash tool; Sandbox.execute detects it in the command output and raises Submitted.
+# Tool-call protocol (Qwen): model.py parses the native qwen3_xml
+# <tool_call><function=bash><parameter=command>…</parameter></function></tool_call> from the generated
+# text. The submit sentinel is echoed via the bash tool; Sandbox.execute detects it and raises Submitted.
 SUBMIT_SENTINEL = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 
 # Legacy ```bash text fence + its jinja format-error template — retained for the GLM (clear_thinking)

@@ -87,7 +87,7 @@ class RecordingModel:
             self._think_kwargs = {"preserve_thinking": True}
             ids = [tokenizer.convert_tokens_to_ids(t) for t in ("<|im_end|>", "<|endoftext|>")]
             self._stop = {"stop_token_ids": [i for i in ids if isinstance(i, int) and i >= 0]}
-            default_action_format = "tool_call"  # tool-call-trained → ```bash fence gave ~45% format errors
+            default_action_format = "tool_call"  # tool-call-trained → a ```bash fence gives frequent format errors
         elif "clear_thinking" in ct:  # GLM
             self._think_kwargs = {"clear_thinking": False}
             self._stop = {"stop": _STOP_STRINGS}
@@ -206,21 +206,17 @@ class RecordingModel:
         payload = {"input_ids": self.tokens, "sampling_params": sp, "return_logprob": True}
         req = urllib.request.Request(self.url, data=json.dumps(payload).encode(), headers=self.headers)
         t0 = time.perf_counter()
-        # 5xx / connection errors = transient engine|router overload (esp. the cold-start concurrency ramp,
-        # where thousands of episodes hit at once). Jittered backoff both waits out the load-shed AND
-        # disperses the thundering herd so retries don't re-synchronize into another burst.
+        # Retry transient overload — any connection error, or a 5xx (engine/router load-shed, worst during
+        # the cold-start concurrency ramp). Jittered backoff disperses the thundering herd so retries don't
+        # re-synchronize into another burst. HTTPError is a URLError subclass, so one handler covers both.
         for attempt in range(5):
             try:
                 with urllib.request.urlopen(req, timeout=self.query_timeout) as resp:
                     out = json.loads(resp.read())
                 break
-            except urllib.error.HTTPError as e:
-                if e.code >= 500 and attempt < 4:
-                    time.sleep(random.uniform(1.0, 2.0 ** (attempt + 1)))
-                    continue
-                raise
-            except urllib.error.URLError:
-                if attempt < 4:
+            except urllib.error.URLError as e:
+                retriable = not isinstance(e, urllib.error.HTTPError) or e.code >= 500
+                if retriable and attempt < 4:
                     time.sleep(random.uniform(1.0, 2.0 ** (attempt + 1)))
                     continue
                 raise

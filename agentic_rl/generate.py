@@ -32,12 +32,6 @@ _boot_fails: dict[str, int] = {}
 # quality offline. Bounded: last 8, each truncated (~4KB).
 _recent_trajectories: collections.deque = collections.deque(maxlen=8)
 
-# Per-episode SCALAR rows for EVERY episode (not just the 8-transcript ring) — drained per rollout by
-# metrics to agentic_episodes/*.jsonl. Cheap (~250B/episode); the per-(task, time) record the wandb
-# aggregates can't give: solve-by-task, length↔solve correlation, drift per episode — and it bootstraps
-# the deferred difficulty curriculum (needs per-instance solve history). Bounded large for safety.
-_episode_records: collections.deque = collections.deque(maxlen=8192)
-
 
 def _capture_transcript(agent, task: dict, reward: float, stats: dict) -> None:
     try:
@@ -57,39 +51,12 @@ def _capture_transcript(agent, task: dict, reward: float, stats: dict) -> None:
         pass
 
 
-def _record_episode(instance: str, reward: float, stats: dict) -> None:
-    """One lightweight scalar row per episode (all of them) for offline analysis + curriculum bootstrap."""
-    try:
-        _episode_records.append(
-            {
-                "instance": instance,
-                "solved": stats.get("solved", 1.0 if reward >= 1.0 else 0.0),  # raw 0/1 correctness
-                "reward": round(float(reward), 4),  # shaped (post overlong)
-                "exit_status": stats.get("exit_status", "?"),
-                "turns": stats.get("turns", 0),
-                "output_tokens": stats.get("output_tokens", 0),
-                "total_length": stats.get("total_length", 0),
-                "reward_source": stats.get("reward_source", "?"),
-                "overlong_penalty": stats.get("overlong_penalty", 0.0),
-                "grade_time": stats.get("grade_time", 0.0),  # measure per-episode to right-size grade_timeout
-                "boot_time": stats.get("boot_time", 0.0),  # grade_time is boot-dominated (tests run <1s)
-                "episode_time": stats.get("episode_time", 0.0),
-                "gen_time": stats.get("gen_time", 0.0),
-                "gen_timestamp": stats.get("gen_timestamp"),
-            }
-        )
-    except Exception:
-        pass
-
-
 def _overlong_penalty(total_len: int, args) -> float:
     """Soft overlong penalty as a CONTEXT-CAP GUARD (DAPO ramp shape): 0 until the trajectory nears the
-    served window, linear to -1 between (l_max - l_cache) and l_max, clamped beyond. Keyed on
-    total_length — the quantity that actually hits the 128k cap and ends the episode (ContextExceeded) —
-    NOT generated tokens, so a long-but-fine episode well inside the budget is untouched (a 32k episode
-    in a 128k window is fine). The caller floors this for CORRECT episodes so a solve is never zeroed.
-    Targets the drift→128k collapse seen last run (total_length max hit 129357). Disabled when
-    agentic_overlong_max is 0/unset."""
+    served window, linear to -1 between (l_max - l_cache) and l_max, clamped beyond. Keyed on total_length
+    — the quantity that actually hits the context cap and ends the episode (ContextExceeded), NOT generated
+    tokens — so a long-but-fine episode well inside the budget is untouched. The caller floors this for
+    CORRECT episodes so a solve is never zeroed. Disabled when agentic_overlong_max is 0/unset."""
     l_max = getattr(args, "agentic_overlong_max", 0) or 0
     if not l_max:
         return 0.0
@@ -226,12 +193,11 @@ def _run_episode(
         g0 = time.perf_counter()
         try:
             detail = grade_detailed(task, patch, timeout=limits["grade_timeout"])
-            # TRAIN REWARD only on SUBMITTED episodes. The fallback (non-submit, git-diff) dense credit was
-            # reinforcing rambling: MEASURED 59% of dynamic-sampling KEPT-group winners were non-submitters, so
-            # the gradient taught "ramble for partial credit", not "submit-and-solve" (Submit 0.8→0.4, solved
-            # flat). Non-submit → 0 forces the submit discipline; dynamic sampling then filters the all-fail
-            # groups so every kept group's winner is a real submitter. solved (metric) stays the working-tree
-            # strict binary for diagnostics (shows the capability-vs-submission gap).
+            # TRAIN REWARD only on SUBMITTED episodes. Giving the non-submit git-diff fallback dense credit
+            # reinforced rambling (the gradient learned "ramble for partial credit" over "submit-and-solve"),
+            # so non-submit → 0 enforces submit discipline; dynamic sampling then filters the all-fail groups
+            # so every kept group's winner is a real submitter. solved (metric) stays the strict working-tree
+            # binary for diagnostics (the capability-vs-submission gap).
             reward = detail["dense"] if reward_source == "submission" else 0.0
             solved = detail["reward"]  # strict binary → solved_frac (working-tree; informative)
             if limits.get("diag_dump"):
@@ -266,7 +232,7 @@ def _run_episode(
     return reward, model, stats
 
 
-def _ship_null(sample: Sample, tokenizer, problem_statement: str, reason: str) -> Sample:
+def _ship_masked_sample(sample: Sample, tokenizer, problem_statement: str, reason: str) -> Sample:
     """A valid but fully-masked reward-0 sample for a permanently-failing task: ships to leave
     the buffer, contributes no gradient (slime zeros the loss mask via remove_sample)."""
     ptoks = tokenizer.encode(problem_statement or "", add_special_tokens=False)[:512]
@@ -280,7 +246,6 @@ def _ship_null(sample: Sample, tokenizer, problem_statement: str, reason: str) -
     sample.status = Sample.Status.COMPLETED
     sample.remove_sample = True
     sample.metadata = {**sample.metadata, "agentic": {"exit_status": reason, "turns": 0, "gen_timestamp": time.time()}}
-    _record_episode(sample.metadata.get("instance_id", sample.label or "?"), 0.0, sample.metadata["agentic"])
     return sample
 
 
@@ -292,7 +257,7 @@ def _recycle_or_drop(args, sample, tokenizer, problem_statement, reason):
     if "fully_async" in getattr(args, "rollout_function_path", ""):
         sample.status = Sample.Status.ABORTED
         return sample
-    return _ship_null(sample, tokenizer, problem_statement, reason)
+    return _ship_masked_sample(sample, tokenizer, problem_statement, reason)
 
 
 async def generate(args, sample: Sample, sampling_params, evaluation: bool = False):
@@ -330,12 +295,11 @@ async def generate(args, sample: Sample, sampling_params, evaluation: bool = Fal
         limits,
         session_id,
     )
-    # Hard wall-cap on the whole episode. mini-swe's wall_time_limit only fires between turns, so a
-    # single slow/streaming generation on a congested engine can overshoot it by hours (observed
-    # episode_time up to ~12000s vs the 1800s budget), which then poisons the batch with extreme
-    # staleness. Cap it here from the rollout side and recycle; the orphan thread unwinds on its own.
-    # A legit episode runs to wall_limit + ONE final turn (bounded by query_timeout) + grade. The outer cap
-    # must cover all three or it preempts legit episodes mid-final-turn (false-negatives). +120 slack only.
+    # Hard wall-cap on the whole episode. mini-swe's wall_time_limit only fires between turns, so a single
+    # slow/streaming generation on a congested engine can overshoot it by hours, poisoning the batch with
+    # extreme staleness. Cap it here from the rollout side and recycle; the orphan thread unwinds on its own.
+    # A legit episode runs to wall_limit + ONE final turn (bounded by query_timeout) + grade, so the cap must
+    # cover all three or it preempts legit episodes mid-final-turn (false-negatives). +120 slack only.
     hard_cap = limits["episode_timeout"] + limits["query_timeout"] + limits["grade_timeout"] + 120
     try:
         reward, model, stats = await asyncio.wait_for(fut, timeout=hard_cap)
@@ -359,7 +323,7 @@ async def generate(args, sample: Sample, sampling_params, evaluation: bool = Fal
         if _boot_fails[key] <= getattr(args, "agentic_max_boot_retries", 3):
             return _recycle_or_drop(args, sample, state.tokenizer, task.get("problem_statement", ""), "BootRetry")
         logger.warning("instance %s unusable after %d boot failures; dropping", key, _boot_fails[key])
-        return _ship_null(sample, state.tokenizer, task.get("problem_statement", ""), "ImageUnusable")
+        return _ship_masked_sample(sample, state.tokenizer, task.get("problem_statement", ""), "ImageUnusable")
 
     _boot_fails.pop(key, None)
     sample.tokens = model.tokens
@@ -380,5 +344,4 @@ async def generate(args, sample: Sample, sampling_params, evaluation: bool = Fal
     sample.prefix_cache_info.cached_tokens = model.cached_tokens
     sample.prefix_cache_info.total_prompt_tokens = model.input_tokens
     sample.metadata = {**sample.metadata, "agentic": stats}
-    _record_episode(key, sample.reward, stats)
     return sample
