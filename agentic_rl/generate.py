@@ -167,7 +167,8 @@ def _run_episode(
         max_context_len=limits["max_context_len"],
         action_format=limits["action_format"],
     )
-    workdir = "/" + task["repo"].split("/")[1]
+    is_r2e = "expected_output_json" in task  # R2E-Gym task (vs SWE-rebench)
+    workdir = "/testbed" if is_r2e else "/" + task["repo"].split("/")[1]
     patch, reward, solved, exit_status, grade_time, reward_source = None, 0.0, 0.0, "none", 0.0, "none"
     sandbox = None
     agent = None
@@ -183,6 +184,20 @@ def _run_episode(
             lifetime=limits["episode_timeout"] + limits["query_timeout"] + 300,
             exec_timeout=limits["exec_timeout"],
         )
+        if is_r2e:
+            # Remove the held-out tests + runner (/r2e_tests, run_tests.sh) FIRST — anti-reward-hacking (they're
+            # world-readable in the raw image), and it MUST precede the commit: otherwise `git add -A` tracks
+            # run_tests.sh, and the agent's later diff would carry its DELETION → grade applies that → the runner
+            # vanishes → 0 tests run → false reward 0. Then commit R2E's setup-dirt as the base so the agent's
+            # submission is a clean diff of ITS changes only (grade re-commits the same base symmetrically; it
+            # keeps its own fresh copy of the tests/runner for scoring).
+            sandbox.exec(
+                "rm -rf /r2e_tests; rm -f run_tests.sh; "
+                "git config user.email r2e@local && git config user.name r2e && "
+                "git add -A && git commit -q -m r2e-base || true",
+                cwd=workdir,
+                timeout=120,
+            )
         agent = DefaultAgent(
             model,
             sandbox,
