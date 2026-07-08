@@ -107,12 +107,21 @@ def grade(task: dict, model_patch: str, *, timeout: int = 1800) -> float:
 # ── R2E-Gym grading ──────────────────────────────────────────────────────────
 _R2E_REPO = "/testbed"
 
+# Some R2E images force pytest color, and R2E even baked ANSI codes into expected_output_json keys for
+# ~60% of pillow tasks. Unstripped, the colored 'PASSED <nodeid>' lines never match and the run parses
+# as 0 tests → false reward 0 on a green run (verified live: 248 false-negative submissions, all pillow).
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip_ansi(s: str) -> str:
+    return _ANSI_RE.sub("", s)
+
 
 def _parse_r2e(output: str) -> dict:
     """pytest -rA lines ('PASSED <nodeid>') → {normalized_id: PASSED|FAILED}. Normalize the nodeid
     'r2e_tests/test_1.py::Class::method' → 'Class.method' to match expected_output_json keys."""
     res = {}
-    for ln in output.splitlines():
+    for ln in _strip_ansi(output).splitlines():
         m = re.match(r"^(PASSED|FAILED|ERROR)\s+(\S+)", ln.strip())
         if not m:
             continue
@@ -137,6 +146,9 @@ def grade_r2e_detailed(task: dict, model_patch: str, *, timeout: int = 1800) -> 
     base = task.get("base_results") or {}
     if isinstance(base, str):
         base = json.loads(base)
+    # Normalize keys: R2E's stored keys carry ANSI codes on a subset of tasks (see _ANSI_RE above).
+    expected = {_strip_ansi(k): v for k, v in expected.items()}
+    base = {_strip_ansi(k): v for k, v in base.items()}
 
     sandbox = Sandbox(task["image_name"], cwd=_R2E_REPO, lifetime=timeout + 300)
     try:
