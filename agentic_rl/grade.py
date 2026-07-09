@@ -160,6 +160,12 @@ def grade_r2e_detailed(task: dict, model_patch: str, *, timeout: int = 1800) -> 
                 "ln -sf /r2e_tests /testbed/r2e_tests",
                 "git apply -v --3way --recount --ignore-space-change --whitespace=nowarn /tmp/model.patch "
                 "|| git apply --whitespace=nowarn /tmp/model.patch || true",
+                # Anti-reward-hack: the runner + hidden tests must be pristine AFTER the model patch. The
+                # agent's repo had run_tests.sh deleted pre-commit, so no honest diff touches it — but a
+                # crafted patch could rewrite it (it's tracked here) to print fake PASSED lines. Restore it
+                # and re-assert the hidden-test symlink before running.
+                "git checkout HEAD -- run_tests.sh 2>/dev/null || true",
+                "rm -rf /testbed/r2e_tests && ln -s /r2e_tests /testbed/r2e_tests",
                 "bash run_tests.sh 2>&1",
             ]
         )
