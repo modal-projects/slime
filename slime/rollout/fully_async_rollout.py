@@ -197,8 +197,13 @@ class AsyncRolloutWorker:
                     type(result).__name__,
                 )
                 return
-            # Aborted group → requeue for redo under a fresh gid, don't ship to training.
+            # Aborted group → requeue for redo under a fresh gid, don't ship to training. Reset EVERY
+            # sibling to PENDING: on re-pull, generate_and_rm short-circuits COMPLETED samples (returns
+            # them verbatim, no regeneration), which would ship the siblings' old-policy trajectories under
+            # a fresh gid — stale data outside the staleness window. PENDING forces a full-group redo.
             if any(getattr(s, "status", None) == Sample.Status.ABORTED for s in result):
+                for s in result:
+                    s.status = Sample.Status.PENDING
                 try:
                     self.data_buffer.add_samples([result])
                 except Exception:  # noqa: BLE001

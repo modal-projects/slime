@@ -250,7 +250,16 @@ class RecordingModel:
         self.logprobs += [t[0] for t in token_logprobs]
         self.versions.append(meta.get("weight_version"))
         if finish == "abort":
+            # Engine aborted this generation (weight update / engine restart) — the turn is truncated garbage
+            # and the sample will be recycled, so end the episode NOW rather than burn the remaining budget.
             self.aborted = True
+            raise RolloutAborted(
+                {
+                    "role": "exit",
+                    "content": "RolloutAborted",
+                    "extra": {"exit_status": "RolloutAborted", "submission": ""},
+                }
+            )
         if finish == "length":
             self.n_length_truncations += 1
         if "</think>" in text:  # reasoning the policy spent before its answer

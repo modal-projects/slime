@@ -670,8 +670,29 @@ class RolloutManager:
             self.args.advantage_estimator in ["grpo", "gspo", "cispo", "reinforce_plus_plus_baseline"]
             and self.args.rewards_normalization
         ):
+            # Masked placeholder samples (remove_sample=True; e.g. a permanently-failing generation shipped
+            # with a fabricated reward just to leave the buffer) have their loss zeroed, but group-norm would
+            # still count their reward and drag the group baseline. Neutralize them: replace their reward with
+            # the mean of the group's REAL samples before normalization (an all-masked group keeps its value;
+            # it is zero-variance and gets filtered/zero-advantage anyway).
+            norm_rewards = list(raw_rewards)
+            removed = [bool(getattr(s, "remove_sample", False)) for s in samples]
+            if any(removed):
+                if len(samples) == self.args.n_samples_per_prompt * self.args.rollout_batch_size:
+                    group_size = self.args.n_samples_per_prompt
+                else:
+                    group_size = len(samples)
+                for g0 in range(0, len(samples), group_size):
+                    idx = range(g0, min(g0 + group_size, len(samples)))
+                    real = [norm_rewards[i] for i in idx if not removed[i]]
+                    if real:
+                        fill = sum(real) / len(real)
+                        for i in idx:
+                            if removed[i]:
+                                norm_rewards[i] = fill
+
             # group norm
-            rewards = torch.tensor(raw_rewards, dtype=torch.float)
+            rewards = torch.tensor(norm_rewards, dtype=torch.float)
             if rewards.shape[-1] == self.args.n_samples_per_prompt * self.args.rollout_batch_size:
                 rewards = rewards.reshape(-1, self.args.n_samples_per_prompt)
             else:

@@ -146,26 +146,39 @@ def _run_episode(
         # so a slow FINAL turn can run another query_timeout past it → max episode ≈ episode_timeout +
         # query_timeout. Grading runs in its own fresh sandbox, so it's not this sandbox's concern. Using
         # grade_timeout (600) here under-sized it, reaping long episodes mid-final-turn ("already shut down").
-        sandbox = Sandbox(
-            task["image_name"],
-            cwd=workdir,
-            lifetime=limits["episode_timeout"] + limits["query_timeout"] + 300,
-            exec_timeout=limits["exec_timeout"],
-        )
-        if is_r2e:
-            # Remove the held-out tests + runner (/r2e_tests, run_tests.sh) FIRST — anti-reward-hacking (they're
-            # world-readable in the raw image), and it MUST precede the commit: otherwise `git add -A` tracks
-            # run_tests.sh, and the agent's later diff would carry its DELETION → grade applies that → the runner
-            # vanishes → 0 tests run → false reward 0. Then commit R2E's setup-dirt as the base so the agent's
-            # submission is a clean diff of ITS changes only (grade re-commits the same base symmetrically; it
-            # keeps its own fresh copy of the tests/runner for scoring).
-            sandbox.exec(
-                "rm -rf /r2e_tests; rm -f run_tests.sh; "
-                "git config user.email r2e@local && git config user.name r2e && "
-                "git add -A && git commit -q -m r2e-base || true",
-                cwd=workdir,
-                timeout=120,
-            )
+        # Boot + prep with in-episode retries: transient Modal control-plane blips must not consume the
+        # episode (the sync driver can't recycle — a failed episode ships as a masked zero), so absorb them
+        # here and let only PERSISTENT failures reach the _boot_fails/ImageUnusable machinery.
+        for attempt in range(3):
+            try:
+                sandbox = Sandbox(
+                    task["image_name"],
+                    cwd=workdir,
+                    lifetime=limits["episode_timeout"] + limits["query_timeout"] + 300,
+                    exec_timeout=limits["exec_timeout"],
+                )
+                if is_r2e:
+                    # Remove the held-out tests + runner (/r2e_tests, run_tests.sh) FIRST — anti-reward-hacking
+                    # (they're world-readable in the raw image), and it MUST precede the commit: otherwise
+                    # `git add -A` tracks run_tests.sh, and the agent's later diff would carry its DELETION →
+                    # grade applies that → the runner vanishes → 0 tests run → false reward 0. Then commit R2E's
+                    # setup-dirt as the base so the agent's submission is a clean diff of ITS changes only
+                    # (grade re-commits the same base symmetrically, with its own fresh tests/runner).
+                    sandbox.exec(
+                        "rm -rf /r2e_tests; rm -f run_tests.sh; "
+                        "git config user.email r2e@local && git config user.name r2e && "
+                        "git add -A && git commit -q -m r2e-base || true",
+                        cwd=workdir,
+                        timeout=120,
+                    )
+                break
+            except Exception:
+                if sandbox is not None:
+                    sandbox.terminate()
+                    sandbox = None
+                if attempt == 2:
+                    raise
+                time.sleep(random.uniform(2.0, 10.0))
         agent = DefaultAgent(
             model,
             sandbox,
@@ -286,6 +299,7 @@ async def generate(args, sample: Sample, sampling_params, evaluation: bool = Fal
     session_id = sample.session_id or str(uuid.uuid4())  # pin an episode's turns to one worker (prefix cache)
 
     loop = asyncio.get_running_loop()
+    kill_switch = threading.Event()  # hard-cap reaper: flips the abandoned episode thread's abort probe
     fut = loop.run_in_executor(
         _episode_executor(args),
         _run_episode,
@@ -295,7 +309,10 @@ async def generate(args, sample: Sample, sampling_params, evaluation: bool = Fal
         router_url,
         limits,
         session_id,
-        lambda: state.aborted,  # per-turn abort probe: surplus episodes exit at the next turn (RolloutAborted)
+        # per-turn abort probe: surplus episodes (sync abort window) and hard-cap orphans exit at their next
+        # turn (RolloutAborted) instead of running to completion — the live state flag alone is unreliable
+        # for orphans because state.reset() clears it at the next rollout while the thread is still alive.
+        lambda: state.aborted or kill_switch.is_set(),
     )
     # Hard wall-cap on the whole episode. mini-swe's wall_time_limit only fires between turns, so a single
     # slow/streaming generation on a congested engine can overshoot it by hours, poisoning the batch with
@@ -306,6 +323,8 @@ async def generate(args, sample: Sample, sampling_params, evaluation: bool = Fal
     try:
         reward, model, stats = await asyncio.wait_for(fut, timeout=hard_cap)
     except asyncio.TimeoutError:
+        kill_switch.set()  # reap the orphan thread at its next turn — else it outlives the abort window and
+        # can inject requests into the next pause→flush_cache (engine never idle → flush timeout → crash)
         logger.warning(
             "episode exceeded hard cap %ds (instance=%s); recycling/dropping", hard_cap, task.get("instance_id")
         )
