@@ -112,7 +112,7 @@ def _episode_executor(args) -> concurrent.futures.ThreadPoolExecutor:
 
 
 def _run_episode(
-    task: dict, tokenizer, sampling_params, router_url: str, limits: dict, session_id: str
+    task: dict, tokenizer, sampling_params, router_url: str, limits: dict, session_id: str, abort_check=None
 ) -> tuple[float, RecordingModel, dict]:
     """Run stock mini-swe in a sandbox. Never raises; returns (reward, model, stats)."""
     from minisweagent.agents.default import DefaultAgent
@@ -133,6 +133,7 @@ def _run_episode(
         query_timeout=limits["query_timeout"],
         max_context_len=limits["max_context_len"],
         action_format=limits["action_format"],
+        abort_check=abort_check,
     )
     is_r2e = "expected_output_json" in task  # R2E-Gym task (vs SWE-rebench)
     workdir = "/testbed" if is_r2e else "/" + task["repo"].split("/")[1]
@@ -294,6 +295,7 @@ async def generate(args, sample: Sample, sampling_params, evaluation: bool = Fal
         router_url,
         limits,
         session_id,
+        lambda: state.aborted,  # per-turn abort probe: surplus episodes exit at the next turn (RolloutAborted)
     )
     # Hard wall-cap on the whole episode. mini-swe's wall_time_limit only fires between turns, so a single
     # slow/streaming generation on a congested engine can overshoot it by hours, poisoning the batch with

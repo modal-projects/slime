@@ -41,6 +41,13 @@ class ContextExceeded(InterruptAgentFlow):
     once accumulated reasoning fills the window."""
 
 
+class RolloutAborted(InterruptAgentFlow):
+    """The rollout was aborted (the step's batch is already full) — end this surplus episode at the turn
+    boundary instead of running to completion. Engine-side aborts only kill in-flight generations; an
+    episode that was mid-bash never sees one, so without this check it churns for up to a full episode
+    while the sync drain waits for it. generate() sees model.aborted and recycles the sample."""
+
+
 class RecordingModel:
     config = None  # mini-swe Model protocol
 
@@ -54,9 +61,11 @@ class RecordingModel:
         query_timeout=600,
         max_context_len=131072,
         action_format=None,
+        abort_check=None,
     ):
         self.tokenizer = tokenizer
         self.sampling_params = sampling_params
+        self._abort_check = abort_check  # per-turn rollout-abort probe (see RolloutAborted)
         self.url = f"{router_url}/generate"
         self.query_timeout = query_timeout  # cap per-turn sglang call; bounds hung/queued generations
         self.max_context_len = max_context_len  # served window; per-turn gen is capped to the remainder
@@ -176,6 +185,15 @@ class RecordingModel:
         return [{"command": cmd}]
 
     def query(self, messages: list[dict], **kwargs) -> dict:
+        if self._abort_check is not None and self._abort_check():
+            self.aborted = True
+            raise RolloutAborted(
+                {
+                    "role": "exit",
+                    "content": "RolloutAborted",
+                    "extra": {"exit_status": "RolloutAborted", "submission": ""},
+                }
+            )
         self.n_calls += 1
         full = self._render(messages, add_generation_prompt=True)
         # Sample→Sample append: this turn's render MUST extend the prior verbatim (clear_thinking=False
