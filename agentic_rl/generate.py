@@ -36,8 +36,8 @@ _recent_trajectories: collections.deque = collections.deque(maxlen=8)
 def _capture_transcript(agent, task: dict, reward: float, stats: dict) -> None:
     try:
         text = "\n".join(f"[{m.get('role', '?')}] {m.get('content', '')}" for m in agent.messages)
-        if len(text) > 4000:
-            text = text[:2000] + "\n...[truncated]...\n" + text[-2000:]
+        if len(text) > 16000:  # keep enough of long (≤96-turn) episodes to audit looping/degeneration
+            text = text[:8000] + "\n...[truncated]...\n" + text[-8000:]
         _recent_trajectories.append(
             {
                 "instance": task.get("instance_id", "?"),
