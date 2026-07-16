@@ -63,7 +63,7 @@ def _limits(args) -> EpisodeLimits:
         episode_timeout=getattr(args, "agentic_episode_timeout", 1800),
         exec_timeout=getattr(args, "agentic_exec_timeout", 120),
         grade_timeout=getattr(args, "agentic_grade_timeout", 1800),
-        eval_timeout=getattr(args, "agentic_eval_timeout", 600),
+        eval_timeout=getattr(args, "agentic_eval_timeout", None),
     )
 
 
@@ -122,6 +122,11 @@ async def generate(args, sample: Sample, sampling_params: dict[str, Any], evalua
         max_context_len=int(getattr(args, "rollout_max_context_len", 0) or 0),
         query_timeout=getattr(args, "agentic_query_timeout", 600),
         max_empty_turns=getattr(args, "agentic_max_empty_turns", 3),
+        # Forced think closure on length-capped no-tool-call turns (A/B knob; see
+        # RecordingModel.query). Off by default: flips via custom_config_path.
+        close_think_on_length=bool(getattr(args, "agentic_close_think_on_length", False)),
+        max_think_closures=int(getattr(args, "agentic_max_think_closures", 2) or 0),
+        think_closure_budget=int(getattr(args, "agentic_think_closure_budget", 4096)),
     )
 
     t0 = time.time()
@@ -168,20 +173,32 @@ def _build_samples(sample, model, result, tokenizer, md, args, *, elapsed: float
         # n_samples_per_prompt, which slime's GRPO reshape requires. Train == eval here.
         if not evaluation:
             logger.warning("[agentic_rl] %s unusable (%s); shipping masked reward-0", key, reason)
-        return _ship_null(sample, tokenizer, md, reason, tail=tail, full_prompt=full_prompt)
+        null = _ship_null(sample, tokenizer, md, reason, tail=tail, full_prompt=full_prompt, elapsed=elapsed)
+        if getattr(model, "n_think_closures", 0):  # closure attempted but the episode still nulled
+            null.metadata["agentic"]["think_closures"] = model.n_think_closures
+        return null
 
     k = len(usable)
     stats = {
         "turns": sum(len(c.versions) for c in usable),
         "format_errors": model.n_format_errors,
-        "gen_time": round(model.gen_time, 1),
+        "think_closures": getattr(model, "n_think_closures", 0),
         "output_tokens": sum(sum(c.loss_mask) for c in usable),
         "response_tokens": sum(len(c.tokens) - c.prompt_len for c in usable),
         "chains": k,
         "gen_timestamp": time.time(),
+        # Per-episode wall time, measured here so it survives even when the env's own
+        # timing is lost (an episode that raised ships extra={"error":...}); the basis
+        # for the tail/straggler metrics in metrics.py.
+        "elapsed_sec": round(elapsed, 1),
         "is_solved": result.is_solved,
         **{key_: val for key_, val in result.extra.items() if key_ != "harbor_step_results"},
     }
+    # LLM-inference seconds are the generation portion of the env's "agent" leg, not a
+    # disjoint phase -- fold them into the timing dict as "generate" so they live
+    # alongside boot/prep/agent/verifier (metrics.py logs agentic/timing/generate, and
+    # the dashboard splits the agent bar into generate + agent/tools off this key).
+    stats["timing"] = {**(stats.get("timing") or {}), "generate": round(model.gen_time, 1)}
     logger.info(
         "[agentic_rl] %s: reward=%.2f solved=%s turns=%d chains=%d elapsed=%.1fs",
         md["instance_id"], result.reward, result.is_solved, stats["turns"], k, elapsed,
@@ -221,6 +238,7 @@ def _ship_null(
     *,
     tail: dict | None = None,
     full_prompt: str | None = None,
+    elapsed: float | None = None,
 ) -> Sample:
     """A valid but fully-masked reward-0 sample for a permanently-failing task:
     ships to leave the buffer, contributes no gradient (remove_sample=True).
@@ -243,6 +261,8 @@ def _ship_null(
     sample.remove_sample = True
     sample.rollout_id = sample.index
     agentic: dict[str, Any] = {"exit_status": reason, "turns": 0, "gen_timestamp": time.time()}
+    if elapsed is not None:
+        agentic["elapsed_sec"] = round(elapsed, 1)
     if tail is not None:
         agentic["truncated_tail"] = tail
     if full_prompt is not None:

@@ -106,10 +106,32 @@ def _test_files(test_patch: str) -> list[str]:
     return _DIFF_FILE_RE.findall(test_patch or "")
 
 
-def _task_toml(instance_id: str, image_name: str) -> str:
-    # Prebuilt image used directly (no Dockerfile build); no ``workdir`` so harbor
-    # detects it (``pwd`` = the image's WORKDIR = the repo dir). ``build_timeout_sec``
-    # here covers the image pull.
+def _repo_workdir(repo: str) -> str:
+    """The repo checkout dir inside the prebuilt swerebench image (= image WORKDIR).
+
+    Nebius's images check the repo out at ``/<repo-basename>`` (the basename of the
+    ``org/repo`` slug), which is also the image's default WORKDIR. ``test.sh`` /
+    ``solve.sh`` use repo-RELATIVE paths, so the verifier MUST run in this dir.
+
+    We emit it EXPLICITLY into task.toml rather than relying on harbor's runtime
+    ``pwd`` detection: harbor builds the sandbox with ``cwd="/"`` when ``workdir`` is
+    unset (``harbor.py``), and every ``exec`` is prefixed with ``cd /`` (``sandbox.py``),
+    so ``_detect_workdir`` would always return "/" and the verifier would run
+    ``test.sh`` from "/" -> repo-relative ``git``/``pytest`` fail -> reward 0 for every
+    rollout. This matches the standalone ``environment/swerebench.py`` grader, which
+    already uses ``"/" + repo.split("/")[1]``.
+    """
+    name = (repo or "").rstrip("/").split("/")[-1]
+    if not name:
+        raise SkipRow(f"cannot derive workdir from repo {repo!r}")
+    return "/" + name
+
+
+def _task_toml(instance_id: str, image_name: str, workdir: str) -> str:
+    # Prebuilt image used directly (no Dockerfile build). ``workdir`` is the repo
+    # checkout dir (= image WORKDIR); harbor runs the agent and the verifier there.
+    # Set it EXPLICITLY -- harbor's ``pwd`` auto-detect resolves to "/" for these
+    # tasks (see ``_repo_workdir``). ``build_timeout_sec`` here covers the image pull.
     return (
         "[task]\n"
         f'name = "{instance_id}"\n\n'
@@ -119,6 +141,7 @@ def _task_toml(instance_id: str, image_name: str) -> str:
         "timeout_sec = 1800\n\n"
         "[environment]\n"
         f'docker_image = "{image_name}"\n'
+        f'workdir = "{workdir}"\n'
         "build_timeout_sec = 1800.0\n"
         "cpus = 2\n"
         "memory_mb = 8192\n"
@@ -326,7 +349,8 @@ def build_task_dir(row: dict[str, Any], dest: Path) -> None:
     (dest / "tests").mkdir(parents=True, exist_ok=True)
     (dest / "solution").mkdir(parents=True, exist_ok=True)
 
-    (dest / "task.toml").write_text(_task_toml(instance_id, image_name), encoding="utf-8")
+    workdir = _repo_workdir(row.get("repo"))
+    (dest / "task.toml").write_text(_task_toml(instance_id, image_name, workdir), encoding="utf-8")
     (dest / "instruction.md").write_text(row.get("problem_statement") or "", encoding="utf-8")
     (dest / "tests" / "config.json").write_text(_config_json(row), encoding="utf-8")
     (dest / "tests" / "grade.py").write_text(_GRADE_PY, encoding="utf-8")

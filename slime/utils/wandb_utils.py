@@ -1,10 +1,20 @@
 import logging
+import math
 import os
+import threading
+import time
+import urllib.request
 from copy import deepcopy
 
 import wandb
 
 logger = logging.getLogger(__name__)
+
+# Background scraper state (module-level: shared mode has no single logger actor
+# to hang it off, so the process that owns the W&B run — the RolloutManager —
+# starts it once).
+_engine_metrics_stop: threading.Event | None = None
+_engine_metrics_thread: threading.Thread | None = None
 
 
 def _is_offline_mode(args) -> bool:
@@ -174,3 +184,100 @@ def _init_wandb_common():
     wandb.define_metric("eval/step")
     wandb.define_metric("eval/*", step_metric="eval/step")
     wandb.define_metric("perf/*", step_metric="rollout/step")
+    # Live SGLang serving gauges scraped off the router, plotted against their
+    # own wall-clock axis (they are sampled on a timer, not per rollout step).
+    wandb.define_metric("sgl_engine/uptime_sec")
+    wandb.define_metric("sgl_engine/*", step_metric="sgl_engine/uptime_sec")
+
+
+def _parse_prometheus_text(text: str) -> dict[str, float]:
+    """Parse Prometheus text exposition into {metric_name: mean across series}."""
+    sums: dict[str, float] = {}
+    counts: dict[str, int] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "{" in line:
+            name = line[: line.index("{")]
+            rest = line[line.index("}") + 1 :].split()
+        else:
+            parts = line.split()
+            name, rest = parts[0], parts[1:]
+        if not rest:
+            continue
+        try:
+            value = float(rest[0])
+        except ValueError:
+            continue
+        if math.isnan(value) or math.isinf(value):
+            continue
+        sums[name] = sums.get(name, 0.0) + value
+        counts[name] = counts.get(name, 0) + 1
+    return {name: sums[name] / counts[name] for name in sums}
+
+
+def start_engine_metrics_scraping(args, router_addr: str | None, interval_sec: float = 30.0) -> None:
+    """Mirror the sglang router's ``/engine_metrics`` gauges into W&B.
+
+    The router aggregates each backend engine's Prometheus metrics (running/queue
+    requests, generation throughput, token/KV usage, cache hit rate, ...); this
+    samples that endpoint on a timer and logs the mean across engines under
+    ``sgl_engine/*``. Runs as a daemon thread in whichever process owns the W&B
+    run (the RolloutManager, a shared-mode secondary writer). Best-effort:
+    transient scrape failures are swallowed so it never disturbs the loop.
+    """
+    global _engine_metrics_stop, _engine_metrics_thread
+    if not args.use_wandb or router_addr is None or _engine_metrics_thread is not None:
+        return
+
+    # Only the customized sgl-router (zhuzilin/sgl-router, whose version string
+    # carries "slime") exposes the aggregated /engine_metrics endpoint.
+    try:
+        import sglang_router
+
+        if "slime" not in sglang_router.__version__:
+            logger.warning(
+                "sglang_router %s does not expose /engine_metrics; skipping sgl_engine/* "
+                "scraping (needs zhuzilin/sgl-router).",
+                sglang_router.__version__,
+            )
+            return
+    except Exception:
+        return
+
+    url = f"{router_addr}/engine_metrics"
+    _engine_metrics_stop = threading.Event()
+    _engine_metrics_thread = threading.Thread(
+        target=_engine_metrics_loop,
+        args=(url, _engine_metrics_stop, interval_sec),
+        daemon=True,
+    )
+    _engine_metrics_thread.start()
+    logger.info(f"Scraping SGLang engine metrics from {url} every {interval_sec:.0f}s -> sgl_engine/*")
+
+
+def _engine_metrics_loop(url: str, stop: threading.Event, interval_sec: float) -> None:
+    start = time.monotonic()
+    while not stop.wait(interval_sec):
+        try:
+            with urllib.request.urlopen(url, timeout=10) as resp:
+                text = resp.read().decode("utf-8", errors="replace")
+        except Exception:
+            continue
+        metrics = _parse_prometheus_text(text)
+        if not metrics or wandb.run is None:
+            continue
+        payload = {f"sgl_engine/{name}": value for name, value in metrics.items()}
+        payload["sgl_engine/uptime_sec"] = time.monotonic() - start
+        try:
+            wandb.log(payload)
+        except Exception:
+            logger.exception("Failed to log SGLang engine metrics to W&B")
+
+
+def stop_engine_metrics_scraping() -> None:
+    global _engine_metrics_stop, _engine_metrics_thread
+    if _engine_metrics_stop is not None:
+        _engine_metrics_stop.set()
+    _engine_metrics_thread = None

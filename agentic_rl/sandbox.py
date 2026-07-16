@@ -25,6 +25,10 @@ from .prompts import SUBMIT_SENTINEL
 
 DEFAULT_APP = "agentic-rl-sandboxes"
 OUTPUT_CAP = 1_000_000  # per-stream char cap; oversized output is head+tail elided
+# A wedged Modal exec stream has no client deadline; bound the whole round-trip at the
+# command's timeout + this grace (lets Modal's server-side timeout fire first in the
+# normal case, so the grace only bites when the stream is genuinely stuck).
+_EXEC_GRACE_SEC = 30
 
 
 @dataclass(frozen=True)
@@ -86,6 +90,12 @@ class Sandbox:
         self.cwd = cwd
         self.exec_timeout = exec_timeout
         self.exec_time = 0.0  # cumulative bash wall-time
+        self.exec_count = 0  # total bash commands dispatched
+        self.exec_timeouts = 0  # commands cut short by the client-side timeout (wedged/over-run)
+        # Monotonic per-command wall-clock deadline, armed by run_agent_leg for the
+        # duration of an agent leg so each exec is capped at the episode's remaining
+        # budget. None outside a leg (boot/prep/verify use their own timeouts).
+        self.deadline: float | None = None
 
     @staticmethod
     def _create_with_retry(kwargs: dict, retries: int):
@@ -110,16 +120,46 @@ class Sandbox:
         check: bool = False,
         env: dict[str, str] | None = None,
     ) -> tuple[int, str, str]:
-        """Run ``command`` in a login shell; return ``(returncode, stdout, stderr)``."""
+        """Run ``command`` in a login shell; return ``(returncode, stdout, stderr)``.
+
+        The whole round-trip is bounded client-side. Modal's ``exec(timeout=)`` only
+        kills the SERVER-side process; the stream reads below have no deadline, so a
+        wedged gRPC stream can block for hours (the straggler that ran ~3h on one bash
+        call). While an agent leg is active ``self.deadline`` further caps the command
+        at the episode's remaining wall-time, so no single command outlasts the budget.
+        A hung / over-budget command returns rc 124 (so the agent sees a timeout
+        observation and the episode keeps moving) unless ``check`` is set, in which case
+        it raises like any other failure.
+        """
         t0 = time.perf_counter()
+        self.exec_count += 1
+        budget = timeout or self.exec_timeout
+        if self.deadline is not None:
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0:
+                self.exec_time += time.perf_counter() - t0
+                if check:
+                    raise TimeoutError(f"agent budget exhausted before: {command[:120]}")
+                return 124, "", "command not run: agent time budget exhausted"
+            budget = min(budget, max(1, int(remaining)))
         prefix = "".join(f"export {shlex.quote(k)}={shlex.quote(v)}; " for k, v in (env or {}).items())
-        # text=False: commands can emit non-UTF-8 (binary diffs) that str-decode would raise on.
-        p = self.sb.exec(
-            "bash", "-lc", f"{prefix}cd {shlex.quote(cwd or self.cwd)} && {command}", timeout=timeout or self.exec_timeout, text=False
-        )
-        out = _cap(p.stdout.read().decode("utf-8", errors="replace"))
-        err = _cap(p.stderr.read().decode("utf-8", errors="replace"))
-        rc = p.wait()
+        full = f"{prefix}cd {shlex.quote(cwd or self.cwd)} && {command}"
+
+        def _run() -> tuple[int, str, str]:
+            # text=False: commands can emit non-UTF-8 (binary diffs) that str-decode would raise on.
+            p = self.sb.exec("bash", "-lc", full, timeout=budget, text=False)
+            out = _cap(p.stdout.read().decode("utf-8", errors="replace"))
+            err = _cap(p.stderr.read().decode("utf-8", errors="replace"))
+            return p.wait(), out, err
+
+        try:
+            rc, out, err = _run_with_timeout(_run, budget + _EXEC_GRACE_SEC, f"exec({command[:80]})")
+        except TimeoutError:
+            self.exec_time += time.perf_counter() - t0
+            self.exec_timeouts += 1
+            if check:
+                raise
+            return 124, "", f"command timed out after {budget}s (sandbox unresponsive)"
         self.exec_time += time.perf_counter() - t0
         if check and rc != 0:
             raise RuntimeError(f"command failed (rc={rc}): {command[:120]}\n{err[-500:]}")
@@ -191,10 +231,11 @@ class Sandbox:
 def _run_with_timeout(fn, timeout_sec: float, what: str):
     """Run a blocking, uninterruptible Modal RPC under a client-side wall-clock deadline.
 
-    Modal's sync filesystem API exposes no timeout and a dead sandbox can wedge the
-    underlying gRPC stream indefinitely; raise ``TimeoutError`` instead so the episode
-    fails fast. The orphaned worker thread is a daemon -- it can't be cancelled, but it
-    dies with the process and only ever leaks for an already-dead sandbox."""
+    Modal's sync filesystem writes and ``exec`` stream reads expose no client timeout,
+    and a dead/unresponsive sandbox can wedge the underlying gRPC stream indefinitely;
+    raise ``TimeoutError`` instead so the caller fails fast. The orphaned worker thread
+    is a daemon -- it can't be cancelled, but it dies with the process and only ever
+    leaks for an already-dead sandbox (torn down on episode exit)."""
     result: dict = {}
     done = threading.Event()
 
@@ -206,7 +247,7 @@ def _run_with_timeout(fn, timeout_sec: float, what: str):
         finally:
             done.set()
 
-    threading.Thread(target=_run, name="modal-fs-write", daemon=True).start()
+    threading.Thread(target=_run, name="modal-rpc", daemon=True).start()
     if not done.wait(timeout_sec):
         raise TimeoutError(f"{what} exceeded {timeout_sec}s; sandbox unresponsive")
     if "error" in result:

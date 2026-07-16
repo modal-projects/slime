@@ -81,6 +81,7 @@ type SampleView = {
   is_solved: boolean | null;
   applied_cleanly: boolean | null;
   abort_reason: string | null;
+  exit_status: string | null;
   finish_reason: string | null;
   agent_exit_code: number | null;
   agent_tail: string | null;
@@ -1086,6 +1087,7 @@ function renderSample(run: string, file: string, view: RolloutView, sampleIdx: n
   if (s.applied_cleanly != null)
     metaCell(grid, "applied cleanly", String(s.applied_cleanly), s.applied_cleanly === false ? "bad" : "");
   if (s.abort_reason) metaCell(grid, "abort reason", s.abort_reason, "warn");
+  if (s.exit_status) metaCell(grid, "exit status", s.exit_status, "warn");
   if (s.agent_exit_code != null && s.agent_exit_code !== 0)
     metaCell(grid, "agent exit", String(s.agent_exit_code), "bad");
   metaCell(grid, "finish reason", s.finish_reason ?? "—", s.finish_reason === "length" ? "warn" : "");
@@ -1214,7 +1216,9 @@ function renderSample(run: string, file: string, view: RolloutView, sampleIdx: n
         "placeholder",
         s.abort_reason
           ? `no trajectory recorded — aborted (${s.abort_reason})`
-          : "no trajectory recorded",
+          : s.exit_status
+            ? `no trajectory recorded — ${s.exit_status} (no usable turn; nothing generated)`
+            : "no trajectory recorded",
       ),
     );
     return;

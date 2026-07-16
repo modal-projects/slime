@@ -53,8 +53,13 @@ export function createApiRoutes(judgeEngine, problemManager, submissionManager) 
                 });
             }
 
+            // Optional caller attribution (RL episode id). Trust note: the value is
+            // caller-chosen, but an agent that omits/spoofs it only orphans its own
+            // submissions — scores are still recorded server-side per sid.
+            const agentId = (req.body && req.body.agent_id) || (req.query && req.query.agent_id) || '';
+
             // 5) Submit
-            const sid = await judgeEngine.submit(pid, lang, code);
+            const sid = await judgeEngine.submit(pid, lang, code, String(agentId));
             return res.json({ sid });
         } catch (error) {
             return res.status(500).json({ error: 'Submit failed', message: error.message });
@@ -84,6 +89,19 @@ export function createApiRoutes(judgeEngine, problemManager, submissionManager) 
         }
     });
 
+
+    // Server-side submission record for one agent (RL episode): every sid the
+    // agent_id submitted, with judged score/passed straight from the judge's own
+    // records. The training reward pipeline reads THIS instead of the sandbox's
+    // agent-writable submissions.jsonl.
+    router.get('/agent/:agentId/submissions', async (req, res) => {
+        try {
+            const submissions = await judgeEngine.agentSubmissions(req.params.agentId);
+            res.json({ agent_id: req.params.agentId, n: submissions.length, submissions });
+        } catch (error) {
+            res.status(500).json({ error: 'Failed to get agent submissions', message: error.message });
+        }
+    });
 
     // Get problem statement
     router.get('/problem/:pid/statement', async (req, res) => {

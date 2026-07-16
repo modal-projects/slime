@@ -41,6 +41,14 @@ def finish_tracking(args):
         logging.getLogger(__name__).exception("Failed to finish wandb run")
 
 
+def start_engine_metrics_scraping(args, router_addr):
+    wandb_utils.start_engine_metrics_scraping(args, router_addr)
+
+
+def stop_engine_metrics_scraping():
+    wandb_utils.stop_engine_metrics_scraping()
+
+
 # TODO further refactor, e.g. put TensorBoard init to the "init" part
 def log(args, metrics, step_key: str):
     if args.use_wandb:

@@ -12,7 +12,18 @@ per-sample reward via ``--custom-rm-path`` — the worker calls slime's stock
 
 Concurrency is sourced from ``args.sglang_server_concurrency`` and scaled by
 the number of sglang engines to match the per-sample semaphore cap in
-:mod:`slime.rollout.sglang_rollout`.
+:mod:`slime.rollout.sglang_rollout`. When ``args.rollout_max_staleness`` is
+set, the in-flight pool (generating + completed-but-unshipped) is instead
+capped at ``rollout_max_staleness * rollout_batch_size`` groups, so by
+Little's law a group is trained at most ~``rollout_max_staleness`` weight
+updates after it started generating.
+
+``args.dynamic_sampling_filter_path`` (DAPO) is honored at collection time:
+completed groups that fail the filter (e.g. zero reward std) are dropped and
+the collector keeps pulling until ``rollout_batch_size`` passing groups are
+gathered. Over-generation is free here — the pool generates continuously —
+but the *logged* ``rollout/raw_reward`` becomes biased by the filter, so the
+unbiased pre-filter mean is emitted as ``dynamic_sampling/raw_reward_all``.
 
 The worker is intentionally oblivious to slime's higher-level pause /
 weight-update signalling (e.g. ``GenerateState.aborted``). Each in-flight
@@ -32,9 +43,12 @@ import queue
 import threading
 import time
 
+from slime.rollout.base_types import RolloutFnTrainOutput
+from slime.rollout.filter_hub.base_types import MetricGatherer, call_dynamic_filter
 from slime.rollout.sglang_rollout import GenerateState, generate_and_rm_group
 from slime.utils.async_utils import run
 from slime.utils.http_utils import get_rollout_num_engines
+from slime.utils.misc import load_function
 from slime.utils.types import Sample
 
 __all__ = [
@@ -50,14 +64,37 @@ _global_worker: AsyncRolloutWorker | None = None
 _worker_lock = threading.Lock()
 
 
+def _pool_size(args) -> int:
+    """In-flight group budget for the async worker.
+
+    The engine-side cap (sglang_server_concurrency x engines) is what the
+    serving stack can sustain; the staleness window (rollout_max_staleness x
+    rollout_batch_size) is what the trainer can consume before samples go
+    stale. Take the min so neither bound is violated.
+    """
+    engine_cap = args.sglang_server_concurrency * get_rollout_num_engines(args)
+    staleness = getattr(args, "rollout_max_staleness", None)
+    if staleness is None:
+        return engine_cap
+    window = staleness * args.rollout_batch_size
+    if window < engine_cap:
+        logger.info(
+            "fully-async: staleness window caps in-flight pool at %d groups "
+            "(rollout_max_staleness=%d x rollout_batch_size=%d; engine cap was %d)",
+            window,
+            staleness,
+            args.rollout_batch_size,
+            engine_cap,
+        )
+    return min(window, engine_cap)
+
+
 def _get_global_worker(args, data_buffer) -> AsyncRolloutWorker:
     global _global_worker
     with _worker_lock:
         if _global_worker is None or not _global_worker.worker_thread.is_alive():
             logger.info("starting fully-async rollout worker")
-            _global_worker = AsyncRolloutWorker(
-                args, data_buffer, concurrency=args.sglang_server_concurrency * get_rollout_num_engines(args)
-            )
+            _global_worker = AsyncRolloutWorker(args, data_buffer, concurrency=_pool_size(args))
             _global_worker.start()
         return _global_worker
 
@@ -132,8 +169,11 @@ class AsyncRolloutWorker:
                             logger.warning("fully-async task crashed: %r", e)
                     active_tasks -= done
 
-                # Top up.
-                while len(active_tasks) < max_concurrent and self.running:
+                # Top up. Completed-but-unshipped groups (output_queue backlog)
+                # count against the budget: they are already generated and only
+                # get staler while they wait, so generating past them would let
+                # staleness grow beyond the window unboundedly.
+                while len(active_tasks) + self.output_queue.qsize() < max_concurrent and self.running:
                     groups = self.data_buffer.get_samples(1)
                     if not groups:
                         break
@@ -191,9 +231,17 @@ class AsyncRolloutWorker:
         return _cb
 
 
-async def _generate_rollout_async(args, rollout_id: int, data_buffer) -> list[list[Sample]]:
+async def _generate_rollout_async(args, rollout_id: int, data_buffer) -> RolloutFnTrainOutput:
     assert args.rollout_global_dataset
     worker = _get_global_worker(args, data_buffer)
+
+    # DAPO dynamic sampling: drop groups failing the filter (e.g. zero reward
+    # std) and keep collecting. Over-generation is free — the pool keeps
+    # producing — the only cost is a longer wait for `target` passing groups.
+    dynamic_filter = (
+        load_function(args.dynamic_sampling_filter_path) if args.dynamic_sampling_filter_path is not None else None
+    )
+    metric_gatherer = MetricGatherer()
 
     target = args.rollout_batch_size
     logger.info(
@@ -204,6 +252,10 @@ async def _generate_rollout_async(args, rollout_id: int, data_buffer) -> list[li
     )
 
     collected: dict[int, list[Sample]] = {}
+    n_completed = 0
+    n_dropped = 0
+    prefilter_reward_sum = 0.0
+    prefilter_reward_n = 0
     started = time.time()
     last_log = started
     LOG_EVERY = 30.0
@@ -212,8 +264,19 @@ async def _generate_rollout_async(args, rollout_id: int, data_buffer) -> list[li
         # Pull whatever's done.
         drained = 0
         for gid, group in worker.get_completed_groups():
-            collected[gid] = group
             drained += 1
+            n_completed += 1
+            for s in group:
+                r = s.get_reward_value(args)
+                if r is not None:
+                    prefilter_reward_sum += float(r)
+                    prefilter_reward_n += 1
+            filter_output = call_dynamic_filter(dynamic_filter, args, group)
+            if not filter_output.keep:
+                metric_gatherer.on_dynamic_filter_drop(reason=filter_output.reason)
+                n_dropped += 1
+                continue
+            collected[gid] = group
 
         if not drained:
             await asyncio.sleep(0.05)
@@ -221,10 +284,11 @@ async def _generate_rollout_async(args, rollout_id: int, data_buffer) -> list[li
         now = time.time()
         if now - last_log > LOG_EVERY:
             logger.info(
-                "fully-async rollout %d: collected %d/%d, queue=%d, elapsed=%.1fs",
+                "fully-async rollout %d: collected %d/%d (dropped %d), queue=%d, elapsed=%.1fs",
                 rollout_id,
                 len(collected),
                 target,
+                n_dropped,
                 worker.queue_size(),
                 now - started,
             )
@@ -239,13 +303,23 @@ async def _generate_rollout_async(args, rollout_id: int, data_buffer) -> list[li
         return 0
 
     out = sorted(collected.values(), key=_key)[:target]
+    metrics = metric_gatherer.collect()
+    if dynamic_filter is not None:
+        metrics["dynamic_sampling/completed_groups"] = n_completed
+        metrics["dynamic_sampling/dropped_groups"] = n_dropped
+        if prefilter_reward_n > 0:
+            # Unbiased mean reward over ALL completed groups this step; the
+            # post-filter rollout/raw_reward is biased toward mixed outcomes.
+            metrics["dynamic_sampling/raw_reward_all"] = prefilter_reward_sum / prefilter_reward_n
     logger.info(
-        "fully-async rollout %d: done in %.1fs, queue_left=%d",
+        "fully-async rollout %d: done in %.1fs (dropped %d/%d), queue_left=%d",
         rollout_id,
         time.time() - started,
+        n_dropped,
+        n_completed,
         worker.queue_size(),
     )
-    return out
+    return RolloutFnTrainOutput(samples=out, metrics=metrics)
 
 
 def generate_rollout_fully_async(args, rollout_id, data_buffer, evaluation: bool = False):

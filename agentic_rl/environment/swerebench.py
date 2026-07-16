@@ -53,6 +53,7 @@ class SweRebenchEnv(RolloutEnv):
     def rollout(self, md: dict[str, Any], *, model, limits: EpisodeLimits) -> RewardResult:
         workdir = md["workdir"]
         patch, exit_status, boot_time, grade_time = "", "none", 0.0, 0.0
+        exec_count, exec_timeouts = 0, 0
         sb = None
         t0 = time.perf_counter()
         try:
@@ -75,6 +76,7 @@ class SweRebenchEnv(RolloutEnv):
             logger.exception("[swerebench] episode failed (instance=%s)", md["instance_id"])
         finally:
             if sb is not None:
+                exec_count, exec_timeouts = sb.exec_count, sb.exec_timeouts
                 sb.terminate()
 
         reward, is_solved = 0.0, False
@@ -92,6 +94,8 @@ class SweRebenchEnv(RolloutEnv):
             is_solved=is_solved,
             extra={
                 "exit_status": exit_status,
+                "exec_count": exec_count,
+                "exec_timeouts": exec_timeouts,
                 "timing": {"boot": round(boot_time, 1), "grade": round(grade_time, 1), "episode": round(time.perf_counter() - t0, 1)},
             },
         )

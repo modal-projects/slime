@@ -37,6 +37,11 @@ _RENDER_KEYS = ("role", "content", "tool_calls", "tool_call_id", "reasoning_cont
 # 24k-token think doesn't bloat the dump; keep head + tail with an elision marker.
 _MAX_TAIL_CHARS = 60000
 
+# Injected to force-close a dangling <think> on a length-capped turn (s1-style
+# budget forcing). Injected ids are loss_mask=0: the policy is never trained to
+# emit them, only to continue from the closed-think state.
+_THINK_CLOSE_TEXT = "\n</think>\n\n"
+
 
 @dataclass
 class Chain:
@@ -87,6 +92,9 @@ class RecordingModel:
         max_context_len: int = 0,
         query_timeout: int = 600,
         max_empty_turns: int = 3,
+        close_think_on_length: bool = False,
+        max_think_closures: int = 2,
+        think_closure_budget: int = 4096,
     ):
         self.tokenizer = tokenizer
         self.sampling_params = dict(sampling_params)
@@ -99,6 +107,12 @@ class RecordingModel:
         self.max_context_len = int(max_context_len or 0)
         self.query_timeout = query_timeout
         self.max_empty_turns = max_empty_turns
+        # Forced think closure (agentic_close_think_on_length): on finish=length with
+        # no tool call, keep the generation, close the dangling <think>, and continue
+        # the SAME turn (budgeted) instead of rolling the turn back into a null.
+        self.close_think_on_length = bool(close_think_on_length)
+        self.max_think_closures = int(max_think_closures)
+        self.think_closure_budget = int(think_closure_budget)
         # Consistent-hash routing → every turn hits the same worker (prefix cache).
         self.headers = {"Content-Type": "application/json", "X-SMG-Routing-Key": session_id}
 
@@ -112,6 +126,7 @@ class RecordingModel:
         self.cached_tokens = 0
         self.input_tokens = 0
         self.n_format_errors = 0
+        self.n_think_closures = 0
         self._empty_streak = 0
 
     @property
@@ -136,34 +151,62 @@ class RecordingModel:
         c.seen_msgs = len(messages)
         c.msg_hashes = hashes
 
-        out_ids, logps, finish, version = self._generate(c.tokens)
-        self._append_generated(out_ids, logps, version)
-        if finish == "abort":
-            self.aborted = True
-            self.exit_status = "Aborted"
-            raise LimitsExceeded(self._exit_message("Aborted", "generation aborted by weight update"))
+        turn_start = len(c.tokens)
+        turn_versions = 0
+        closures_left = self.max_think_closures if self.close_think_on_length else 0
+        # Qwen3-style templates END the generation prompt with a pre-seeded '<think>\n',
+        # so the model's own text never contains the opener — detect it from the
+        # rendered prompt tail or closure injection can never fire (observed: run
+        # 20260710-080841, 0 injections across 31 closure attempts).
+        seeded_think = self._tail_seeds_think(c.tokens[max(0, turn_start - 8) : turn_start])
+        while True:
+            out_ids, logps, finish, version = self._generate(
+                c.tokens, max_new_tokens=self.think_closure_budget if turn_versions else None
+            )
+            self._append_generated(out_ids, logps, version)
+            turn_versions += 1
+            if finish == "abort":
+                self.aborted = True
+                self.exit_status = "Aborted"
+                raise LimitsExceeded(self._exit_message("Aborted", "generation aborted by weight update"))
 
-        raw = self.tokenizer.decode(out_ids, skip_special_tokens=False) if out_ids else ""
-        parsed = parse_model_output(
-            raw,
-            tools_schema=self.tools,
-            tool_parser_name=self.tool_parser,
-            reasoning_parser_name=self.reasoning_parser,
-        )
-        try:
-            actions, tool_calls = self._actions_from_tool_uses(parsed.tool_uses)
-        except FormatError:
-            # Record the about-to-be-discarded generation (esp. a length-truncated
-            # runaway think) so the dashboard can show it; then drop it from training.
-            c.truncated_tail = {"text": self._clip_tail(raw), "tokens": len(out_ids), "finish": finish}
-            self._rollback_generated(len(out_ids))
-            self.n_format_errors += 1
-            self._empty_streak += 1
-            if finish == "length" or self._empty_streak >= self.max_empty_turns:
-                status = "ContextLengthExceeded" if finish == "length" else "NoProgress"
-                self.exit_status = status
-                raise LimitsExceeded(self._exit_message(status, f"no tool call (finish={finish})"))
-            raise
+            # Parse the WHOLE turn so far (all generated segments + any injected
+            # closure ids), not just the last segment: a tool call may span the
+            # forced-closure boundary.
+            raw = self.tokenizer.decode(c.tokens[turn_start:], skip_special_tokens=False) if len(c.tokens) > turn_start else ""
+            parsed = parse_model_output(
+                raw,
+                tools_schema=self.tools,
+                tool_parser_name=self.tool_parser,
+                reasoning_parser_name=self.reasoning_parser,
+            )
+            try:
+                actions, tool_calls = self._actions_from_tool_uses(parsed.tool_uses)
+                break
+            except FormatError:
+                if finish == "length" and closures_left > 0 and out_ids:
+                    # Forced think closure (s1-style budget forcing): keep the truncated
+                    # generation — the model's own on-policy tokens — close the dangling
+                    # <think> with injected loss_mask=0 ids, and continue the same turn
+                    # under a small budget so the model can act on what it worked out,
+                    # instead of the turn being rolled back into a reward-0 null.
+                    closures_left -= 1
+                    self.n_think_closures += 1
+                    if self._has_unclosed_think(raw, seeded=seeded_think):
+                        self._extend(self._encode_text(_THINK_CLOSE_TEXT), 0)
+                    continue
+                # Record the about-to-be-discarded generation (esp. a length-truncated
+                # runaway think) so the dashboard can show it; then drop the whole turn
+                # (every segment + injected closure ids) from training.
+                c.truncated_tail = {"text": self._clip_tail(raw), "tokens": len(c.tokens) - turn_start, "finish": finish}
+                self._rollback_turn(turn_start, turn_versions)
+                self.n_format_errors += 1
+                self._empty_streak += 1
+                if finish == "length" or self._empty_streak >= self.max_empty_turns:
+                    status = "ContextLengthExceeded" if finish == "length" else "NoProgress"
+                    self.exit_status = status
+                    raise LimitsExceeded(self._exit_message(status, f"no tool call (finish={finish})"))
+                raise
 
         self._empty_streak = 0
         message: dict = {"role": "assistant", "content": parsed.text or None, "extra": {"actions": actions, "cost": 0.0}}
@@ -268,11 +311,29 @@ class RecordingModel:
         c.logprobs += logps
         c.versions.append(version)
 
-    def _rollback_generated(self, n: int) -> None:
+    def _rollback_turn(self, start: int, n_versions: int) -> None:
+        """Drop everything the current turn appended: every generated segment plus
+        any injected think-closure ids (which carry no version entry)."""
         c = self.cur
-        if n:
-            del c.tokens[-n:], c.loss_mask[-n:], c.logprobs[-n:]
-        c.versions.pop()
+        del c.tokens[start:], c.loss_mask[start:], c.logprobs[start:]
+        if n_versions:
+            del c.versions[-n_versions:]
+
+    def _encode_text(self, text: str) -> list[int]:
+        try:
+            return list(self.tokenizer.encode(text, add_special_tokens=False))
+        except TypeError:  # tokenizers without the kwarg (test fakes)
+            return list(self.tokenizer.encode(text))
+
+    def _tail_seeds_think(self, ids: list[int]) -> bool:
+        """True when the rendered generation prompt ends inside a think block (the
+        template pre-seeded the opener), so the turn is mid-think from token 0."""
+        text = self.tokenizer.decode(ids, skip_special_tokens=False) if ids else ""
+        return text.rfind("<think>") > text.rfind("</think>")
+
+    @staticmethod
+    def _has_unclosed_think(text: str, *, seeded: bool = False) -> bool:
+        return text.count("<think>") + (1 if seeded else 0) > text.count("</think>")
 
     @staticmethod
     def _clip_tail(text: str) -> str:
@@ -281,8 +342,10 @@ class RecordingModel:
             return text
         return f"{text[: _MAX_TAIL_CHARS - 10000]}\n\n…[{len(text) - _MAX_TAIL_CHARS} chars elided]…\n\n{text[-10000:]}"
 
-    def _generate(self, input_ids: list[int]) -> tuple[list[int], list[float], str, str | None]:
+    def _generate(self, input_ids: list[int], *, max_new_tokens: int | None = None) -> tuple[list[int], list[float], str, str | None]:
         sp = dict(self.sampling_params)
+        if max_new_tokens is not None:
+            sp["max_new_tokens"] = int(max_new_tokens)
         if self.max_context_len > 0:
             remaining = self.max_context_len - len(input_ids)
             if remaining <= 0:

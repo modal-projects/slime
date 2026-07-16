@@ -1,0 +1,12 @@
+{
+  "n": 39,
+  "first_p50": 10.2,
+  "first_p90": 68.0,
+  "first_max": 72.3,
+  "warm_p50": 1.9,
+  "warm_p90": 6.4,
+  "penalty_p50": 7.4,
+  "penalty_p90": 41.8,
+  "penalty_max": 70.0,
+  "note": "first submit per pid vs min of subsequent (cached checker/interactor); judge_engine.js getOrCompileChecker caches per pid"
+}

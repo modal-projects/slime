@@ -29,6 +29,10 @@ Env knobs
                                        option.)
     FRONTIER_CS_JUDGE_LIFETIME_SEC     sandbox max lifetime (default 86400)
     FRONTIER_CS_JUDGE_BOOT_TIMEOUT_SEC wait for /health (default 900; covers first image build)
+    FRONTIER_CS_JUDGE_IDLE_EXIT_MIN    judge self-terminates after this many minutes without
+                                       requests (default 25) — reaps orphans when the owning
+                                       run dies without terminating its sandbox; a false
+                                       positive is harmless (health recheck reboots one)
 """
 
 from __future__ import annotations
@@ -53,6 +57,12 @@ _SERVER_DIR = Path(__file__).parent / "server"
 # call; guarded by a lock so concurrent first-rollouts don't double-boot.
 _JUDGE_SANDBOX = None
 _LOCK = threading.Lock()
+# Liveness bookkeeping for OUR sandbox (not a user-provided URL): re-probe
+# /health at most every _HEALTH_RECHECK_SEC and reboot the sandbox if it died
+# mid-run — otherwise every remaining episode of the run grades against a
+# dead URL and ships reward 0.
+_HEALTH_RECHECK_SEC = 60
+_LAST_HEALTH_OK = 0.0
 
 
 def _int_env(name: str, default: int) -> int:
@@ -65,18 +75,50 @@ def ensure_started() -> str:
 
     Idempotent and thread-safe. Raises if the boot fails (e.g. vm_runtime not
     allowlisted) so the caller aborts loudly rather than rolling out blind.
+    If WE booted the sandbox, this also periodically re-checks its /health and
+    reboots a replacement when it has died (crash/OOM/lifetime).
     """
+    global _JUDGE_SANDBOX, _LAST_HEALTH_OK
     url = os.environ.get(URL_ENV, "").strip()
-    if url:
-        return url
-    global _JUDGE_SANDBOX
+    if url and _JUDGE_SANDBOX is None:
+        return url  # pre-deployed judge: not ours to manage
     with _LOCK:
         url = os.environ.get(URL_ENV, "").strip()  # re-check under lock
-        if url:
+        if url and _JUDGE_SANDBOX is None:
             return url
-        if _JUDGE_SANDBOX is None:
-            _JUDGE_SANDBOX = _boot_judge_sandbox()
+        if _JUDGE_SANDBOX is not None and url:
+            if time.monotonic() - _LAST_HEALTH_OK < _HEALTH_RECHECK_SEC:
+                return url
+            if _probe_health(url):
+                _LAST_HEALTH_OK = time.monotonic()
+                return url
+            logger.warning("[verifier_server] judge at %s is dead; rebooting sandbox", url)
+            try:
+                _JUDGE_SANDBOX.terminate()
+            except Exception:  # noqa: BLE001 — old sandbox may already be gone
+                pass
+            _JUDGE_SANDBOX = None
+            os.environ.pop(URL_ENV, None)
+        _JUDGE_SANDBOX = _boot_judge_sandbox()
+        _LAST_HEALTH_OK = time.monotonic()
         return os.environ[URL_ENV]
+
+
+def _probe_health(base_url: str, *, attempts: int = 4, delay_sec: float = 5.0) -> bool:
+    """True if /health answers ok within a few attempts. Multiple attempts so a
+    node restart inside the sandbox (entrypoint restart loop, ~1-2s) isn't
+    mistaken for a dead sandbox and doesn't trigger a full reboot."""
+    health = base_url.rstrip("/") + "/health"
+    for i in range(attempts):
+        try:
+            with urllib.request.urlopen(health, timeout=10) as resp:
+                if resp.status == 200 and json.loads(resp.read() or b"{}").get("ok"):
+                    return True
+        except (urllib.error.URLError, ValueError, TimeoutError, ConnectionError, OSError):
+            pass
+        if i < attempts - 1:
+            time.sleep(delay_sec)
+    return False
 
 
 def _boot_judge_sandbox():
@@ -90,7 +132,10 @@ def _boot_judge_sandbox():
     # Mount slime-data and point the go-judge's problemsRoot into it (download_data
     # pulls frontier_cs/problems/** here), so no separate problems Volume is needed.
     image = modal.Image.from_dockerfile(str(_SERVER_DIR / "Dockerfile"), context_dir=str(_SERVER_DIR)).env(
-        {"PROBLEMS_ROOT": problems_root}
+        {
+            "PROBLEMS_ROOT": problems_root,
+            "JUDGE_IDLE_EXIT_MIN": os.environ.get("FRONTIER_CS_JUDGE_IDLE_EXIT_MIN", "25"),
+        }
     )
     data_vol = modal.Volume.from_name(volume_name)  # must exist + hold frontier_cs/problems/ (download_data)
     app_kwargs = {"create_if_missing": True}

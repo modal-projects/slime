@@ -124,6 +124,48 @@ def get_sum_of_sample_mean(
     return sum_of_sample_mean if not calculate_per_token_loss else sum_of_token
 
 
+def get_masked_token_max(
+    total_lengths: list[int],
+    response_lengths: list[int],
+    loss_masks: list[torch.Tensor],
+) -> Callable[[torch.Tensor], torch.Tensor]:
+    """Reducer for the max of ``x`` over loss-masked response tokens on this rank.
+
+    Mirrors the CP token layout of :func:`get_sum_of_sample_mean` so the input
+    ``x`` (per-rank, per-token, concatenated over samples) is masked and split
+    identically. The returned value is the local max for this rank only; callers
+    all-reduce it with ``ReduceOp.MAX`` over the DP*CP group for a global max.
+
+    Assumes non-negative ``x`` (e.g. ``|logprob diff|``): a rank with no masked
+    tokens contributes ``0`` so it never wins the max.
+    """
+    cp_size = mpu.get_context_parallel_world_size()
+    if cp_size == 1:
+        split_lengths = response_lengths
+        masks = loss_masks
+    else:
+        split_lengths = []
+        masks = []
+        for total_length, response_length, loss_mask in zip(total_lengths, response_lengths, loss_masks, strict=False):
+            prompt_length = total_length - response_length
+            _, _, _, tokens_offset = get_logits_and_tokens_offset_with_cp(total_length, response_length)
+            loss_mask_0 = loss_mask[tokens_offset[0][0] - prompt_length : tokens_offset[0][1] - prompt_length]
+            loss_mask_1 = loss_mask[tokens_offset[1][0] - prompt_length : tokens_offset[1][1] - prompt_length]
+            chunked_loss_mask = torch.cat([loss_mask_0, loss_mask_1], dim=0)
+            masks.append(chunked_loss_mask)
+            split_lengths.append(chunked_loss_mask.size(0))
+
+    def masked_token_max(x: torch.Tensor) -> torch.Tensor:
+        running = torch.zeros((), device=x.device, dtype=x.dtype)
+        for x_i, mask_i in zip(x.split(split_lengths, dim=0), masks, strict=False):
+            m = mask_i.to(torch.bool)
+            if m.any():
+                running = torch.maximum(running, x_i[m].max())
+        return running
+
+    return masked_token_max
+
+
 def reduce_train_step_metrics(
     losses_reduced: list[dict],
     *,
@@ -165,7 +207,23 @@ def reduce_train_step_metrics(
     else:
         num_samples_or_tokens = step_global_batch_size
         cp_factor = 1
-    return {key: value * cp_factor / num_samples_or_tokens for key, value in zip(keys, values[1:], strict=False)}
+    reduced = {key: value * cp_factor / num_samples_or_tokens for key, value in zip(keys, values[1:], strict=False)}
+
+    # Metrics produced under "max_keys"/"max_values" are aggregated with
+    # ReduceOp.MAX across microbatches and the DP*CP group (no denominator),
+    # instead of the sum/mean path above. ``max_keys`` is identical on every
+    # rank (same loss path/args), so the guard is collective-safe.
+    max_keys = losses_reduced[0].get("max_keys") or []
+    if max_keys:
+        max_values = None
+        for x in losses_reduced:
+            mv = x["max_values"]
+            max_values = mv if max_values is None else torch.maximum(max_values, mv)
+        dist.all_reduce(max_values, group=dp_with_cp_group, op=dist.ReduceOp.MAX)
+        for key, value in zip(max_keys, max_values.tolist(), strict=False):
+            reduced[key] = value
+
+    return reduced
 
 
 def rollout_log_metric_contribution(

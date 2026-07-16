@@ -1,0 +1,47 @@
+[
+  {
+    "level": 50,
+    "n": 50,
+    "n_done": 44,
+    "n_error": 6,
+    "error_rate": 0.12,
+    "drain_sec": 68.72,
+    "throughput_per_s": 0.64,
+    "lat_p50": 51.712,
+    "lat_p90": 62.972,
+    "lat_p99": 66.424,
+    "lat_min": 6.05,
+    "lat_max": 68.72,
+    "lat_mean": 50.99
+  },
+  {
+    "level": 50,
+    "n": 50,
+    "n_done": 50,
+    "n_error": 0,
+    "error_rate": 0.0,
+    "drain_sec": 25.88,
+    "throughput_per_s": 1.93,
+    "lat_p50": 9.635,
+    "lat_p90": 12.569,
+    "lat_p99": 22.804,
+    "lat_min": 1.51,
+    "lat_max": 25.88,
+    "lat_mean": 9.0
+  },
+  {
+    "level": 50,
+    "n": 50,
+    "n_done": 50,
+    "n_error": 0,
+    "error_rate": 0.0,
+    "drain_sec": 301.61,
+    "throughput_per_s": 0.17,
+    "lat_p50": 13.547,
+    "lat_p90": 16.711,
+    "lat_p99": 295.95,
+    "lat_min": 1.75,
+    "lat_max": 301.6,
+    "lat_mean": 23.87
+  }
+]

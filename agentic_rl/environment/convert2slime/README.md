@@ -66,11 +66,16 @@ pytest grader** → F2P/P2P resolution) and hands off to `harbor.convert`.
 
 > **Image conventions (verified by oracle check, NOT swebench's).** Nebius's
 > published images check the repo out at `/<repo-basename>` (e.g.
-> `/scikit-build-core`) — also the image's default `WORKDIR`, so we leave
-> `workdir` unset and harbor detects it via `pwd`; scripts never hardcode a cd.
-> They are plain **system-python** images (repo pip-installed system-wide, pytest
-> on PATH) — NOT `/testbed` + conda. (An earlier `/testbed` Dockerfile-wrapper
-> broke `git apply`; using `image_name` directly is also build-free.)
+> `/scikit-build-core`) — also the image's default `WORKDIR`. We emit this as
+> `[environment].workdir` in each `task.toml` (`_repo_workdir`); scripts use
+> repo-relative paths and never hardcode a cd. **Do NOT rely on harbor's `pwd`
+> auto-detect here:** harbor builds the sandbox with `cwd="/"` when `workdir` is
+> unset and prefixes every `exec` with `cd /`, so detection resolves to `/`, the
+> verifier runs `test.sh` from `/`, repo-relative `git`/`pytest` fail, and EVERY
+> rollout grades 0 (the bug behind run `ekuxbh3k`'s flat eval). They are plain
+> **system-python** images (repo pip-installed system-wide, pytest on PATH) — NOT
+> `/testbed` + conda. (An earlier `/testbed` Dockerfile-wrapper broke `git apply`;
+> using `image_name` directly is also build-free.)
 
 > **Scope: Python only.** The public `SWE-rebench/SWE-bench-fork` registers only
 > the Python `parse_log_pytest*` parsers by name; the multilingual registry

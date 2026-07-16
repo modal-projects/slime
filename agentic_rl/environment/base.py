@@ -20,6 +20,7 @@ import importlib
 import io
 import shlex
 import tarfile
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -40,7 +41,11 @@ class EpisodeLimits:
     episode_timeout: int = 1800
     exec_timeout: int = 120
     grade_timeout: int = 1800
-    eval_timeout: int = 600
+    # Verifier (test.sh / grade) wall-time. None = not set by config -> fall back to
+    # the per-task verifier ``timeout_sec``; an explicit value OVERRIDES it (the
+    # swe_rebench converter bakes a generous 1800s that lets a hung test suite gate
+    # the whole sync step). Sourced from ``agentic_eval_timeout``.
+    eval_timeout: int | None = None
 
 
 @dataclass(frozen=True)
@@ -75,7 +80,13 @@ class RolloutEnv(ABC):
     @staticmethod
     def run_agent_leg(model, sandbox, task: str, *, max_steps: int, wall_time_sec: int) -> dict:
         """Run one stock mini-swe ``DefaultAgent`` leg in-process against the
-        sandbox; ``model`` records tokens. Returns the agent's exit info."""
+        sandbox; ``model`` records tokens. Returns the agent's exit info.
+
+        Arm the sandbox's per-command deadline for the leg so every bash call is capped
+        at the remaining wall-time -- mini-swe's ``wall_time_limit_seconds`` is only
+        checked between steps and can't interrupt a command already blocked inside
+        ``Sandbox.exec``. Cleared afterwards so grading runs on its own budget.
+        """
         from minisweagent.agents.default import DefaultAgent
 
         agent = DefaultAgent(
@@ -87,7 +98,11 @@ class RolloutEnv(ABC):
             cost_limit=0.0,
             wall_time_limit_seconds=wall_time_sec,
         )
-        return agent.run(task=task) or {}
+        sandbox.deadline = time.monotonic() + wall_time_sec
+        try:
+            return agent.run(task=task) or {}
+        finally:
+            sandbox.deadline = None
 
     @staticmethod
     def write_problem_file(sb, workdir: str, text: str | None) -> None:

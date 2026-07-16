@@ -105,6 +105,7 @@ class HarborEnv(RolloutEnv):
             "cpus": m.get("cpus"),
             "memory_mb": m.get("memory_mb"),
             "reward_shape": m.get("reward_shape"),
+            "outcome_reward": m.get("outcome_reward"),
         }
 
     @staticmethod
@@ -157,6 +158,7 @@ class HarborEnv(RolloutEnv):
 
         t0 = time.monotonic()
         artifacts: dict[str, Any] = {}
+        sandbox_exec: dict[str, int] = {}
         with self._sandbox(md, lifetime=agent_budget_sec + limits.grade_timeout + 300, exec_timeout=limits.exec_timeout) as sb:
             timer.record("boot", sb.boot_time)
             workdir = md["workdir"] or self._detect_workdir(sb)
@@ -199,21 +201,32 @@ class HarborEnv(RolloutEnv):
             # Pull post-episode artifacts off the still-live sandbox (the env tears
             # it down on __exit__); must never fail the episode.
             try:
-                artifacts = self._collect_artifacts(sb, workdir)
+                artifacts = self._collect_artifacts(sb, workdir, md)
             except Exception:  # noqa: BLE001
                 logger.exception("[harbor] %s: artifact collection failed", md["instance_id"])
+            # Command counts (incl. wedged commands the client-side timeout cut short)
+            # for the exec-timeout health metrics.
+            sandbox_exec = {"exec_count": sb.exec_count, "exec_timeouts": sb.exec_timeouts}
 
         reward = self._aggregate(steps, step_results, md["reward_strategy"])
         is_solved = bool(step_results) and len(step_results) == len(steps) and all(r.get("is_solved") for r in step_results)
+        # Episode-level outcome shaping (rewards.py): fold the mid-episode judge
+        # submissions (frontier_cs artifacts) into the training scalar per the
+        # ASYNC_RL_OUTCOME_REWARD / ASYNC_RL_SOLVED_BONUS switches. Defaults are
+        # the identity (reward == the aggregate above); no submissions -> ditto.
+        outcome = rewards_mod.episode_outcome_from_artifacts(reward, is_solved, artifacts)
+        reward, outcome_info = rewards_mod.shape_outcome(outcome, rewards_mod.resolve_outcome(md))
         timer.record("episode", time.monotonic() - t0)
         return RewardResult(
             reward=reward,
             is_solved=is_solved,
             extra={
+                "outcome": outcome_info,
                 "harbor_step_results": step_results,
                 "harbor_steps_completed": len(step_results),
                 "harbor_steps_total": len(steps),
                 "timing": timer.as_dict(),
+                **sandbox_exec,
                 **artifacts,
             },
         )
@@ -238,14 +251,19 @@ class HarborEnv(RolloutEnv):
         """Hook run in the workdir before each agent leg. Default no-op;
         FrontierCsEnv overrides it to stage statement.txt / submit.sh into /app."""
 
-    def _collect_artifacts(self, sb, workdir: str) -> dict[str, Any]:
+    def _collect_artifacts(self, sb, workdir: str, md: dict[str, Any]) -> dict[str, Any]:
         """Hook run on the still-live sandbox after the agent leg(s); its return is
         merged into ``RewardResult.extra`` (→ ``sample.metadata``). Default none;
-        FrontierCsEnv overrides it to pull back the agent's iterative-submit log."""
+        FrontierCsEnv overrides it to pull the episode's judge-server submission
+        record (``md`` carries its per-episode attribution id)."""
         return {}
 
-    def _verify(self, sb, *, tests_dir: Path, workdir: str, verifier: dict[str, Any], eval_timeout_sec: int, instance_id: str) -> dict[str, Any] | None:
-        timeout = int(verifier.get("timeout_sec") or eval_timeout_sec)
+    def _verify(self, sb, *, tests_dir: Path, workdir: str, verifier: dict[str, Any], eval_timeout_sec: int | None, instance_id: str) -> dict[str, Any] | None:
+        # A config-level agentic_eval_timeout (eval_timeout_sec) OVERRIDES the per-task
+        # verifier timeout when set; otherwise fall back to the task's baked timeout_sec
+        # (the converter bakes 1800s, which lets a hung test suite burn the full budget
+        # and gate the whole sync step). Final fallback 600s if neither is present.
+        timeout = int(eval_timeout_sec or verifier.get("timeout_sec") or 600)
         self.upload_dir(sb, tests_dir, "/tests")
         sb.exec("chmod +x /tests/test.sh && rm -f /logs/verifier/reward.json /logs/verifier/reward.txt", check=False, timeout=60)
         env = _resolve_env_templates(verifier.get("env"))

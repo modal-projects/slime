@@ -19,6 +19,14 @@ export class JudgeEngine {
         // In-memory queue and results
         this.queue = [];
         this.results = new Map();
+        // agent_id -> [{sid, pid, ts}] : which sids each agent (RL episode)
+        // submitted. Server-side ground truth for per-episode reward collection;
+        // results themselves are read back via peekResult (memory or result.json).
+        // The entrypoint restarts node on a crash, so rebuild the index from the
+        // per-sid meta.json on disk — otherwise every in-flight episode's fetch
+        // would come back empty after a restart.
+        this.agentIndex = new Map();
+        this.rebuildAgentIndex().catch(err => console.error('[judge] agent index rebuild failed:', err));
 
         // Cache for compiled checkers/interactors (pid -> { checkerId, interactorId })
         // Avoids recompiling the same checker for every submission
@@ -109,12 +117,17 @@ export class JudgeEngine {
     }
 
     // Submit a task
-    async submit(pid, lang, code) {
+    async submit(pid, lang, code, agentId) {
         const sid = await this.submissionManager.nextSubmissionId();
         this.results.set(sid, { status: 'queued' });
         const { bucketDir, subDir } = this.submissionManager.submissionPaths(sid);
         await fs.mkdir(bucketDir, { recursive: true });
         await fs.mkdir(subDir, { recursive: true });
+
+        if (agentId) {
+            if (!this.agentIndex.has(agentId)) this.agentIndex.set(agentId, []);
+            this.agentIndex.get(agentId).push({ sid, pid, ts: Date.now() });
+        }
 
         if(this.queue.length >= 1024 * 512){
             this.queue.push({ sid, pid, lang });
@@ -128,14 +141,14 @@ export class JudgeEngine {
 
         await fs.writeFile(
             path.join(subDir, 'meta.json'), 
-            JSON.stringify({ sid, pid, lang, ts: Date.now() }, null, 2)
+            JSON.stringify({ sid, pid, lang, agent_id: agentId || null, ts: Date.now() }, null, 2)
         );
 
         return sid;
     }
 
     // Get the result
-    getResult(sid) {
+    async getResult(sid) {
         const r = this.results.get(sid);
         if (r) {
             // Only delete the result from the cache if it's a final state
@@ -144,19 +157,76 @@ export class JudgeEngine {
             }
             return r;
         }
+        return this._readResultFile(sid);
+    }
 
+    // Non-destructive result lookup: memory first (no eviction), then the
+    // per-sid result.json every final state writes. Used by the per-agent
+    // reward collection so it never races the submitter's own polling.
+    async peekResult(sid) {
+        return this.results.get(sid) || await this._readResultFile(sid);
+    }
+
+    async _readResultFile(sid) {
         try {
             const { subDir } = this.submissionManager.submissionPaths(sid);
-            const txt = fs.readFileSync(path.join(subDir, 'result.json'), 'utf8');
+            const txt = await fs.readFile(path.join(subDir, 'result.json'), 'utf8');
             return JSON.parse(txt);
         } catch {
             return null;
         }
     }
 
+    // Repopulate agentIndex from the per-sid meta.json files (written at submit
+    // time). Runs once at boot; races with new submits are safe because both
+    // paths only append and entries are deduped by sid.
+    async rebuildAgentIndex() {
+        const root = this.submissionManager.submissionsRoot;
+        const buckets = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
+        for (const bucket of buckets) {
+            if (!bucket.isDirectory()) continue;
+            const bucketDir = path.join(root, bucket.name);
+            const sids = await fs.readdir(bucketDir, { withFileTypes: true }).catch(() => []);
+            for (const sidDir of sids) {
+                if (!sidDir.isDirectory()) continue;
+                try {
+                    const meta = JSON.parse(await fs.readFile(path.join(bucketDir, sidDir.name, 'meta.json'), 'utf8'));
+                    if (!meta.agent_id) continue;
+                    if (!this.agentIndex.has(meta.agent_id)) this.agentIndex.set(meta.agent_id, []);
+                    const entries = this.agentIndex.get(meta.agent_id);
+                    if (!entries.some(e => e.sid === meta.sid)) {
+                        entries.push({ sid: meta.sid, pid: meta.pid, ts: meta.ts });
+                    }
+                } catch { /* pre-agent_id or torn meta.json: skip */ }
+            }
+        }
+    }
+
+    // All submissions attributed to an agent (episode), with their judged
+    // scores. The reward pipeline treats this as the ground truth, never the
+    // agent-writable submissions.jsonl inside the sandbox.
+    async agentSubmissions(agentId) {
+        const entries = this.agentIndex.get(agentId) || [];
+        const out = [];
+        for (const { sid, pid, ts } of entries) {
+            const r = await this.peekResult(sid);
+            out.push({
+                sid,
+                pid,
+                ts,
+                status: r ? r.status : 'unknown',
+                score: r && typeof r.score === 'number' ? r.score : null,
+                scoreUnbounded: r && typeof r.scoreUnbounded === 'number' ? r.scoreUnbounded : null,
+                passed: r ? !!r.passed : false,
+            });
+        }
+        return out;
+    }
+
     // Clear the results cache
     clearResults() {
         this.results.clear();
+        this.agentIndex.clear();
     }
 
     // Judge a single test case
@@ -496,7 +566,9 @@ export class JudgeEngine {
         }
     }
 
-    // A single worker thread
+    // A single worker thread. Every job is wrapped in try/catch: an unhandled
+    // throw here is an unhandled promise rejection, which kills the whole node
+    // process on Node 20 — one bad job must error only its own sid.
     async startWorker() {
         while (true) {
             const job = this.queue.shift();
@@ -505,25 +577,33 @@ export class JudgeEngine {
                 continue; 
             }
 
-            let { sid, pid, lang, code } = job;
-            const { subDir } = this.submissionManager.submissionPaths(sid);
-            if (typeof code !== 'string') {
-                code = await fs.readFile(path.join(subDir, 'source.code'), 'utf8');
-            } else {
-                await fs.writeFile(path.join(subDir, 'source.code'), code);
-            }
-            
-            const problem = await this.problemManager.loadProblem(pid);
+            const { sid, pid, lang } = job;
+            try {
+                let { code } = job;
+                const { subDir } = this.submissionManager.submissionPaths(sid);
+                if (typeof code !== 'string') {
+                    code = await fs.readFile(path.join(subDir, 'source.code'), 'utf8');
+                } else {
+                    await fs.writeFile(path.join(subDir, 'source.code'), code);
+                }
 
-            switch (problem.cfg.type) {
-                case 'interactive':
-                    await this.judgeInteractive(problem, sid, pid, lang, code, subDir);
-                    break;
-                case 'leetcode':
-                    throw new Error('LeetCode problems are not supported for now.');
-                default:
-                    await this.judgeDefault(problem, sid, pid, lang, code, subDir);
-                    break;
+                const problem = await this.problemManager.loadProblem(pid);
+
+                switch (problem.cfg.type) {
+                    case 'interactive':
+                        await this.judgeInteractive(problem, sid, pid, lang, code, subDir);
+                        break;
+                    case 'leetcode':
+                        throw new Error('LeetCode problems are not supported for now.');
+                    default:
+                        await this.judgeDefault(problem, sid, pid, lang, code, subDir);
+                        break;
+                }
+            } catch (e) {
+                console.error(`[worker] job sid=${sid} pid=${pid} failed:`, e);
+                try {
+                    this.results.set(sid, { status: 'error', error: String(e) });
+                } catch { /* results map must never take the worker down */ }
             }
         }
     }

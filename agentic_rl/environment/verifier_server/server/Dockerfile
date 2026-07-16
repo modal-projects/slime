@@ -26,8 +26,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # Clean apt cache
     && rm -rf /var/lib/apt/lists/*
 
-# --- 2. Update npm to latest version ---
-RUN npm install -g npm@latest
+# --- 2. Update npm (pinned to a major compatible with Node 20; npm@latest is
+# npm 12+ which requires Node 22+ and breaks the build) ---
+RUN npm install -g npm@11
 
 # --- 3. Install go-judge (auto-detect architecture) ---
 # v1.11.1 assets are named go-judge_<ver-without-v>_linux_<arch>.tar.gz, with

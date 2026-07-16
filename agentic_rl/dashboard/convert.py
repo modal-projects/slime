@@ -257,8 +257,8 @@ def _nonneg_seconds(value) -> float | None:
 def _timing_phases(timing: dict, elapsed) -> list | None:
     """Display-ready wall-clock split without double-counting generation.
 
-    ``gen_s`` is adapter-side model time and is a subset of the env's ``agent``
-    phase when that phase exists. Split agent into generation vs tool/agent
+    ``timing["generate"]`` is the LLM-inference time and is a subset of the env's
+    ``agent`` phase when that phase exists. Split agent into generation vs tool/agent
     overhead so the bar totals roughly match rollout elapsed time.
     """
     if not isinstance(timing, dict):
@@ -274,7 +274,7 @@ def _timing_phases(timing: dict, elapsed) -> list | None:
     add("boot", timing.get("work_boot"), "boot")
     add("prep", timing.get("prep"), "prep")
 
-    gen_s = _nonneg_seconds(timing.get("gen_s"))
+    gen_s = _nonneg_seconds(timing.get("generate"))
     agent_s = _nonneg_seconds(timing.get("agent"))
     if gen_s is not None:
         add("generate", gen_s, "generate")
@@ -320,7 +320,7 @@ def sample_view(s: dict) -> dict:
     timing = md.get("timing") or {}
     verifier = md.get("verifier") or {}
     budgets = md.get("budgets") or {}  # enforced budgets; fall back to task.toml values
-    gen_s = timing.get("gen_s")
+    gen_s = timing.get("generate")
     elapsed = md.get("elapsed_sec")
     # Wall-clock not spent generating (in-sandbox tool exec + grading); divided
     # by turns it's a proxy for per-tool-call env latency.
@@ -340,6 +340,10 @@ def sample_view(s: dict) -> dict:
         "is_solved": md.get("is_solved"),
         "applied_cleanly": md.get("applied_cleanly"),
         "abort_reason": md.get("abort_reason"),
+        # Real terminal cause of a discarded (no-usable-turn) episode shipped via
+        # _ship_null: ContextLengthExceeded / NoProgress / Aborted / ImageUnusable.
+        # None for normal episodes. The rolled-back generation rides on truncated_tail.
+        "exit_status": md.get("exit_status"),
         "finish_reason": md.get("finish_reason"),
         # In-sandbox agent process outcome: exit code (0 on a clean run) and, on a
         # nonzero exit, the tail of its stdout/stderr -- the "why" behind a

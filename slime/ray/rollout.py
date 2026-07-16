@@ -455,6 +455,7 @@ class RolloutManager:
             ray.get(rollout_init_handles)
 
         init_tracking(args, primary=False)
+        logging_utils.start_engine_metrics_scraping(args, self._engine_metrics_router_addr())
         self.rollout_engine_lock = Lock.options(
             num_cpus=1,
             num_gpus=0,
@@ -497,9 +498,22 @@ class RolloutManager:
             except Exception as e:
                 logger.warning(f"CI Fault Injection failed: {e}")
 
+    def _engine_metrics_router_addr(self) -> str | None:
+        """Router base URL for scraping aggregated SGLang ``/engine_metrics``.
+
+        The sglang_router exposes ``/engine_metrics`` on its main port, merging
+        the Prometheus metrics of every backend engine. Returns ``None`` when no
+        server is running (e.g. debug_train_only).
+        """
+        srv = self.server
+        if srv is None or srv.router_ip is None:
+            return None
+        return f"http://{srv.router_ip}:{srv.router_port}"
+
     def dispose(self):
         for monitor in self._health_monitors:
             monitor.stop()
+        logging_utils.stop_engine_metrics_scraping()
         logging_utils.finish_tracking(self.args)
 
     @property

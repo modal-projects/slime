@@ -428,6 +428,19 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                     "You could use `slime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std` as an example."
                 ),
             )
+            parser.add_argument(
+                "--rollout-max-staleness",
+                type=int,
+                default=None,
+                help=(
+                    "Staleness window (in weight updates) for the fully-async rollout worker. "
+                    "Caps the in-flight pool at rollout_max_staleness * rollout_batch_size groups, so a "
+                    "sample is trained at most ~rollout_max_staleness updates after generation "
+                    "(Little's law: lag = in-flight / consumed-per-step). None keeps the legacy pool "
+                    "size of sglang_server_concurrency * num_engines groups, whose lag is unbounded "
+                    "relative to the trainer. Only read by fully_async_rollout."
+                ),
+            )
 
             # partial rollout
             parser.add_argument(

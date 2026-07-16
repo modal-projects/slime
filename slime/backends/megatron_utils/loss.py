@@ -27,6 +27,7 @@ from slime.utils.types import RolloutBatch
 from .cp_utils import (
     all_gather_with_cp,
     get_logits_and_tokens_offset_with_cp,
+    get_masked_token_max,
     get_sum_of_sample_mean,
     slice_log_prob_with_cp,
 )
@@ -1067,9 +1068,15 @@ def policy_loss_function(
         loss += 0 * logits.sum()
 
     train_rollout_logprob_abs_diff = None
+    train_rollout_logprob_abs_diff_max = None
     if "rollout_log_probs" in batch and batch["rollout_log_probs"]:
         rollout_log_probs = torch.cat(batch["rollout_log_probs"], dim=0)
-        train_rollout_logprob_abs_diff = sum_of_sample_mean((old_log_probs - rollout_log_probs).abs())
+        logprob_abs_diff = (old_log_probs - rollout_log_probs).abs()
+        train_rollout_logprob_abs_diff = sum_of_sample_mean(logprob_abs_diff)
+        # Worst-case (max) per-token divergence over the same masked tokens the
+        # mean uses; reduced with ReduceOp.MAX downstream (see "_max" keys).
+        masked_token_max = get_masked_token_max(total_lengths, response_lengths, batch["loss_masks"])
+        train_rollout_logprob_abs_diff_max = masked_token_max(logprob_abs_diff)
 
     reported_loss = {
         "loss": loss.clone().detach(),
@@ -1081,6 +1088,9 @@ def policy_loss_function(
 
     if train_rollout_logprob_abs_diff is not None:
         reported_loss["train_rollout_logprob_abs_diff"] = train_rollout_logprob_abs_diff.clone().detach()
+
+    if train_rollout_logprob_abs_diff_max is not None:
+        reported_loss["train_rollout_logprob_abs_diff_max"] = train_rollout_logprob_abs_diff_max.clone().detach()
 
     if args.use_kl_loss:
         reported_loss["kl_loss"] = kl_loss.clone().detach()
@@ -1292,11 +1302,16 @@ def loss_function(
     else:
         loss = loss * mpu.get_context_parallel_world_size()
 
+    # Keys ending in "_max" are aggregated with ReduceOp.MAX (no denominator) in
+    # reduce_train_step_metrics; everything else flows through the default
+    # sum/mean path packed into "values".
+    mean_keys = [k for k in log if not k.endswith("_max")]
+    max_keys = [k for k in log if k.endswith("_max")]
     return (
         loss,
         (num_tokens if args.calculate_per_token_loss else torch.tensor(1, device=logits.device)),
         {
-            "keys": list(log.keys()),
+            "keys": mean_keys,
             # values[0] is the consumer's reporting denominator after
             # all-reduce. For per-token-loss it must equal step total tokens
             # (only known by summing per-mb num_tokens across mbs / DP). For
@@ -1308,8 +1323,10 @@ def loss_function(
                 [
                     num_tokens if args.calculate_per_token_loss else 0,
                 ]
-                + list(log.values()),
+                + [log[k] for k in mean_keys],
                 device=logits.device,
             ),
+            "max_keys": max_keys,
+            "max_values": torch.tensor([log[k] for k in max_keys], device=logits.device),
         },
     )
