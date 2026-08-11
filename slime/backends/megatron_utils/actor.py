@@ -164,6 +164,11 @@ class MegatronTrainRayActor(TrainRayActor):
             model_name=type(self.hf_config).__name__.lower() if self.args.model_name is None else self.args.model_name,
             quantization_config=getattr(self.hf_config, "quantization_config", None),
         )
+        # Behavior-policy versions must remain absolute across checkpoint
+        # resumes. The updater increments before publishing full weights, so a
+        # run resumed at rollout 80 emits version 81 for rollout 80, matching
+        # the fresh-run convention (rollout 0 uses version 1).
+        self.weight_updater.weight_version = int(start_rollout_id)
 
         # empty cache after initialization
         clear_memory()

@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import inspect
 import logging
 import queue
 import threading
@@ -231,7 +232,22 @@ class AsyncRolloutWorker:
         return _cb
 
 
-async def _generate_rollout_async(args, rollout_id: int, data_buffer) -> RolloutFnTrainOutput:
+async def _call_group_hook(hook, group: list[Sample]) -> None:
+    if hook is None:
+        return
+    result = hook(group)
+    if inspect.isawaitable(result):
+        await result
+
+
+async def _generate_rollout_async(
+    args,
+    rollout_id: int,
+    data_buffer,
+    *,
+    group_accept_hook=None,
+    group_reject_hook=None,
+) -> RolloutFnTrainOutput:
     assert args.rollout_global_dataset
     worker = _get_global_worker(args, data_buffer)
 
@@ -275,6 +291,7 @@ async def _generate_rollout_async(args, rollout_id: int, data_buffer) -> Rollout
             if not filter_output.keep:
                 metric_gatherer.on_dynamic_filter_drop(reason=filter_output.reason)
                 n_dropped += 1
+                await _call_group_hook(group_reject_hook, group)
                 continue
             collected[gid] = group
 
@@ -302,7 +319,12 @@ async def _generate_rollout_async(args, rollout_id: int, data_buffer) -> Rollout
                 return int(idx)
         return 0
 
-    out = sorted(collected.values(), key=_key)[:target]
+    ordered = sorted(collected.items(), key=lambda item: _key(item[1]))
+    selected = ordered[:target]
+    out = [group for _, group in selected]
+    selected_ids = {gid for gid, _ in selected}
+    for gid, group in ordered:
+        await _call_group_hook(group_accept_hook if gid in selected_ids else group_reject_hook, group)
     metrics = metric_gatherer.collect()
     if dynamic_filter is not None:
         metrics["dynamic_sampling/completed_groups"] = n_completed
