@@ -94,6 +94,7 @@ def _sandbox(proc: _FakeProc, *, exec_timeout=120, deadline=None) -> "Sandbox":
     sb.exec_time = 0.0
     sb.exec_count = 0
     sb.exec_timeouts = 0
+    sb.exec_durations = []
     sb.deadline = deadline
     return sb
 
@@ -108,6 +109,8 @@ def test_wedged_stream_returns_124_fast(monkeypatch):
     assert "timed out" in err
     assert time.monotonic() - t0 < 5  # bounded by budget+grace, not the stream
     assert (sb.exec_count, sb.exec_timeouts) == (1, 1)  # counted for the canary metric
+    assert len(sb.exec_durations) == 1
+    assert sb.exec_time == pytest.approx(sb.exec_durations[0])
 
 
 def test_check_true_raises_on_timeout(monkeypatch):
@@ -133,6 +136,7 @@ def test_refuses_when_budget_exhausted():
     assert "exhausted" in err
     assert sb.sb.calls == []  # never reached the sandbox
     assert (sb.exec_count, sb.exec_timeouts) == (1, 0)  # attempted, but not a wedge
+    assert len(sb.exec_durations) == 1
 
 
 def test_normal_passthrough_without_deadline():
@@ -142,6 +146,22 @@ def test_normal_passthrough_without_deadline():
     assert (rc, out, err) == (3, "hello", "warn")
     assert sb.sb.calls[-1].timeout == 120
     assert (sb.exec_count, sb.exec_timeouts) == (1, 0)
+    assert len(sb.exec_durations) == 1
+    assert sb.exec_time == pytest.approx(sb.exec_durations[0])
+
+
+def test_records_duration_when_modal_exec_raises():
+    sb = _sandbox(_FakeProc())
+
+    def raise_shutdown(*_args, **_kwargs):
+        raise RuntimeError("sandbox is shutting down")
+
+    sb.sb.exec = raise_shutdown
+    with pytest.raises(RuntimeError, match="shutting down"):
+        sb.exec("echo late")
+    assert sb.exec_count == 1
+    assert len(sb.exec_durations) == 1
+    assert sb.exec_time == pytest.approx(sb.exec_durations[0])
 
 
 def test_run_agent_leg_arms_and_clears_deadline(monkeypatch):

@@ -98,8 +98,8 @@ def test_unusable_episode_ships_masked_reward0_not_aborted(evaluation):
     assert out.metadata["agentic"]["exit_status"] == "ImageUnusable"
 
 
-def test_usable_episode_still_trains_normally():
-    """Guard the normal path: a real chain still trains with its real reward."""
+def test_usable_prefix_still_trains_and_keeps_terminal_reason():
+    """A later truncated turn is discarded without masking earlier valid turns."""
     from agentic_rl.environment.base import RewardResult
     from agentic_rl.model import Chain
 
@@ -112,10 +112,13 @@ def test_usable_episode_still_trains_normally():
         full_prompt="sys+inst",
     )
     out = gen._build_samples(
-        _sample(), _Model(chains=[chain]), RewardResult(reward=1.0, is_solved=True, extra={}),
+        _sample(),
+        _Model(chains=[chain], exit_status="ContextLengthExceeded"),
+        RewardResult(reward=1.0, is_solved=True, extra={}),
         _FakeTok(), _MD, SimpleNamespace(), elapsed=1.0, evaluation=False,
     )
     s0 = out[0] if isinstance(out, list) else out
     assert s0.status == Sample.Status.COMPLETED
     assert s0.reward == 1.0
     assert not getattr(s0, "remove_sample", False)
+    assert s0.metadata["agentic"]["exit_status"] == "ContextLengthExceeded"

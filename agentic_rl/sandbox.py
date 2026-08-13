@@ -92,6 +92,7 @@ class Sandbox:
         self.exec_time = 0.0  # cumulative bash wall-time
         self.exec_count = 0  # total bash commands dispatched
         self.exec_timeouts = 0  # commands cut short by the client-side timeout (wedged/over-run)
+        self.exec_durations: list[float] = []  # one wall-time observation per dispatched/attempted command
         # Monotonic per-command wall-clock deadline, armed by run_agent_leg for the
         # duration of an agent leg so each exec is capped at the episode's remaining
         # budget. None outside a leg (boot/prep/verify use their own timeouts).
@@ -137,7 +138,7 @@ class Sandbox:
         if self.deadline is not None:
             remaining = self.deadline - time.monotonic()
             if remaining <= 0:
-                self.exec_time += time.perf_counter() - t0
+                self._record_exec_duration(t0)
                 if check:
                     raise TimeoutError(f"agent budget exhausted before: {command[:120]}")
                 return 124, "", "command not run: agent time budget exhausted"
@@ -155,15 +156,26 @@ class Sandbox:
         try:
             rc, out, err = _run_with_timeout(_run, budget + _EXEC_GRACE_SEC, f"exec({command[:80]})")
         except TimeoutError:
-            self.exec_time += time.perf_counter() - t0
+            self._record_exec_duration(t0)
             self.exec_timeouts += 1
             if check:
                 raise
             return 124, "", f"command timed out after {budget}s (sandbox unresponsive)"
-        self.exec_time += time.perf_counter() - t0
+        except Exception:
+            self._record_exec_duration(t0)
+            raise
+        self._record_exec_duration(t0)
         if check and rc != 0:
             raise RuntimeError(f"command failed (rc={rc}): {command[:120]}\n{err[-500:]}")
         return rc, out, err
+
+    def _record_exec_duration(self, started: float) -> None:
+        elapsed = time.perf_counter() - started
+        self.exec_time += elapsed
+        # Defensive getattr keeps old pickles and test doubles usable.
+        durations = getattr(self, "exec_durations", None)
+        if durations is not None:
+            durations.append(elapsed)
 
     def write_file(self, path: str, content) -> None:
         # RPC, not a shell arg: patches/tarballs exceed ARG_MAX.

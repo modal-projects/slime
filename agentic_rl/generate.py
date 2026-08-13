@@ -194,6 +194,13 @@ def _build_samples(sample, model, result, tokenizer, md, args, *, elapsed: float
         "is_solved": result.is_solved,
         **{key_: val for key_, val in result.extra.items() if key_ != "harbor_step_results"},
     }
+    # A context-length/no-progress terminal turn is rolled back, but earlier
+    # valid tool-call turns remain trainable. Preserve the terminal reason on
+    # those non-null prefixes too; otherwise ContextLengthExceeded monitoring
+    # only sees first-turn nulls and incorrectly implies every occurrence was
+    # fully masked.
+    if model.exit_status and not stats.get("exit_status"):
+        stats["exit_status"] = model.exit_status
     # LLM-inference seconds are the generation portion of the env's "agent" leg, not a
     # disjoint phase -- fold them into the timing dict as "generate" so they live
     # alongside boot/prep/agent/verifier (metrics.py logs agentic/timing/generate, and

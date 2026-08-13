@@ -82,6 +82,7 @@ type SampleView = {
   applied_cleanly: boolean | null;
   abort_reason: string | null;
   exit_status: string | null;
+  error: string | null;
   finish_reason: string | null;
   agent_exit_code: number | null;
   agent_tail: string | null;
@@ -101,9 +102,25 @@ type SampleView = {
   n_turns: number;
   gen_s: number | null;
   overhead_sec: number | null;
+  exec_count: number | null;
+  exec_time: number | null;
+  exec_timeouts: number | null;
   recorded_turns: number | null;
   non_generation_time: number | null;
   timing_phases: TimingPhase[] | null;
+  retro_branch: {
+    snapshot_id?: string;
+    event_type?: string;
+    source_update?: number | null;
+  } | null;
+  retro_snapshot: {
+    count?: number;
+    latency_seconds?: number;
+  } | null;
+  retro_restore: {
+    latency_seconds?: number;
+    copied_to_writable?: boolean;
+  } | null;
   dockerfile: string | null;
   task_path: string | null;
   agent_timeout_sec: number | null;
@@ -1088,12 +1105,23 @@ function renderSample(run: string, file: string, view: RolloutView, sampleIdx: n
     metaCell(grid, "applied cleanly", String(s.applied_cleanly), s.applied_cleanly === false ? "bad" : "");
   if (s.abort_reason) metaCell(grid, "abort reason", s.abort_reason, "warn");
   if (s.exit_status) metaCell(grid, "exit status", s.exit_status, "warn");
+  if (s.error) metaCell(grid, "episode error", s.error, "bad");
   if (s.agent_exit_code != null && s.agent_exit_code !== 0)
     metaCell(grid, "agent exit", String(s.agent_exit_code), "bad");
   metaCell(grid, "finish reason", s.finish_reason ?? "—", s.finish_reason === "length" ? "warn" : "");
   metaCell(grid, "elapsed", fmtDur(s.elapsed_sec));
   if (s.gen_s != null) metaCell(grid, "gen time", fmtDur(s.gen_s));
   if (s.overhead_sec != null) metaCell(grid, "env overhead", fmtDur(s.overhead_sec));
+  if (s.exec_count != null || s.exec_time != null) {
+    const average = s.exec_count && s.exec_time != null ? ` · avg ${fmtDur(s.exec_time / s.exec_count)}` : "";
+    metaCell(
+      grid,
+      "sandbox exec",
+      `${s.exec_count ?? "?"} calls · ${fmtDur(s.exec_time)}${average}`,
+      (s.exec_timeouts ?? 0) > 0 ? "warn" : "",
+    );
+  }
+  if ((s.exec_timeouts ?? 0) > 0) metaCell(grid, "exec timeouts", String(s.exec_timeouts), "warn");
   if (s.gen_s != null && s.elapsed_sec)
     metaCell(grid, "gen fraction", pct(s.gen_s / s.elapsed_sec), s.gen_s / s.elapsed_sec < 0.5 ? "warn" : "");
   // recorded_turns = agent-loop turns (the capped count); n_turns = rendered
@@ -1116,6 +1144,20 @@ function renderSample(run: string, file: string, view: RolloutView, sampleIdx: n
   if (s.boot_timeout_sec != null) metaCell(grid, "boot budget", fmtDur(s.boot_timeout_sec));
   if (s.agent_timeout_sec != null) metaCell(grid, "agent budget", fmtDur(s.agent_timeout_sec));
   if (s.verifier_timeout_sec != null) metaCell(grid, "verifier timeout", fmtDur(s.verifier_timeout_sec));
+  if (s.retro_branch)
+    metaCell(
+      grid,
+      "retro branch",
+      `${s.retro_branch.event_type ?? "?"} · source update ${s.retro_branch.source_update ?? "?"}`,
+    );
+  if (s.retro_restore?.latency_seconds != null)
+    metaCell(grid, "snapshot restore", fmtDur(s.retro_restore.latency_seconds));
+  if (s.retro_snapshot?.latency_seconds != null)
+    metaCell(
+      grid,
+      "snapshot capture",
+      `${s.retro_snapshot.count ?? "?"} · ${fmtDur(s.retro_snapshot.latency_seconds)}`,
+    );
   if (s.harbor_steps_total != null)
     metaCell(grid, "harbor steps", `${s.harbor_steps_completed ?? "?"}/${s.harbor_steps_total}`);
   if (s.submission_summary) {

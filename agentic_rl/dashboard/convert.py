@@ -344,6 +344,7 @@ def sample_view(s: dict) -> dict:
         # _ship_null: ContextLengthExceeded / NoProgress / Aborted / ImageUnusable.
         # None for normal episodes. The rolled-back generation rides on truncated_tail.
         "exit_status": md.get("exit_status"),
+        "error": md.get("error"),
         "finish_reason": md.get("finish_reason"),
         # In-sandbox agent process outcome: exit code (0 on a clean run) and, on a
         # nonzero exit, the tail of its stdout/stderr -- the "why" behind a
@@ -373,9 +374,15 @@ def sample_view(s: dict) -> dict:
         # --- timing / latency profile (md.timing; absent on old dumps) ---
         "gen_s": gen_s,
         "overhead_sec": overhead_sec,
+        "exec_count": md.get("exec_count"),
+        "exec_time": md.get("exec_time"),
+        "exec_timeouts": md.get("exec_timeouts"),
         "recorded_turns": timing.get("n_turns"),
         "non_generation_time": s.get("non_generation_time"),
         "timing_phases": _timing_phases(timing, elapsed),
+        "retro_branch": md.get("retro_branch"),
+        "retro_snapshot": md.get("retro_snapshot"),
+        "retro_restore": md.get("retro_restore"),
         # --- task provenance / sandbox resources ---
         "dockerfile": md.get("dockerfile"),
         "task_path": md.get("task_path"),

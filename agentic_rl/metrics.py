@@ -40,7 +40,10 @@ def _vnum(v):
 
 def _stats(samples) -> list[dict]:
     return [
-        s.metadata["agentic"]
+        {
+            **s.metadata["agentic"],
+            "_remove_sample": bool(getattr(s, "remove_sample", False)),
+        }
         for s in samples
         if isinstance(getattr(s, "metadata", None), dict) and "agentic" in s.metadata
     ]
@@ -55,6 +58,102 @@ def _pctl_block(prefix: str, vals, ps=(50, 90, 99), include_max=True) -> dict:
     out = {f"{prefix}/p{p}": float(np.percentile(arr, p)) for p in ps}
     if include_max:
         out[f"{prefix}/max"] = float(arr.max())
+    return out
+
+
+def _timing_values(stats: list[dict], key: str) -> list[float]:
+    return [
+        float(value)
+        for stat in stats
+        if (value := (stat.get("timing") or {}).get(key)) is not None
+    ]
+
+
+def _segment_metrics(stats: list[dict]) -> dict:
+    """Split fresh and restored-branch latency so a mixed mean cannot hide which
+    lane owns the critical path."""
+
+    out: dict = {}
+    segments = {
+        "fresh": [stat for stat in stats if not stat.get("retro_branch")],
+        "retro": [stat for stat in stats if stat.get("retro_branch")],
+    }
+    for name, subset in segments.items():
+        if not subset:
+            continue
+        prefix = f"agentic/{name}"
+        out[f"{prefix}/samples"] = float(len(subset))
+        elapsed = [float(stat["elapsed_sec"]) for stat in subset if stat.get("elapsed_sec") is not None]
+        if elapsed:
+            out[f"{prefix}/elapsed_sec/mean"] = float(np.mean(elapsed))
+            out |= _pctl_block(f"{prefix}/elapsed_sec", elapsed)
+        for phase in ("agent", "generate", "verifier", "episode"):
+            values = _timing_values(subset, phase)
+            if values:
+                out[f"{prefix}/timing/{phase}/mean"] = float(np.mean(values))
+                out |= _pctl_block(f"{prefix}/timing/{phase}", values, ps=(90,))
+        exec_times = [float(stat["exec_time"]) for stat in subset if stat.get("exec_time") is not None]
+        if exec_times:
+            out[f"{prefix}/exec_time_sec/mean"] = float(np.mean(exec_times))
+            out |= _pctl_block(f"{prefix}/exec_time_sec", exec_times, ps=(90,))
+        out[f"{prefix}/removed_frac"] = float(
+            np.mean([1.0 if stat.get("_remove_sample") else 0.0 for stat in subset])
+        )
+        out[f"{prefix}/episode_exception_frac"] = float(
+            np.mean([1.0 if stat.get("error") == "episode_exception" else 0.0 for stat in subset])
+        )
+    return out
+
+
+def _retro_snapshot_metrics(stats: list[dict]) -> dict:
+    out: dict = {}
+    candidates = [
+        candidate
+        for stat in stats
+        for candidate in (stat.get("retro_candidates") or [])
+        if isinstance(candidate, dict)
+    ]
+    if candidates:
+        turns = [float(item["turn_index"]) for item in candidates if item.get("turn_index") is not None]
+        fractions = [
+            float(item["trajectory_fraction"])
+            for item in candidates
+            if item.get("trajectory_fraction") is not None
+        ]
+        errors = [float(item["fraction_error"]) for item in candidates if item.get("fraction_error") is not None]
+        if turns:
+            out["retro/snapshot_capture/turn_index/mean"] = float(np.mean(turns))
+            out |= _pctl_block("retro/snapshot_capture/turn_index", turns, ps=(50, 90))
+        if fractions:
+            out["retro/snapshot_capture/trajectory_fraction/mean"] = float(np.mean(fractions))
+            out |= _pctl_block("retro/snapshot_capture/trajectory_fraction", fractions, ps=(50, 90))
+        if errors:
+            out["retro/snapshot_capture/fraction_error/mean"] = float(np.mean(errors))
+            out |= _pctl_block("retro/snapshot_capture/fraction_error", errors, ps=(50, 90))
+        out["retro/snapshot_capture/promising_frac"] = float(
+            np.mean([1.0 if item.get("event_type") == "promising" else 0.0 for item in candidates])
+        )
+
+    captures = [stat["retro_snapshot"] for stat in stats if isinstance(stat.get("retro_snapshot"), dict)]
+    if captures:
+        latencies = [float(item.get("latency_seconds") or 0.0) for item in captures]
+        out["retro/snapshot_capture/count"] = float(sum(int(item.get("count") or 0) for item in captures))
+        out["retro/snapshot_capture/episode_frac"] = len(captures) / len(stats)
+        out["retro/snapshot_capture/latency_seconds/mean"] = float(np.mean(latencies))
+        out |= _pctl_block("retro/snapshot_capture/latency_seconds", latencies)
+        out["retro/snapshot_capture/estimated_bytes/mean"] = float(
+            np.mean([float(item.get("estimated_bytes") or 0.0) for item in captures])
+        )
+        out["retro/snapshot_capture/estimated_files/mean"] = float(
+            np.mean([float(item.get("estimated_files") or 0.0) for item in captures])
+        )
+
+    restores = [stat["retro_restore"] for stat in stats if isinstance(stat.get("retro_restore"), dict)]
+    if restores:
+        latencies = [float(item.get("latency_seconds") or 0.0) for item in restores]
+        out["retro/snapshot_restore/count"] = float(len(restores))
+        out["retro/snapshot_restore/latency_seconds/mean"] = float(np.mean(latencies))
+        out |= _pctl_block("retro/snapshot_restore/latency_seconds", latencies)
     return out
 
 
@@ -92,10 +191,27 @@ def _agentic_metrics(samples, args) -> dict:
         out["agentic/decode_tok_per_s/mean"] = float(np.mean([o / g for o, g in gens]))
 
     out["agentic/solved_frac"] = float(np.mean([1.0 if s.get("is_solved") else 0.0 for s in stats]))
-    exits = Counter(s.get("exit_status", "?") for s in stats)
+    exits = Counter(s.get("exit_status") or s.get("error") or "?" for s in stats)
     total = sum(exits.values()) or 1
     for status, c in exits.items():
         out[f"agentic/exit_frac/{status}"] = c / total
+    out["agentic/episode_exception_frac"] = float(
+        np.mean([1.0 if s.get("error") == "episode_exception" else 0.0 for s in stats])
+    )
+    context_exceeded = [
+        s for s in stats if (s.get("exit_status") or s.get("error")) == "ContextLengthExceeded"
+    ]
+    out["agentic/context_length_exceeded_frac"] = len(context_exceeded) / len(stats)
+    if context_exceeded:
+        out["agentic/context_length_exceeded_removed_frac"] = float(
+            np.mean([1.0 if s.get("_remove_sample") else 0.0 for s in context_exceeded])
+        )
+        wasted = [
+            float((s.get("truncated_tail") or {}).get("tokens") or 0.0)
+            for s in context_exceeded
+        ]
+        out["agentic/context_length_wasted_tokens/mean"] = float(np.mean(wasted))
+        out["agentic/context_length_wasted_tokens/max"] = float(max(wasted))
 
     # Tail latency -- the mean hides a single multi-hour straggler that gates a sync step
     # (rollout_time tracks the MAX of this, not the mean). straggler_ratio = max/median.
@@ -115,6 +231,34 @@ def _agentic_metrics(samples, args) -> dict:
     if et:
         out["agentic/exec_timeouts/mean"] = float(np.mean(et))
         out["agentic/exec_timeout_frac"] = float(np.mean([1.0 if x > 0 else 0.0 for x in et]))
+    exec_counts = [float(s["exec_count"]) for s in stats if s.get("exec_count") is not None]
+    if exec_counts:
+        out["agentic/exec_count/mean"] = float(np.mean(exec_counts))
+        out |= _pctl_block("agentic/exec_count", exec_counts, ps=(90,))
+    exec_times = [float(s["exec_time"]) for s in stats if s.get("exec_time") is not None]
+    if exec_times:
+        out["agentic/exec_time_sec/mean"] = float(np.mean(exec_times))
+        out |= _pctl_block("agentic/exec_time_sec", exec_times)
+    exec_per_call = [
+        float(s["exec_time"]) / float(s["exec_count"])
+        for s in stats
+        if s.get("exec_time") is not None and float(s.get("exec_count") or 0) > 0
+    ]
+    if exec_per_call:
+        out["agentic/exec_time_per_call_sec/mean"] = float(np.mean(exec_per_call))
+        out |= _pctl_block("agentic/exec_time_per_call_sec", exec_per_call, ps=(90,))
+    command_durations = [
+        float(value)
+        for s in stats
+        for value in (s.get("exec_durations") or ())
+        if value is not None
+    ]
+    if command_durations:
+        out["agentic/exec_call_sec/mean"] = float(np.mean(command_durations))
+        out |= _pctl_block("agentic/exec_call_sec", command_durations)
+        out["agentic/exec_call_over_10s_frac"] = float(
+            np.mean([1.0 if value >= 10.0 else 0.0 for value in command_durations])
+        )
 
     # Forced-think-closure canary (agentic_close_think_on_length): how often the
     # scaffold had to close a runaway <think>. A RISING trend across training steps
@@ -199,6 +343,8 @@ def _agentic_metrics(samples, args) -> dict:
     resp = sum(s.get("response_tokens", 0) or 0 for s in stats)
     if resp > 0:
         out["agentic/trained_token_frac"] = sum(s.get("output_tokens", 0) or 0 for s in stats) / resp
+    out |= _segment_metrics(stats)
+    out |= _retro_snapshot_metrics(stats)
     return out
 
 
@@ -236,26 +382,53 @@ def _best_traj_reward(s) -> float:
 
 def _async_metrics(samples, now: float) -> dict:
     out: dict = {}
-    versioned = [s.weight_versions for s in samples if getattr(s, "weight_versions", None)]
-    if versioned:
-        spans = [len(set(vs)) for vs in versioned]
-        out["async/version_span/mean"] = float(np.mean(spans))
-        out["async/version_span/max"] = float(max(spans))
-        nums = [ns for ns in ([n for n in (_vnum(v) for v in vs) if n is not None] for vs in versioned) if ns]
-        if nums:
-            fresh = max(max(ns) for ns in nums)
-            lags = [fresh - min(ns) for ns in nums]
-            out["async/version_lag/mean"] = float(np.mean(lags))
-            out["async/version_lag/max"] = float(max(lags))
-            out["async/versions_in_batch"] = float(len({n for ns in nums for n in ns}))
-    ages = [
-        now - s.metadata["agentic"]["gen_timestamp"]
-        for s in samples
-        if isinstance(getattr(s, "metadata", None), dict) and s.metadata.get("agentic", {}).get("gen_timestamp")
+
+    def add_segment(prefix: str, segment) -> None:
+        versioned = [s.weight_versions for s in segment if getattr(s, "weight_versions", None)]
+        if versioned:
+            spans = [len(set(vs)) for vs in versioned]
+            out[f"{prefix}/version_span/mean"] = float(np.mean(spans))
+            out[f"{prefix}/version_span/max"] = float(max(spans))
+            nums = [
+                ns
+                for ns in ([n for n in (_vnum(v) for v in vs) if n is not None] for vs in versioned)
+                if ns
+            ]
+            if nums:
+                freshest = max(max(ns) for ns in nums)
+                lags = [freshest - min(ns) for ns in nums]
+                out[f"{prefix}/version_lag/mean"] = float(np.mean(lags))
+                out[f"{prefix}/version_lag/max"] = float(max(lags))
+                out[f"{prefix}/versions_in_batch"] = float(len({n for ns in nums for n in ns}))
+        ages = [
+            now - s.metadata["agentic"]["gen_timestamp"]
+            for s in segment
+            if isinstance(getattr(s, "metadata", None), dict)
+            and s.metadata.get("agentic", {}).get("gen_timestamp")
+        ]
+        if ages:
+            out[f"{prefix}/sample_age_sec/mean"] = float(np.mean(ages))
+            out[f"{prefix}/sample_age_sec/max"] = float(max(ages))
+
+    add_segment("async", samples)
+    fresh_samples = [
+        sample
+        for sample in samples
+        if not (
+            isinstance(getattr(sample, "metadata", None), dict)
+            and sample.metadata.get("agentic", {}).get("retro_branch")
+        )
     ]
-    if ages:
-        out["async/sample_age_sec/mean"] = float(np.mean(ages))
-        out["async/sample_age_sec/max"] = float(max(ages))
+    retro_samples = [
+        sample
+        for sample in samples
+        if isinstance(getattr(sample, "metadata", None), dict)
+        and sample.metadata.get("agentic", {}).get("retro_branch")
+    ]
+    if fresh_samples:
+        add_segment("async/fresh", fresh_samples)
+    if retro_samples:
+        add_segment("async/retro", retro_samples)
     return out
 
 

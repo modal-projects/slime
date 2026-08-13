@@ -204,9 +204,15 @@ class HarborEnv(RolloutEnv):
                 artifacts = self._collect_artifacts(sb, workdir, md)
             except Exception:  # noqa: BLE001
                 logger.exception("[harbor] %s: artifact collection failed", md["instance_id"])
-            # Command counts (incl. wedged commands the client-side timeout cut short)
-            # for the exec-timeout health metrics.
-            sandbox_exec = {"exec_count": sb.exec_count, "exec_timeouts": sb.exec_timeouts}
+            # Per-command walls distinguish actual sandbox/tool latency from the
+            # configured timeout ceiling. Keep the raw, compact duration vector so
+            # rollout metrics can emit p50/p90/p99 rather than hiding a slow tail.
+            sandbox_exec = {
+                "exec_count": sb.exec_count,
+                "exec_time": round(sb.exec_time, 3),
+                "exec_timeouts": sb.exec_timeouts,
+                "exec_durations": [round(value, 3) for value in sb.exec_durations],
+            }
 
         reward = self._aggregate(steps, step_results, md["reward_strategy"])
         is_solved = bool(step_results) and len(step_results) == len(steps) and all(r.get("is_solved") for r in step_results)

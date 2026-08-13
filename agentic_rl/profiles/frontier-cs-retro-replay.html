@@ -1,0 +1,1373 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Frontier-CS asynchronous retro replay — offline research report</title>
+<script>
+try {
+  var savedTheme = localStorage.getItem("wc-theme");
+  if (savedTheme) document.documentElement.setAttribute("data-theme", savedTheme);
+} catch (error) {}
+</script>
+<style>
+:root {
+  --bg: #faf7f2;
+  --bg-accent: #f3ece1;
+  --card: #ffffff;
+  --card-border: #ece4d8;
+  --text: #2b2722;
+  --text-muted: #8a8073;
+  --accent: #d97757;
+  --accent-dark: #bd5a39;
+  --green: #2f8f5b;
+  --red: #d2553f;
+  --yellow: #c08a2e;
+  --purple: #7c5cd0;
+  --blue: #2b8fb0;
+  --shadow-sm: 0 1px 2px rgba(43,39,34,.05), 0 4px 14px rgba(43,39,34,.03);
+  --shadow-lg: 0 10px 28px rgba(189,90,57,.14);
+  --radius: 12px;
+  --mono: ui-monospace, "SFMono-Regular", "JetBrains Mono", Menlo, monospace;
+  --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --arm-baseline: #6b7280;
+  --arm-o1: #2b8fb0;
+  --arm-o2: #d2553f;
+  --arm-retro-a: #c08a2e;
+  --arm-retro-b: #2f8f5b;
+}
+[data-theme="dark"] {
+  --bg: #0f172a;
+  --bg-accent: #1a2336;
+  --card: #1e293b;
+  --card-border: #334155;
+  --text: #e2e8f0;
+  --text-muted: #94a3b8;
+  --accent: #f0a384;
+  --accent-dark: #f0a384;
+  --green: #4ade80;
+  --red: #f87171;
+  --yellow: #fbbf24;
+  --purple: #a78bfa;
+  --blue: #38bdf8;
+  --shadow-sm: 0 1px 2px rgba(0,0,0,.25);
+  --shadow-lg: 0 10px 28px rgba(0,0,0,.35);
+  --arm-baseline: #cbd5e1;
+  --arm-o1: #38bdf8;
+  --arm-o2: #f87171;
+  --arm-retro-a: #fbbf24;
+  --arm-retro-b: #4ade80;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  font-family: var(--sans);
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.6;
+  padding: 2rem;
+  -webkit-font-smoothing: antialiased;
+  border-top: 4px solid var(--accent);
+}
+.container { max-width: 1200px; margin: 0 auto; }
+a { color: var(--accent-dark); text-underline-offset: 2px; }
+a:hover { text-decoration-thickness: 2px; }
+h1 {
+  font-size: 2rem;
+  font-weight: 700;
+  margin-bottom: .4rem;
+  background: linear-gradient(135deg, var(--accent), var(--accent-dark));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+h2 { font-size: 1.25rem; line-height: 1.3; }
+h3 { font-size: 1rem; line-height: 1.35; }
+p + p { margin-top: .65rem; }
+.subtitle { color: var(--text-muted); margin-bottom: 1.25rem; font-size: .95rem; }
+.meta-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .35rem 1rem;
+  align-items: center;
+  font-size: .8rem;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  margin-bottom: 1.5rem;
+}
+.footer {
+  text-align: center;
+  color: var(--text-muted);
+  font-size: .8rem;
+  margin-top: 3rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--card-border);
+}
+.section { margin-bottom: 2.5rem; }
+.section-title {
+  font-size: 1.25rem;
+  font-weight: 600;
+  margin-bottom: 1rem;
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  scroll-margin-top: 5rem;
+}
+.section-icon { font-size: 1.35rem; }
+.subsection { margin-top: 1.4rem; }
+.subsection-title { margin-bottom: .65rem; }
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1.25rem;
+  margin-bottom: 1.25rem;
+}
+.grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.grid.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.card {
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius);
+  padding: 1.5rem;
+  box-shadow: var(--shadow-sm);
+  transition: transform .2s, box-shadow .2s;
+}
+.card:hover { transform: translateY(-2px); box-shadow: var(--shadow-lg); }
+.card-title {
+  font-size: .8rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  margin-bottom: .5rem;
+}
+.card-value { font-size: 2rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.card-detail { font-size: .85rem; color: var(--text-muted); margin-top: .25rem; }
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: .4rem;
+  padding: .22rem .7rem;
+  border-radius: 9999px;
+  font-size: .78rem;
+  font-weight: 600;
+}
+.badge.done, .badge.pass, .badge.ok, .badge.new {
+  background: color-mix(in srgb, var(--green) 16%, transparent);
+  color: var(--green);
+}
+.badge.running, .badge.info {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent-dark);
+}
+.badge.blocked, .badge.fail, .badge.bad {
+  background: color-mix(in srgb, var(--red) 16%, transparent);
+  color: var(--red);
+}
+.badge.waiting, .badge.pend, .badge.warn {
+  background: color-mix(in srgb, var(--yellow) 18%, transparent);
+  color: var(--yellow);
+}
+.badge.exists, .badge.muted {
+  background: color-mix(in srgb, var(--text-muted) 18%, transparent);
+  color: var(--text-muted);
+}
+.dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.tag {
+  display: inline-block;
+  padding: .12rem .5rem;
+  border-radius: 5px;
+  font-size: .75rem;
+  font-weight: 600;
+  margin-right: .25rem;
+  background: var(--bg-accent);
+  color: var(--text-muted);
+}
+.tag.green { background: color-mix(in srgb, var(--green) 14%, transparent); color: var(--green); }
+.tag.red { background: color-mix(in srgb, var(--red) 14%, transparent); color: var(--red); }
+.tag.amber { background: color-mix(in srgb, var(--yellow) 16%, transparent); color: var(--yellow); }
+.tag.coral { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent-dark); }
+.tag.purple { background: color-mix(in srgb, var(--purple) 15%, transparent); color: var(--purple); }
+.table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius);
+  margin: .75rem 0 1rem;
+}
+table { width: 100%; border-collapse: collapse; background: var(--card); }
+th {
+  background: var(--bg-accent);
+  text-align: left;
+  padding: .7rem 1rem;
+  font-size: .78rem;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--card-border);
+  position: sticky;
+  top: 0;
+}
+th[data-sort] { cursor: pointer; user-select: none; }
+th[data-sort]::after { content: " \2195"; opacity: .35; }
+th[data-sort].asc::after { content: " \2191"; opacity: 1; }
+th[data-sort].desc::after { content: " \2193"; opacity: 1; }
+td {
+  padding: .7rem 1rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--text) 8%, transparent);
+  font-size: .9rem;
+  vertical-align: top;
+}
+tbody tr:last-child td { border-bottom: none; }
+tbody tr:nth-child(even) td { background: color-mix(in srgb, var(--bg-accent) 45%, transparent); }
+tbody tr:hover td { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--mono); }
+td.best { font-weight: 700; color: var(--green); }
+.callout {
+  border-left: 4px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--card));
+  border-radius: 0 var(--radius) var(--radius) 0;
+  padding: 1rem 1.25rem;
+  margin: 1rem 0;
+}
+.callout.good { border-color: var(--green); background: color-mix(in srgb, var(--green) 8%, var(--card)); }
+.callout.warn { border-color: var(--yellow); background: color-mix(in srgb, var(--yellow) 9%, var(--card)); }
+.callout.bad { border-color: var(--red); background: color-mix(in srgb, var(--red) 8%, var(--card)); }
+.callout-title { font-weight: 700; margin-bottom: .35rem; }
+.needs-input {
+  border: 1px dashed var(--accent);
+  background: color-mix(in srgb, var(--accent) 6%, var(--card));
+  border-radius: var(--radius);
+  padding: 1.25rem 1.5rem;
+  margin: 1.5rem 0;
+}
+.needs-input h2 { font-size: 1.1rem; margin-bottom: .5rem; color: var(--accent-dark); }
+.needs-input ol { padding-left: 1.25rem; }
+.needs-input li { margin: .4rem 0; }
+.verdict {
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius);
+  padding: 1.25rem 1.5rem;
+  margin: 1.25rem 0;
+  box-shadow: var(--shadow-sm);
+}
+.verdict.go { background: linear-gradient(135deg, color-mix(in srgb, var(--green) 14%, var(--card)), var(--card)); }
+.verdict.pursue { background: linear-gradient(135deg, color-mix(in srgb, var(--yellow) 14%, var(--card)), var(--card)); }
+.verdict-badge {
+  display: inline-block;
+  font-size: .72rem;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  padding: .15rem .55rem;
+  border-radius: 5px;
+  background: var(--accent);
+  color: #fff;
+  margin-bottom: .5rem;
+}
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .5rem 1.25rem;
+  align-items: center;
+  padding: .75rem 1rem;
+  background: var(--bg-accent);
+  border-radius: var(--radius);
+  font-size: .82rem;
+  margin-bottom: 1.25rem;
+}
+.legend-item { display: inline-flex; align-items: center; gap: .4rem; }
+.legend-swatch { width: 12px; height: 12px; border-radius: 3px; }
+code {
+  font-family: var(--mono);
+  font-size: .85em;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  padding: .12rem .4rem;
+  border-radius: 5px;
+  color: var(--accent-dark);
+  word-break: break-word;
+}
+pre {
+  background: var(--bg-accent);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius);
+  padding: 1rem;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: .85rem;
+  white-space: pre-wrap;
+}
+pre code { background: none; padding: 0; color: var(--text); }
+.toolbar {
+  position: fixed;
+  top: .75rem;
+  right: .75rem;
+  display: flex;
+  gap: .4rem;
+  z-index: 50;
+}
+.btn {
+  padding: .35rem .7rem;
+  border-radius: 8px;
+  border: 1px solid var(--card-border);
+  background: var(--card);
+  color: var(--text);
+  font-size: .8rem;
+  cursor: pointer;
+  box-shadow: var(--shadow-sm);
+}
+.btn:hover { border-color: var(--accent); }
+.tab-bar {
+  display: flex;
+  gap: .25rem;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--card-border);
+  margin-bottom: 1.5rem;
+}
+.tab-btn {
+  padding: .6rem 1rem;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  font-size: .9rem;
+  font-weight: 600;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  white-space: nowrap;
+}
+.tab-btn.active { color: var(--accent-dark); border-bottom-color: var(--accent); }
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+.chart-card {
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius);
+  padding: 1rem;
+  box-shadow: var(--shadow-sm);
+  margin-bottom: 1rem;
+}
+.chart-title { font-weight: 700; margin-bottom: .2rem; }
+.chart-subtitle, .source-note, .muted { color: var(--text-muted); font-size: .82rem; }
+.chart { width: 100%; min-height: 260px; margin-top: .5rem; }
+.chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+.chart-grid { stroke: var(--card-border); stroke-width: 1; }
+.chart-axis { fill: var(--text-muted); font: 11px var(--sans); }
+.chart-line { fill: none; stroke-width: 2.5; stroke-linejoin: round; stroke-linecap: round; }
+.chart-point { stroke: var(--card); stroke-width: 1.5; }
+.chart-bar { opacity: .9; }
+.chart-ref { stroke: var(--yellow); stroke-width: 1.5; stroke-dasharray: 6 4; }
+.chart-ref-label { fill: var(--yellow); font: 11px var(--sans); }
+.links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .5rem 1rem;
+  margin: .75rem 0;
+  font-size: .88rem;
+}
+.flow {
+  display: flex;
+  gap: .5rem;
+  flex-wrap: wrap;
+  align-items: stretch;
+}
+.flow-step {
+  flex: 1 1 150px;
+  min-width: 145px;
+  padding: .8rem;
+  border: 1px solid var(--card-border);
+  background: var(--card);
+  border-radius: 8px;
+}
+.flow-step.accent { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 7%, var(--card)); }
+.flow-step strong { display: block; font-size: .88rem; margin-bottom: .2rem; }
+.flow-step span { display: block; color: var(--text-muted); font-size: .78rem; }
+.flow-arrow { align-self: center; color: var(--text-muted); }
+.stack > * + * { margin-top: .65rem; }
+.endpoint-row td:first-child { font-weight: 700; }
+.arm-baseline { color: var(--arm-baseline); }
+.arm-o1 { color: var(--arm-o1); }
+.arm-o2 { color: var(--arm-o2); }
+.arm-retro-a { color: var(--arm-retro-a); }
+.arm-retro-b { color: var(--arm-retro-b); }
+.nowrap { white-space: nowrap; }
+.small { font-size: .84rem; }
+.lead { font-size: 1rem; }
+.panel-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+.section-separator { border: 0; border-top: 1px solid var(--card-border); margin: 2rem 0; }
+@media (max-width: 900px) {
+  body { padding: 1rem; }
+  .grid.two, .grid.three, .grid.four { grid-template-columns: 1fr; }
+  .flow-arrow { display: none; }
+}
+@media print {
+  .toolbar, .tab-bar { display: none; }
+  body { padding: 0; border-top: 0; font-size: 10pt; }
+  .tab-panel { display: block !important; }
+  .tab-panel + .tab-panel { page-break-before: always; }
+  .card, .chart-card, .callout, .verdict, .table-wrap { break-inside: avoid; box-shadow: none; }
+  a { color: inherit; text-decoration: underline; }
+}
+</style>
+</head>
+<body>
+<div class="toolbar" aria-label="Report controls">
+  <button class="btn" data-theme-toggle title="Toggle light and dark theme" aria-label="Toggle theme">🌗</button>
+  <button class="btn" data-print title="Print or save as PDF" aria-label="Print report">⎙</button>
+</div>
+
+<main class="container">
+  <header>
+    <h1>Frontier-CS asynchronous retro replay</h1>
+    <p class="subtitle">Research assessment, live experiment evidence, systems design, cost envelope, and five-arm optimizer curves.</p>
+    <div class="meta-bar">
+      <span>built 2026-08-13</span><span>·</span>
+      <span>evidence through 2026-08-09</span><span>·</span>
+      <span>84 updates per current arm</span><span>·</span>
+      <span>offline self-contained report</span>
+    </div>
+  </header>
+
+  <div class="needs-input">
+    <h2>⚡ What needs your input</h2>
+    <ol>
+      <li><strong>Run the shared 38-problem Frontier-CS evaluation for both final checkpoints, then decide whether to fix and rerun retro replay after the resumed extension’s fresh-only integrity failure.</strong> Until that result exists, choose neither Arm A nor Arm B as the generalization winner, and do not treat steps 40–84 as evidence for or against retro replay.</li>
+    </ol>
+  </div>
+
+  <nav class="tab-bar" aria-label="Report sections">
+    <button class="tab-btn active" data-tab="research-report">Research report</button>
+    <button class="tab-btn" data-tab="five-arm-curves">Five-arm curves</button>
+  </nav>
+
+  <section class="tab-panel active" id="research-report" aria-labelledby="research-report-tab">
+    <div class="legend" aria-label="Report legend">
+      <strong>Legend</strong>
+      <span class="legend-item"><span class="legend-swatch" style="background:var(--green)"></span> completed / defensible</span>
+      <span class="legend-item"><span class="legend-swatch" style="background:var(--yellow)"></span> caveat / pending</span>
+      <span class="legend-item"><span class="legend-swatch" style="background:var(--red)"></span> integrity risk / invalid inference</span>
+      <span class="legend-item"><span class="legend-swatch" style="background:var(--blue)"></span> measured information</span>
+    </div>
+
+    <div class="verdict pursue">
+      <span class="verdict-badge">Current verdict</span>
+      <h2>Objective-specific behavior is established; generalization and retro benefit are not.</h2>
+      <p>Arm A preserves final-solution value; Arm B reaches higher within-trajectory peaks. The paired resumed extension is informative about reward strategy under asynchronous training, but its retro groups were all rejected. A shared start-state evaluation and a repaired replay run are required before selecting a scientific winner.</p>
+    </div>
+
+    <section class="section" id="research-question">
+      <div class="section-title"><span class="section-icon">🎯</span> Recommended research question</div>
+      <div class="callout">
+        <div class="callout-title">Compute-matched retro replay</div>
+        Can a fully asynchronous agent learn recovery and continued optimization more efficiently when 25% of its GRPO groups start from recent, snapshotted Frontier-CS states—while keeping total group count, suffix reward, and training compute fixed?
+      </div>
+      <div class="grid four">
+        <div class="card"><div class="card-value">8</div><div class="card-detail">current-policy continuations per snapshot</div></div>
+        <div class="card"><div class="card-value">25%</div><div class="card-detail">retro groups in proposed training mix</div></div>
+        <div class="card"><div class="card-value">1</div><div class="card-detail">branch point per parent trajectory</div></div>
+        <div class="card"><div class="card-value">2</div><div class="card-detail">reward arms in the first scientific A/B</div></div>
+      </div>
+    </section>
+
+    <section class="section" id="current-result">
+      <div class="panel-heading">
+        <div class="section-title"><span class="section-icon">🧪</span> Current experiment result</div>
+        <span class="badge warn"><span class="dot"></span> training metrics, not held-out evaluation</span>
+      </div>
+      <div class="grid four">
+        <div class="card"><div class="card-value">84 / 84</div><div class="card-detail">Arm A · final-reward updates complete</div></div>
+        <div class="card"><div class="card-value">84 / 84</div><div class="card-detail">Arm B · updates complete; usable checkpoint 84 being regenerated</div></div>
+        <div class="card"><div class="card-value" style="color:var(--red)">0</div><div class="card-detail">accepted retro groups in resumed steps 40–84</div></div>
+        <div class="card"><div class="card-value">Pending</div><div class="card-detail">shared 38-problem held-out evaluation</div></div>
+      </div>
+
+      <div class="callout bad">
+        <div class="callout-title">Integrity finding: the resumed extension was fresh-only</div>
+        Both resumed lineages requested a 24-fresh / 8-retro mix, but every matched step from 40 through 84 reported zero accepted retro groups and effectively trained on 32 fresh groups. Snapshot manifests retained source-update provenance from before restart while rollout IDs continued increasing, so the age≤4 eligibility gate rejected replay states. Treat this extension as a reward-strategy comparison under asynchronous training—not as evidence for or against retro replay. The original 20-step pilots did execute eight retro groups per step.
+      </div>
+
+      <div class="grid two">
+        <div class="chart-card">
+          <div class="chart-title">Where consumed replay candidates branched</div>
+          <div class="chart-subtitle">Snapshot turn among 725 consumed candidates · configured horizon: 75 turns</div>
+          <div class="chart" id="snapshot-turn-chart" role="img" aria-label="Arm A and Arm B mean and median consumed snapshot turns"></div>
+          <p class="source-note">Source: append-only Modal snapshot manifests through August 9, 2026. Arm A: 534 candidates, median 15, range 2–52. Arm B: 191, median 14, range 2–48.</p>
+        </div>
+        <div>
+          <div class="table-wrap">
+            <table aria-label="Consumed replay candidate metrics">
+              <thead><tr><th data-sort>Consumed candidate metric</th><th data-sort="num" class="num">Arm A</th><th data-sort="num" class="num">Arm B</th></tr></thead>
+              <tbody>
+                <tr><td>Candidates</td><td class="num">534</td><td class="num">191</td></tr>
+                <tr><td>Mean turn</td><td class="num">17.38</td><td class="num">17.32</td></tr>
+                <tr><td>Median turn</td><td class="num">15</td><td class="num">14</td></tr>
+                <tr><td>Observed range</td><td class="num">2–52</td><td class="num">2–48</td></tr>
+                <tr><td>Mean turn ÷ episode turn budget</td><td class="num">23.18%</td><td class="num">23.10%</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="callout">
+            <div class="callout-title">Interpretation</div>
+            Both arms snapshot at nearly the same point: about the 23rd percentile of the configured 75-turn budget. This is exact for the allotted horizon—<code>turn_index ÷ (turn_index + remaining_steps)</code>—but not relative to eventual realized trajectory length, which is unavailable for source groups discarded before rollout-dump persistence.
+          </div>
+          <p class="muted">“Consumed” means the restored eight-sibling group completed validation and the one-use snapshot was retired; it includes groups later rejected by the nonzero-reward-variance filter. Within a parent episode, the first accepted event is final.</p>
+        </div>
+      </div>
+
+      <div class="grid two">
+        <div class="chart-card">
+          <div class="chart-title">Matched steps 40–84: common outcome metrics</div>
+          <div class="chart-subtitle">Mean reward (0–1) by reward strategy</div>
+          <div class="chart" id="matched-outcomes-chart" role="img" aria-label="Arm A and Arm B final and best trajectory rewards"></div>
+          <p class="source-note">Source: merged W&B retry segments · rollouts 40–84 · arithmetic mean of per-rollout metrics.</p>
+        </div>
+        <div>
+          <div class="callout">
+            <div class="callout-title">What the training data says</div>
+            Arm A preserved more final-solution value, while Arm B achieved a slightly higher best point within trajectories. Mean solve rates were effectively tied. This fits the reward definitions but is not a held-out generalization result.
+          </div>
+          <div class="table-wrap">
+            <table aria-label="Matched rollout window metrics">
+              <thead><tr><th data-sort>Matched-window metric</th><th data-sort="num" class="num">Arm A · final</th><th data-sort="num" class="num">Arm B · best</th></tr></thead>
+              <tbody>
+                <tr><td>Final reward mean</td><td class="num best">0.271</td><td class="num">0.216</td></tr>
+                <tr><td>Best-trajectory reward mean</td><td class="num">0.369</td><td class="num best">0.392</td></tr>
+                <tr><td>Solve rate</td><td class="num best">3.55%</td><td class="num">3.42%</td></tr>
+                <tr><td>Masked sample fraction</td><td class="num">5.49%</td><td class="num">5.04%</td></tr>
+                <tr><td>Rollout wall time</td><td class="num">49.5 min</td><td class="num best">48.8 min</td></tr>
+                <tr><td>Fresh DAPO drops / step</td><td class="num">8.8</td><td class="num best">7.1</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid two">
+        <div class="card">
+          <div class="card-title">Arm A · final reward · final 10 rollouts</div>
+          <div class="grid two">
+            <div><strong>0.294</strong><div class="card-detail">final reward mean</div></div>
+            <div><strong>0.378</strong><div class="card-detail">best-trajectory mean</div></div>
+            <div><strong>3.28%</strong><div class="card-detail">solve rate</div></div>
+            <div><strong>0.000409</strong><div class="card-detail">mean PPO KL</div></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-title">Arm B · best reward · final 10 rollouts</div>
+          <div class="grid two">
+            <div><strong>0.227</strong><div class="card-detail">final reward mean</div></div>
+            <div><strong>0.413</strong><div class="card-detail">best-trajectory mean</div></div>
+            <div><strong>4.38%</strong><div class="card-detail">solve rate</div></div>
+            <div><strong>0.000402</strong><div class="card-detail">mean PPO KL</div></div>
+          </div>
+        </div>
+      </div>
+
+      <h3 class="subsection-title">Current-arm source audit</h3>
+      <div class="table-wrap">
+        <table id="current-source-audit" aria-label="Current-arm source audit">
+          <thead><tr><th data-sort>Arm</th><th data-sort>Evidence lineage</th><th data-sort>Coverage</th><th data-sort>Integrity qualification</th><th data-sort>Run links</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>Arm A · final</td>
+              <td>Merged W&amp;B retry segments and append-only snapshot manifests</td>
+              <td>84/84 updates; final metrics use matched steps 40–84</td>
+              <td>Resumed steps 40–84 accepted zero retro groups; 534 consumed snapshots belong to the earlier replay-active lineage.</td>
+              <td><a href="https://wandb.ai/junlinwang/Modal/runs/zgvorsmh">final segment</a> · <a href="https://wandb.ai/junlinwang/Modal/runs/82s4tjjn">20-step pilot</a></td>
+            </tr>
+            <tr>
+              <td>Arm B · best</td>
+              <td>Merged W&amp;B retry segments and append-only snapshot manifests</td>
+              <td>84/84 updates; checkpoint 84 being regenerated for evaluation</td>
+              <td>Resumed steps 40–84 accepted zero retro groups; 191 consumed snapshots belong to the earlier replay-active lineage.</td>
+              <td><a href="https://wandb.ai/junlinwang/Modal/runs/kefnldnq">final segment</a> · <a href="https://wandb.ai/junlinwang/Modal/runs/p2wi2nim">20-step pilot</a></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="lead"><strong>Next required result:</strong> run both final checkpoints on the same 38 Frontier-CS start states. Until then, the defensible conclusion is objective-specific behavior, not an Arm-A or Arm-B generalization win.</p>
+    </section>
+
+    <hr class="section-separator">
+
+    <section class="section" id="outcome-ablation">
+      <div class="panel-heading">
+        <div class="section-title"><span class="section-icon">⚖️</span> Prior outcome-reward ablation: O0, O1, and O2</div>
+        <a href="https://app.notion.com/p/38f1e7f16949806bb8e2e320e333f721#cd95d984de2d4d09837414c4befe312e">Source notes</a>
+      </div>
+      <div class="callout good">
+        <div class="callout-title">Prior verdict: train with O2, retain the best verified submission at inference</div>
+        O2—final reward plus a 0.3 solved bonus—had the best late final-solution quality and healthiest trajectory behavior. O1 raised the best point reached inside a trajectory, but did not improve the final saved solution over baseline; it also increased submissions and final regressions.
+      </div>
+      <div class="grid two">
+        <div class="chart-card">
+          <div class="chart-title">Best-of-trajectory reward by training objective</div>
+          <div class="chart-subtitle">Overall-run and last-15 rollout means</div>
+          <div class="chart" id="outcome-ablation-chart" role="img" aria-label="Best-of-trajectory rewards for O0, O1, and O2"></div>
+          <p class="source-note">Source: canonicalized W&amp;B retry segments and Modal rollout dumps · July 10–17, 2026.</p>
+        </div>
+        <div>
+          <div class="table-wrap">
+            <table aria-label="Last 15 rollout objective metrics">
+              <thead><tr><th data-sort>Last-15 metric</th><th data-sort="num" class="num">O0 final</th><th data-sort="num" class="num">O1 best</th><th data-sort="num" class="num">O2 bonus</th></tr></thead>
+              <tbody>
+                <tr><td>Best-of-trajectory reward</td><td class="num">0.299</td><td class="num best">0.378</td><td class="num">0.364</td></tr>
+                <tr><td>Final reward · usable episodes</td><td class="num">0.231</td><td class="num">0.229</td><td class="num best">0.263</td></tr>
+                <tr><td>Best − final · all samples</td><td class="num best">0.072</td><td class="num">0.168</td><td class="num">0.130</td></tr>
+                <tr><td>Solved fraction</td><td class="num">2.3%</td><td class="num best">3.6%</td><td class="num">3.0%</td></tr>
+                <tr><td>Submissions / episode</td><td class="num">8.2</td><td class="num">10.6</td><td class="num best">6.1</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p>O2’s late final reward was approximately 14% above baseline and 15% above O1. O1’s late peak reward was highest, but final reward matched baseline while the best-minus-final gap more than doubled.</p>
+        </div>
+      </div>
+
+      <div class="grid three">
+        <div class="card">
+          <div class="card-title">O0 · final-reward baseline</div>
+          <p>Train on final verifier reward. Late trajectories retained their best work more reliably than O1 while leaving 0.072 reward of inference-time headroom.</p>
+          <p class="muted">87 rollout dumps · steps 0–86 · sync non-colocate · no DAPO filter.</p>
+          <p><a href="https://wandb.ai/junlinwang/Modal/runs/wp9zjtte">Anchor W&amp;B run</a></p>
+        </div>
+        <div class="card">
+          <div class="card-title">O1 · best-of-trajectory</div>
+          <p>Train on max(final, best submitted). It learned higher peaks but did not preserve them: 55% of late episodes had best greater than final, and submission rate crossed the roughly 10-per-episode watchdog.</p>
+          <p class="muted">94 rollout dumps · steps 0–93 · async + DAPO.</p>
+          <p><a href="https://wandb.ai/junlinwang/Modal/runs/itk9izyh">Anchor W&amp;B run</a></p>
+        </div>
+        <div class="card">
+          <div class="card-title">O2 · final + solved bonus <span class="badge pass">preferred</span></div>
+          <p>Train on final + 0.3 × solved. The sparse correctness bonus improved the deliverable without O1’s submission pressure: late final reward 0.263 with 6.1 submissions per episode.</p>
+          <p class="muted">90 rollout dumps · steps 0–89 · async + DAPO.</p>
+          <p><a href="https://wandb.ai/junlinwang/Modal/runs/4tgxppeo">Anchor W&amp;B run</a></p>
+        </div>
+      </div>
+
+      <h3>Source audit: every W&amp;B relaunch and canonical Modal dump lineage</h3>
+      <div class="table-wrap">
+        <table id="prior-source-audit" aria-label="Prior objective source audit">
+          <thead><tr><th data-sort>Arm</th><th data-sort>W&amp;B retry segments in chronological order</th><th data-sort>Canonical dump coverage</th><th data-sort>Modal source</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>O0 baseline</td>
+              <td><code>wlsx81c7 · hur5e45y · cp76mcar · zk7x91il · gg88dwpf · o22dad4t · wp9zjtte</code></td>
+              <td>87 train dumps, steps 0–86; 14 eval dumps at steps 14–79</td>
+              <td><a href="https://modal-labs-junlin-dev--swe-rollout-dashboard-dashboard.modal.run/#qwen3.6-27b-frontier-cs-noncolocate-5n-baseline-20260710-125341">Baseline dumps</a></td>
+            </tr>
+            <tr>
+              <td>O1 best</td>
+              <td><code>ekkob2xs · lw8maga2 · birpnltv · itk9izyh</code></td>
+              <td>94 train dumps, steps 0–93; no eval dumps</td>
+              <td><a href="https://modal-labs-junlin-dev--swe-rollout-dashboard-dashboard.modal.run/#qwen3.6-27b-frontier-cs-o1-best-20260714-225603">O1 dumps</a></td>
+            </tr>
+            <tr>
+              <td>O2 bonus</td>
+              <td><code>wm5bjtnq · ibiwp3q6 · 4tgxppeo</code></td>
+              <td>90 train dumps, steps 0–89; no eval dumps</td>
+              <td><a href="https://modal-labs-junlin-dev--swe-rollout-dashboard-dashboard.modal.run/#qwen3.6-27b-frontier-cs-o2-bonus-20260714-235055">O2 dumps</a></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="grid two">
+        <div class="card">
+          <h3>How reported metrics were reconstructed</h3>
+          <p>W&amp;B retries overlap because relaunches resume from checkpoints. For each rollout step, the later retry segment is canonical; the corresponding Modal dump path is overwritten by that relaunch and serves as sample-level source of truth.</p>
+          <pre><code>baseline_best = rollout/raw_reward
+  + agentic/outcome/uplift/mean × (1 − agentic/removed_frac)</code></pre>
+          <p class="muted">Direct dump validation: baseline best reward 0.223 at step 0, 0.224 at step 40, and 0.266 at step 80. Reconstruction agrees within about 0.001 after the duplicate-heavy first step.</p>
+        </div>
+        <div class="callout warn">
+          <div class="callout-title">Comparison limits</div>
+          O1 versus O2 is the clean head-to-head: identical async + DAPO infrastructure and only reward shaping differs. O0 is sync and has no DAPO filter, so its absolute level is partially confounded. O1 and O2 have no matched held-out eval dumps; this verdict rests on training trajectories and server-side submission records, not a three-way start-state evaluation.
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="phase-zero-one">
+      <div class="section-title"><span class="section-icon">🧭</span> Live Phase 0/1 results</div>
+      <div class="grid four">
+        <div class="card"><div class="card-value">1.17 s</div><div class="card-detail">directory snapshot creation</div></div>
+        <div class="card"><div class="card-value">2.37 s</div><div class="card-detail">median of 8 isolated CPU restores</div></div>
+        <div class="card"><div class="card-value">3 / 8</div><div class="card-detail">eligible snapshots from one root group</div></div>
+        <div class="card"><div class="card-value">0.08</div><div class="card-detail">reward range across first sibling group</div></div>
+      </div>
+      <div class="grid two">
+        <div class="chart-card">
+          <div class="chart-title">First real Frontier-CS sibling group: final rewards</div>
+          <div class="chart-subtitle">Eight restored continuations · inherited snapshot score 0.927245</div>
+          <div class="chart" id="sibling-chart" role="img" aria-label="Final rewards for eight restored sibling continuations"></div>
+          <p class="source-note">Source: W&amp;B run 1jdzua14 and rollout_0 dump · August 1, 2026. Snapshot turn 29; eight suffixes ran under one behavior version.</p>
+        </div>
+        <div>
+          <div class="callout good">
+            <div class="callout-title">The key Phase-1 premise survived</div>
+            Siblings were isolated, resumed the exact task state, and produced non-degenerate outcomes. Six of eight exceeded the inherited score; mean final reward was 0.9288, best-of-eight was 0.95, and no branch solved fully.
+          </div>
+          <p>The one-group result is not evidence of learning benefit. It establishes that the branch topology yields a useful conditional comparison rather than eight identical rewards. Mean branch episode time was 166 seconds versus 458 seconds for the root group.</p>
+          <p>The API smoke also verified writable directory snapshots and sibling isolation. Local Modal 1.4.1 lacks TTL arguments; training images use Modal 1.5.3, and consumed snapshots are explicitly deleted.</p>
+          <div class="links">
+            <a href="https://wandb.ai/junlinwang/Modal/runs/6mdzwijh">Capture run</a>
+            <a href="https://wandb.ai/junlinwang/Modal/runs/1jdzua14">Sibling survey run</a>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="phase-two-smoke">
+      <div class="section-title"><span class="section-icon">🔧</span> Phase-2 paired engineering smoke</div>
+      <div class="callout good">
+        <div class="callout-title">Both reward arms completed one rollout, one retro group, and one optimizer update</div>
+        Arm A trained on final/last-solution reward plus retro replay. Arm B trained on max(final, best submitted) plus the identical retro topology. Each step contained exactly three fresh groups and one eight-sibling retro group; snapshot capture, restore, training, and weight synchronization all completed.
+      </div>
+      <div class="grid four">
+        <div class="card"><div class="card-value">3 + 1</div><div class="card-detail">fresh + retro groups in each smoke step</div></div>
+        <div class="card"><div class="card-value">0</div><div class="card-detail">retro generation failures</div></div>
+        <div class="card"><div class="card-value">0.00013</div><div class="card-detail">Arm A PPO KL</div></div>
+        <div class="card"><div class="card-value">0.00024</div><div class="card-detail">Arm B PPO KL</div></div>
+      </div>
+      <div class="table-wrap">
+        <table aria-label="Paired engineering smoke results">
+          <thead><tr><th data-sort>Smoke arm</th><th data-sort="num" class="num">Final reward mean</th><th data-sort="num" class="num">Trained reward mean</th><th data-sort="num" class="num">Uplift diagnostic</th><th data-sort>Rollout / train time</th><th data-sort>W&amp;B</th></tr></thead>
+          <tbody>
+            <tr><td>A · final + retro</td><td class="num">0.1047</td><td class="num">0.1047</td><td class="num best">0.1855</td><td>22.3 min / 6.6 min</td><td><a href="https://wandb.ai/junlinwang/Modal/runs/sc860m44">sc860m44</a></td></tr>
+            <tr><td>B · best + retro</td><td class="num best">0.2877</td><td class="num best">0.3212</td><td class="num">0.0335</td><td>24.6 min / 9.2 min</td><td><a href="https://wandb.ai/junlinwang/Modal/runs/c7r70s20">c7r70s20</a></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout warn">
+        <div class="callout-title">Do not interpret the reward difference as an Arm-B win</div>
+        These pipeline smokes preceded deterministic prompt pairing, so the arms saw different task streams. Configs are now locked to the same prompt order and per-sibling sampling seeds. A matched multi-step run—not these single points—must answer the reward question. The mixer also now caps uninformative retro DAPO attempts at three and falls back to fresh groups.
+      </div>
+    </section>
+
+    <section class="section" id="assessment">
+      <div class="callout warn">
+        <div class="callout-title">Novelty warning: snapshot branching alone is no longer novel</div>
+        <a href="https://arxiv.org/abs/2607.14171">Branching Policy Optimization</a>, posted July 15, already proposes sandbox snapshots, high-entropy branch points, sibling rollouts, and matched-compute optimization. The defensible contribution here is asynchronous cross-update replay of recent states, recovery-oriented selection using continuous judge trajectories, and an explicit cost/fidelity study on real Frontier-CS containers.
+      </div>
+      <div class="section-title"><span class="section-icon">🔬</span> Assessment</div>
+      <div class="grid two">
+        <div class="card">
+          <h3>Why the idea is promising</h3>
+          <p>Eight continuations from the exact same state form a cleaner comparison than eight independent episodes. They condition out prefix variance, reuse expensive tool work, and directly expose whether the policy can improve or repair a concrete partial solution. Frontier-CS is suitable because it has continuous scores, iterative submissions, and observable regressions.</p>
+        </div>
+        <div class="card">
+          <h3>What must be claimed carefully</h3>
+          <p>A past snapshot changes the reset-state distribution. This is not an unbiased policy gradient for episodes starting from the original problem. It is a mixed reset curriculum: suffix actions are on-policy, but states are sampled from a recent replay distribution. Start-state evaluation must remain the scientific endpoint.</p>
+        </div>
+      </div>
+
+      <h3>How this differs from adjacent work</h3>
+      <div class="table-wrap">
+        <table aria-label="Adjacent research comparison">
+          <thead><tr><th data-sort>Method</th><th data-sort>Where branches come from</th><th data-sort>Selection signal</th><th data-sort>Training target</th><th data-sort>Relation to this project</th></tr></thead>
+          <tbody>
+            <tr><td><a href="https://arxiv.org/abs/2607.14171">BPO</a></td><td>Same-step on-policy backbone</td><td>First-token action entropy</td><td>Sibling baseline with shared-prefix credit</td><td>Closest prior work; core snapshot-tree idea is covered.</td></tr>
+            <tr><td><a href="https://arxiv.org/abs/2602.03719">BranPO</a></td><td>Hindsight tail truncation</td><td>Difficulty and contrastive outcomes</td><td>Base and branch relative advantages</td><td>Supports late, contrastive branching and warns against all-equal branches.</td></tr>
+            <tr><td><a href="https://proceedings.mlr.press/v267/kazemnejad25a.html">VinePPO</a></td><td>Intermediate states in one trajectory</td><td>Uniform Monte Carlo value queries</td><td>Monte Carlo value estimation</td><td>Motivates state resets, but not persistent sandbox replay.</td></tr>
+            <tr><td><a href="https://bethgelab.github.io/delta-belief-rl/">ΔBelief-RL</a></td><td>No environment fork required</td><td>Change in target-answer likelihood</td><td>Turn-wise intrinsic reward</td><td>Exact-solution likelihood is ill-defined for many valid C++ solutions.</td></tr>
+            <tr><td><strong>Proposed retro replay</strong></td><td>Recent snapshots from earlier async groups</td><td>Promising-unsolved and recovery events</td><td>Current-policy suffix GRPO under mixed resets</td><td><strong>Novel angle: cross-update async replay, continuous optimization, and recovery.</strong></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="section" id="data-flow">
+      <div class="section-title"><span class="section-icon">↪️</span> Proposed data flow</div>
+      <div class="flow">
+        <div class="flow-step"><strong>Fresh async group</strong><span>Normal Frontier-CS rollout; 8 independent starts</span></div><span class="flow-arrow">→</span>
+        <div class="flow-step"><strong>Eligible turn event</strong><span>Intermediate score or post-regression/stall boundary</span></div><span class="flow-arrow">→</span>
+        <div class="flow-step accent"><strong>Snapshot + manifest</strong><span>Filesystem plus exact agent/token state; TTL and versioned</span></div><span class="flow-arrow">→</span>
+        <div class="flow-step"><strong>Recent retro buffer</strong><span>Bounded by age, task diversity, TTL, and one-use leases</span></div><span class="flow-arrow">→</span>
+        <div class="flow-step accent"><strong>8 restored siblings</strong><span>Same state; current policy; independent sandbox and AGENT_ID</span></div><span class="flow-arrow">→</span>
+        <div class="flow-step"><strong>Ordinary GRPO group</strong><span>Final rewards normalized within siblings; suffix tokens only</span></div>
+      </div>
+      <p class="muted">The asynchronous worker must never wait for retro data. Empty or invalid replay falls back to a fresh group.</p>
+    </section>
+
+    <section class="section" id="snapshot-primitive">
+      <div class="section-title"><span class="section-icon">📸</span> Snapshot primitive and complete continuation state</div>
+      <div class="table-wrap">
+        <table aria-label="Modal snapshot primitive comparison">
+          <thead><tr><th data-sort>Modal primitive</th><th data-sort>API maturity</th><th data-sort>What it preserves</th><th data-sort>Fit</th><th data-sort>Decision</th></tr></thead>
+          <tbody>
+            <tr><td>Filesystem snapshot</td><td>Supported</td><td>Writable filesystem diff from task image</td><td>Direct whole-sandbox restore; may include logs and caches</td><td>Primary smoke candidate</td></tr>
+            <tr><td>Directory snapshot of <code>/app</code></td><td>Public beta</td><td>Only workspace/project files</td><td>Smaller and instant-mount oriented; write behavior must be tested</td><td class="best">Preferred when safely writable</td></tr>
+            <tr><td>Memory snapshot</td><td>Early preview</td><td>Filesystem, memory, and processes</td><td>Agent loop is outside sandbox; source terminates and snapshots expire after 7 days</td><td>Do not use</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout bad">
+        <div class="callout-title">A filesystem image is not complete agent state</div>
+        The mini-swe agent and <code>RecordingModel</code> live in the rollout head process, not inside Modal Sandbox. A valid branch requires both container state and a serialized conversation/token checkpoint. Restoring only <code>/app</code> is not Markov-sufficient.
+      </div>
+      <div class="links">
+        <a href="https://modal.com/docs/guide/sandbox-snapshots">Modal snapshot documentation</a>
+        <a href="file:///Users/junlin/Documents/Research/async-rl/slime/agentic_rl/sandbox.py">sandbox.py</a>
+        <a href="file:///Users/junlin/Documents/Research/async-rl/slime/agentic_rl/environment/harbor.py">environment/harbor.py</a>
+        <a href="file:///Users/junlin/Documents/Research/async-rl/slime/agentic_rl/model.py">model.py</a>
+      </div>
+
+      <div class="card subsection">
+        <div class="card-title">Required association key · RetroSnapshotManifest</div>
+        <div class="grid two">
+          <div>
+            <h3>Identity and compatibility</h3>
+            <p class="muted">Snapshot image ID; run tag; parent rollout/group/sample IDs; Frontier task/problem IDs; base-image, data, and code fingerprints; Modal and mini-swe versions; creation time and TTL.</p>
+            <h3>Policy provenance</h3>
+            <p class="muted">Source and branch weight versions; source age; branch seed; original turn index and remaining step/time budget.</p>
+          </div>
+          <div>
+            <h3>Exact continuation state</h3>
+            <p class="muted">Messages and counters; exact chain token IDs; seen-message hashes; prompt boundary; last observation; task text; current and best scores; branch event type.</p>
+            <h3>Lifecycle</h3>
+            <p class="muted">Available/leased/consumed/deleted state; restore attempts and failure reason; create/restore latency; estimated bytes; consuming rollout ID.</p>
+          </div>
+        </div>
+        <p>Persist each manifest inside parent sample metadata and in an append-only checkpoint-volume index. Modal exposes no API to list every snapshot, so the index is required for restart recovery, deletion, and cost control.</p>
+      </div>
+    </section>
+
+    <section class="section" id="algorithm">
+      <div class="section-title"><span class="section-icon">🧩</span> Minimal algorithm</div>
+      <div class="grid two">
+        <div class="card"><h3>Training mixture</h3><p>Keep 32 groups fixed: 24 fresh and 8 retro. Each retro group restores one snapshot into eight independent sandboxes. Siblings share <code>group_index</code> but retain distinct sample and rollout IDs.</p></div>
+        <div class="card"><h3>On-policy suffix, masked prefix</h3><p>Reconstruct conditioning exactly, loss-mask the inherited prefix, and record logprobs only for new suffix tokens. Pin siblings to one behavior version; cap source age at four updates and monitor importance-ratio ESS.</p></div>
+        <div class="card"><h3>One simple reward</h3><p>Train on final fractional verifier score. Log improvement over snapshot and branch-local best, but do not shape on them initially or inherit the parent’s best submission.</p></div>
+        <div class="card"><h3>Same remaining horizon</h3><p>Give each sibling only the parent’s remaining step and wall-time budget. A branch cannot receive 75 fresh turns from a 70%-complete state without changing compute and horizon.</p></div>
+      </div>
+      <div class="callout good">
+        <div class="callout-title">Final reward is the right first version</div>
+        Within one sibling group, subtracting the snapshot score from every final reward is an additive constant. GRPO centering removes it, so absolute final reward and improvement reward produce the same normalized advantages. Train on final reward; log improvement for analysis.
+      </div>
+      <p class="source-note">Formal objective: optimize 0.75 × start-state return + 0.25 × return from the selected recent-state distribution. This is a deliberate reset curriculum, not an unchanged start-state objective.</p>
+    </section>
+
+    <section class="section" id="selector">
+      <div class="section-title"><span class="section-icon">🌿</span> Which trajectories and turns should branch?</div>
+      <div class="callout">
+        <div class="callout-title">Choose branchable states, not merely good or bad trajectories</div>
+        Good or solved states often make every sibling succeed; arbitrary bad states often make every sibling fail. Both yield zero-variance groups. The useful target is a state whose current-policy continuations are likely to diverge—especially a repairable state or an unsolved state with demonstrated progress and budget left.
+      </div>
+      <div class="table-wrap">
+        <table aria-label="Retro replay state selector">
+          <thead><tr><th data-sort>State class</th><th data-sort>Online trigger</th><th data-sort>Why it may teach</th><th data-sort="num" class="num">Initial share</th></tr></thead>
+          <tbody>
+            <tr><td>Promising, unsolved</td><td>Score enters an intermediate band (roughly 0.1–0.95), after ≥2 turns, with ≥30% budget remaining</td><td>Exploitation: approach is working, but continuation quality determines the result</td><td class="num">50%</td></tr>
+            <tr><td>Recovery</td><td>Score drops materially, or two scored submissions fail to improve, with ≥30% budget remaining</td><td>Correction: repair the policy’s own bad state rather than restart</td><td class="num">50%</td></tr>
+            <tr><td>Exclude</td><td>Solved, no scored submission, invalid units, infrastructure failure, or near-zero remaining budget</td><td>Avoid trivial, irrecoverable, corrupted, and unfair groups</td><td class="num">0%</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Take at most one snapshot per parent episode, immediately after tool result and observation commit, never while <code>Sandbox.exec</code> is running. Reset local submission logs and assign a new <code>AGENT_ID</code> to each sibling.</p>
+      <p class="muted"><strong>Why not fixed 50%, 70%, or ΔBelief?</strong> Fixed percentages ignore whether a useful transition occurred and are undefined until final trajectory length is known. ΔBelief needs likelihood of a unique target answer; Frontier-CS admits many valid programs. Log NLL and first-token entropy as exploratory features, not the first selector.</p>
+    </section>
+
+    <section class="section" id="experiment-plan">
+      <div class="section-title"><span class="section-icon">🗺️</span> Three-phase experiment plan</div>
+      <div class="grid three">
+        <div class="card">
+          <div class="card-title">Phase 0 · snapshot fidelity and cost smoke</div>
+          <p>Run 20 filesystem and 20 directory snapshots across small and large workspaces. Restore eight siblings and verify independent edit, compile, submit, and grade behavior.</p>
+          <p class="muted">Proceed only with 100% state/prompt fidelity, no cross-sibling contamination, and small p95 snapshot-plus-restore overhead.</p>
+        </div>
+        <div class="card">
+          <div class="card-title">Phase 1 · branchability survey</div>
+          <p>Collect 64 eligible snapshots and eight current-policy continuations each. Stratify one survey across random-middle, promising-unsolved, recovery, and high-surprisal candidates.</p>
+          <p class="muted">Do not train until retro groups produce useful reward contrast at cost no worse than fresh groups.</p>
+        </div>
+        <div class="card">
+          <div class="card-title">Phase 2 · compute-matched training A/B</div>
+          <p>Start both arms from the same clean checkpoint and fingerprint. Replace 8 of 32 fresh groups with retro groups; reward strategy is the sole difference.</p>
+          <p class="muted">Evaluate all 38 Frontier-CS problems at step 0 and every five steps. Continue beyond the pilot only on held-out efficiency improvement.</p>
+        </div>
+      </div>
+      <div class="callout good">
+        <div class="callout-title">Primary claim if successful</div>
+        Best-submission outcome reward handles late trajectory regressions more effectively than final-only reward when both policies learn from the same fresh/retro mixture, improving start-state Frontier-CS performance per GPU-hour.
+      </div>
+    </section>
+
+    <section class="section" id="cost-envelope">
+      <div class="section-title"><span class="section-icon">💵</span> Cost envelope</div>
+      <div class="grid four">
+        <div class="card"><div class="card-value">$4.54</div><div class="card-detail">one H200-hour at current Modal price</div></div>
+        <div class="card"><div class="card-value">$217.90</div><div class="card-detail">48-H200 cluster per hour</div></div>
+        <div class="card"><div class="card-value">$127</div><div class="card-detail">GPU cost per 35-minute rollout step</div></div>
+        <div class="card"><div class="card-value">$0.664</div><div class="card-detail">4-core, 4-GiB branch sandbox per hour</div></div>
+      </div>
+      <div class="grid two">
+        <div class="chart-card">
+          <div class="chart-title">CPU sandbox cost for one 8-sibling retro group</div>
+          <div class="chart-subtitle">Estimated USD by mean remaining runtime per sibling</div>
+          <div class="chart" id="branch-cost-chart" role="img" aria-label="Sandbox cost for one retro group by remaining runtime"></div>
+          <p class="source-note">Modal Sandbox pricing on August 9, 2026; 4 physical cores + 4 GiB per branch. Excludes model-serving GPUs and judge CPU.</p>
+        </div>
+        <div class="chart-card">
+          <div class="chart-title">Compute-matched two-arm GPU envelope</div>
+          <div class="chart-subtitle">Estimated H200 cost by training steps per arm</div>
+          <div class="chart" id="training-cost-chart" role="img" aria-label="Estimated two-arm training GPU costs"></div>
+          <p class="source-note">$0.001261/H200-second and 35 minutes/step; excludes evaluation, startup, checkpoints, preemption, sandboxes, and contingency.</p>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table aria-label="Cost estimate details">
+          <thead><tr><th data-sort>Item</th><th data-sort>Working estimate</th><th data-sort>Interpretation</th></tr></thead>
+          <tbody>
+            <tr><td>Snapshot RPC itself</td><td>$0.0004 at 2 s; $0.0018 at 10 s; $0.010 at 55 s</td><td>Compute billing is negligible; latency and straggler impact matter more.</td></tr>
+            <tr><td>Phase 0 smoke</td><td>Likely under $2 CPU-side, plus one small real-model group</td><td>Do not use the 48-H200 topology for API smoke.</td></tr>
+            <tr><td>Phase 1 survey</td><td>About $57 branch cost at 10 min average; model fleet roughly $145–$436 for 1–3 h</td><td>Measure actual suffix time and GPU occupancy.</td></tr>
+            <tr><td>20-step two-arm pilot</td><td>About $5.1k GPU-only; budget $5.6k–$6.1k with contingency</td><td>The scientific training run dominates total cost.</td></tr>
+            <tr><td>Snapshot storage</td><td>Not quotable from public pricing</td><td>Measure dashboard storage delta; use 48 h TTL and delete on consumption.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Keep the 32-group budget fixed. If retro is added on top, every 10% step-wall-time increase costs about another $12.70 per step on the 48-H200 cluster. Replacement, not addition, is essential.</p>
+      <p><a href="https://modal.com/pricing">Current Modal pricing</a></p>
+    </section>
+
+    <section class="section" id="failure-modes">
+      <div class="section-title"><span class="section-icon">🛡️</span> Major failure modes and safeguards</div>
+      <div class="table-wrap">
+        <table aria-label="Retro replay failure modes">
+          <thead><tr><th data-sort>Risk</th><th data-sort>Why it matters</th><th data-sort>Required safeguard</th></tr></thead>
+          <tbody>
+            <tr><td>State is not fully restored</td><td>Filesystem, conversation, token conditioning, judge attribution, and budget can disagree</td><td>Hash prompt tokens and workspace files; new AGENT_ID; compatibility fingerprint; fail closed.</td></tr>
+            <tr><td>Replay objective drifts from start-state task</td><td>Training can improve only on curated reset states</td><td>Keep retro at 25%; suffix-only gradients; short age cap; full start-state eval is primary.</td></tr>
+            <tr><td>Too-good or irrecoverable states</td><td>All eight rewards match and DAPO drops the group</td><td>Select intermediate/recovery events; measure nonzero-std yield before training.</td></tr>
+            <tr><td>Inherited reward leakage</td><td>A branch could receive credit for the parent’s earlier best</td><td>Use branch final reward; reset local logs; inherited score is analysis metadata only.</td></tr>
+            <tr><td>Stale policy state</td><td>Suffix actions are current, but reset states came from older policies</td><td>Track source/branch versions; one behavior version per group; age≤4; monitor ESS and ratio tails.</td></tr>
+            <tr><td>Snapshot leaks and expiry</td><td>Modal has no snapshot-list API; images can accumulate or expire mid-use</td><td>Append-only manifest, explicit lease/delete, 48 h TTL, restart reconciliation.</td></tr>
+            <tr><td>Prefix-cache and routing loss</td><td>Eight long shared prefixes may be prefetched on different engines</td><td>Measure cache hit and compare affinity grouping with sharded routing.</td></tr>
+            <tr><td>Confounded first experiment</td><td>Changing replay, reward, and batch together prevents attribution</td><td>Fork clean async baseline; change only rollout source mixture.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="section" id="spin-off">
+      <div class="section-title"><span class="section-icon">🗂️</span> Clean spin-off plan</div>
+      <p>Create dedicated branches in the relevant nested repositories. Keep stable agentic code reusable and isolate the research surface behind a new config and hook package; do not mix in unrelated turn-reward work.</p>
+      <div class="table-wrap">
+        <table aria-label="Planned retro replay files">
+          <thead><tr><th data-sort>Planned file</th><th data-sort>Responsibility</th></tr></thead>
+          <tbody>
+            <tr><td><code>multinode-training-guide/slime/configs/w_qwen3_6_27b_frontier_cs_retro_async.py</code></td><td>Clean async 27B config with retro ratio, age, TTL, selector, and hooks.</td></tr>
+            <tr><td><code>slime/agentic_rl/retro/manifest.py</code></td><td>Versioned snapshot and agent-state schema with compatibility validation.</td></tr>
+            <tr><td><code>slime/agentic_rl/retro/snapshot.py</code></td><td>Create, restore, delete, leases, and metrics.</td></tr>
+            <tr><td><code>slime/agentic_rl/retro/agent.py</code></td><td>Turn-boundary hook and exact continuation from serialized mini-swe state.</td></tr>
+            <tr><td><code>slime/agentic_rl/retro/model.py</code></td><td>Seed RecordingModel with exact masked token prefix.</td></tr>
+            <tr><td><code>slime/agentic_rl/retro/selector.py</code></td><td>Promising/recovery eligibility and one-snapshot policy.</td></tr>
+            <tr><td><code>slime/agentic_rl/retro/buffer.py</code></td><td>Bounded recent-state queue, persistence, age/TTL checks, and recovery.</td></tr>
+            <tr><td><code>slime/agentic_rl/retro/generate.py</code></td><td>Fresh capture and restored suffix-generation paths.</td></tr>
+            <tr><td><code>slime/agentic_rl/retro/rollout.py</code></td><td>75/25 async mixer with fresh fallback and ordinary group output.</td></tr>
+            <tr><td><code>slime/tests/test_agent/test_retro_*.py</code></td><td>Manifest, prefix, masking, isolation, reward, age, and restart tests.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="links">
+        <a href="file:///Users/junlin/Documents/Research/async-rl/multinode-training-guide/slime/configs/w_qwen3_6_27b_frontier_cs_noncolocate_5n_async.py">clean async config</a>
+        <a href="file:///Users/junlin/Documents/Research/async-rl/slime/agentic_rl/generate.py">current generate hook</a>
+        <a href="file:///Users/junlin/Documents/Research/async-rl/slime/slime/rollout/fully_async_rollout.py">fully-async worker</a>
+        <a href="file:///Users/junlin/Documents/Research/async-rl/slime/slime/utils/types.py">Sample schema</a>
+      </div>
+    </section>
+
+    <div class="verdict go">
+      <span class="verdict-badge">Decision rule</span>
+      <h2>What success looks like</h2>
+      <p>Advance beyond the pilot only if retro replay improves full held-out Frontier-CS reward AUC or solve rate per GPU-hour, while increasing informative-group yield and measured recovery, with no material degradation in asynchronous staleness, submission load, stability, or USACO transfer.</p>
+      <p class="muted">The strongest research story is not “snapshots make rollouts cheaper.” It is that recent, repairable states define a useful auxiliary reset distribution that teaches an asynchronous coding agent to recover and continue optimizing—and that the benefit survives evaluation from the original problem start.</p>
+    </div>
+  </section>
+
+  <section class="tab-panel" id="five-arm-curves">
+    <div class="panel-heading">
+      <div>
+        <h2>Five-arm head-to-head curves</h2>
+        <p class="subtitle">Baseline O0, O1, O2, current Arm A, and current Arm B · first 85 optimizer steps · 7-step trailing means.</p>
+      </div>
+      <span class="badge info">sampled every 5 steps + step 84</span>
+    </div>
+
+    <div class="legend" aria-label="Five-arm chart legend">
+      <strong>Arm identity</strong>
+      <span class="legend-item"><span class="legend-swatch" style="background:var(--arm-baseline)"></span> Baseline O0 · final reward, sync/no DAPO</span>
+      <span class="legend-item"><span class="legend-swatch" style="background:var(--arm-o1)"></span> O1 · best reward</span>
+      <span class="legend-item"><span class="legend-swatch" style="background:var(--arm-o2)"></span> O2 · final + solved bonus</span>
+      <span class="legend-item"><span class="legend-swatch" style="background:var(--arm-retro-a)"></span> Retro A · final reward</span>
+      <span class="legend-item"><span class="legend-swatch" style="background:var(--arm-retro-b)"></span> Retro B · best reward</span>
+    </div>
+
+    <div class="callout warn">
+      <div class="callout-title">Same chart does not mean same experiment cohort</div>
+      These overlays share optimizer-step axes and metric definitions, but are descriptive rather than a five-way paired experiment. O1 versus O2 is paired within the older seed-42 async+DAPO cohort. Retro A versus Retro B is paired within the deterministic seed-20260802 cohort. Baseline O0 is sync without DAPO. Current arms use a different prompt order, and resumed steps 40–84 fell back to fresh-only generation.
+    </div>
+
+    <section class="section">
+      <div class="chart-card">
+        <div class="chart-title">Best reward achieved anywhere in trajectory</div>
+        <div class="chart-subtitle">Mean max(final, best submitted) reward (0–1) by optimizer step</div>
+        <div class="chart" id="curve-best" role="img" aria-label="Five-arm best trajectory reward curves"></div>
+        <p class="source-note">Source: canonical W&amp;B retry records; baseline reconstructed from final reward plus usable-episode uplift and validated against Modal rollout dumps.</p>
+      </div>
+      <div class="grid two">
+        <div class="chart-card">
+          <div class="chart-title">Final reward</div>
+          <div class="chart-subtitle">Mean final verifier reward (0–1)</div>
+          <div class="chart" id="curve-final" role="img" aria-label="Five-arm final reward curves"></div>
+        </div>
+        <div class="chart-card">
+          <div class="chart-title">Best − final gap</div>
+          <div class="chart-subtitle">All-sample reward difference (0–1)</div>
+          <div class="chart" id="curve-gap" role="img" aria-label="Five-arm best minus final reward gap curves"></div>
+        </div>
+        <div class="chart-card">
+          <div class="chart-title">Solved fraction</div>
+          <div class="chart-subtitle">Fraction of episodes solved (0–1)</div>
+          <div class="chart" id="curve-solved" role="img" aria-label="Five-arm solved fraction curves"></div>
+        </div>
+        <div class="chart-card">
+          <div class="chart-title">Submissions per episode</div>
+          <div class="chart-subtitle">Mean server-side submissions; dashed line marks watchdog at 10</div>
+          <div class="chart" id="curve-submissions" role="img" aria-label="Five-arm submissions per episode curves"></div>
+        </div>
+      </div>
+      <p class="source-note">All five panels use canonicalized W&amp;B retry segments, rollout steps 0–84. Later relaunch records replace duplicate step IDs; current-arm records follow actual checkpoint lineage across restarts. Embedded arrays are the source canvas’s exact 17-point trailing-mean series.</p>
+    </section>
+
+    <section class="section" id="step-84-endpoint">
+      <div class="section-title"><span class="section-icon">🏁</span> Step-84 smoothed endpoint</div>
+      <div class="table-wrap">
+        <table id="endpoint-table" aria-label="Five-arm step 84 endpoint metrics">
+          <thead><tr><th data-sort>Arm</th><th data-sort="num" data-goal="max" class="num">Best</th><th data-sort="num" data-goal="max" class="num">Final</th><th data-sort="num" data-goal="min" class="num">Gap</th><th data-sort="num" data-goal="max" class="num">Solved</th><th data-sort="num" data-goal="min" class="num">Submissions</th></tr></thead>
+          <tbody>
+            <tr class="endpoint-row"><td class="arm-baseline">Baseline O0</td><td class="num">0.269</td><td class="num">0.215</td><td class="num best">0.058</td><td class="num">2.29%</td><td class="num">8.21</td></tr>
+            <tr class="endpoint-row"><td class="arm-o1">O1 best</td><td class="num">0.386</td><td class="num">0.244</td><td class="num">0.170</td><td class="num">3.96%</td><td class="num">8.98</td></tr>
+            <tr class="endpoint-row"><td class="arm-o2">O2 bonus</td><td class="num">0.346</td><td class="num">0.234</td><td class="num">0.134</td><td class="num">1.95%</td><td class="num best">6.16</td></tr>
+            <tr class="endpoint-row"><td class="arm-retro-a">Retro A final</td><td class="num">0.386</td><td class="num best">0.300</td><td class="num">0.089</td><td class="num">3.40%</td><td class="num">10.46</td></tr>
+            <tr class="endpoint-row"><td class="arm-retro-b">Retro B best</td><td class="num best">0.414</td><td class="num">0.222</td><td class="num">0.198</td><td class="num best">4.30%</td><td class="num">17.93</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="grid two">
+        <div class="callout">
+          <div class="callout-title">The objective signature is consistent across cohorts</div>
+          Final-reward training produces smaller best-final gaps; best-reward training produces higher peaks but much larger regressions and submission counts. Current Arm B is the strongest example: best reward 0.414, final reward 0.222, and nearly 18 submissions per episode.
+        </div>
+        <div class="callout good">
+          <div class="callout-title">Most defensible comparison</div>
+          Within the current pair, Arm A ends with much higher final reward and smaller regression gap; Arm B has higher peak reward and solved fraction. Within the older pair, O2 remains preferable to O1 because it improves final quality without O1’s submission escalation.
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="causal-comparisons">
+      <div class="section-title"><span class="section-icon">🧷</span> Which comparisons are actually causal?</div>
+      <div class="table-wrap">
+        <table aria-label="Causal status of arm comparisons">
+          <thead><tr><th data-sort>Comparison</th><th data-sort>Prompt / infrastructure match</th><th data-sort>What it can answer</th></tr></thead>
+          <tbody>
+            <tr><td>O1 vs O2</td><td>Clean: seed 42, async + DAPO, same topology</td><td>Effect of best reward versus solved bonus</td></tr>
+            <tr><td>Retro A vs Retro B</td><td>Clean within each matched step; seed 20260802</td><td>Effect of final versus best reward in the current lineage, but not retro benefit in steps 40–84</td></tr>
+            <tr><td>O0 vs O1/O2</td><td>Confounded: O0 is sync and has no DAPO</td><td>Descriptive historical baseline only</td></tr>
+            <tr><td>Older cohort vs current arms</td><td>Confounded: prompt order, deterministic inference, and retro/fallback paths differ</td><td>Shape and failure-mode comparison, not lift</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="links">
+        <a href="https://app.notion.com/p/38f1e7f16949806bb8e2e320e333f721#cd95d984de2d4d09837414c4befe312e">Prior experiment notes</a>
+        <a href="https://wandb.ai/junlinwang/Modal/runs/zgvorsmh">Retro A final segment</a>
+        <a href="https://wandb.ai/junlinwang/Modal/runs/kefnldnq">Retro B completed segment</a>
+      </div>
+    </section>
+  </section>
+
+  <footer class="footer">
+    <p>Built by Cursor Agent / GPT-5.6 Sol / 2026-08-13</p>
+    <p>Source artifact: <code>frontier-cs-retro-replay-plan.canvas.tsx</code> · offline rendering uses only inline CSS, JavaScript, SVG, and embedded data; links are optional navigation and are not required to render this report.</p>
+  </footer>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  function initTheme() {
+    var root = document.documentElement;
+    var button = document.querySelector("[data-theme-toggle]");
+    if (button) button.addEventListener("click", function () {
+      var next = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
+      root.setAttribute("data-theme", next);
+      try { localStorage.setItem("wc-theme", next); } catch (error) {}
+    });
+    var printButton = document.querySelector("[data-print]");
+    if (printButton) printButton.addEventListener("click", function () { window.print(); });
+  }
+
+  function initTabs() {
+    var buttons = Array.from(document.querySelectorAll(".tab-btn[data-tab]"));
+    var panels = Array.from(document.querySelectorAll(".tab-panel"));
+    if (!buttons.length) return;
+    function activate(id, updateHash) {
+      var button = buttons.find(function (candidate) { return candidate.dataset.tab === id; }) || buttons[0];
+      id = button.dataset.tab;
+      buttons.forEach(function (candidate) { candidate.classList.toggle("active", candidate === button); });
+      panels.forEach(function (panel) { panel.classList.toggle("active", panel.id === id); });
+      if (updateHash) history.replaceState(null, "", "#" + id);
+      button.scrollIntoView({ inline: "center", block: "nearest" });
+    }
+    buttons.forEach(function (button) {
+      button.addEventListener("click", function () { activate(button.dataset.tab, true); });
+    });
+    window.addEventListener("hashchange", function () { activate(location.hash.slice(1), false); });
+    activate(location.hash.slice(1), false);
+  }
+
+  function initTables() {
+    document.querySelectorAll("table").forEach(function (table) {
+      table.querySelectorAll("th[data-sort]").forEach(function (header, column) {
+        header.addEventListener("click", function () {
+          var body = table.tBodies[0];
+          if (!body) return;
+          var rows = Array.from(body.rows);
+          var numeric = header.dataset.sort === "num";
+          var ascending = !header.classList.contains("asc");
+          table.querySelectorAll("th").forEach(function (item) { item.classList.remove("asc", "desc"); });
+          header.classList.add(ascending ? "asc" : "desc");
+          rows.sort(function (a, b) {
+            var x = a.cells[column] ? a.cells[column].innerText.trim() : "";
+            var y = b.cells[column] ? b.cells[column].innerText.trim() : "";
+            if (numeric) {
+              x = parseFloat(x.replace(/[^0-9.\-]/g, ""));
+              y = parseFloat(y.replace(/[^0-9.\-]/g, ""));
+              x = Number.isNaN(x) ? -Infinity : x;
+              y = Number.isNaN(y) ? -Infinity : y;
+              return ascending ? x - y : y - x;
+            }
+            return ascending ? x.localeCompare(y) : y.localeCompare(x);
+          });
+          rows.forEach(function (row) { body.appendChild(row); });
+        });
+      });
+    });
+  }
+
+  var comparisonSteps = ["0", "5", "10", "15", "20", "25", "30", "35", "40", "45", "50", "55", "60", "65", "70", "75", "84"];
+  var fiveArmCurves = {
+    baseline: {
+      best: [0.2239, 0.2006, 0.184, 0.1762, 0.1849, 0.1976, 0.2363, 0.2843, 0.2925, 0.2797, 0.2725, 0.2958, 0.2856, 0.2974, 0.2781, 0.3086, 0.2689],
+      final: [0.1881, 0.1673, 0.1616, 0.1578, 0.1678, 0.169, 0.1886, 0.172, 0.1697, 0.1834, 0.1643, 0.1978, 0.1911, 0.201, 0.188, 0.2204, 0.2145],
+      gap: [0.1086, 0.0971, 0.0907, 0.0881, 0.0911, 0.0968, 0.1106, 0.1566, 0.1541, 0.1207, 0.1227, 0.1105, 0.105, 0.1032, 0.094, 0.0924, 0.0581],
+      solved: [0.0352, 0.0202, 0.0184, 0.0162, 0.0167, 0.0206, 0.0251, 0.0167, 0.0179, 0.0307, 0.0206, 0.0262, 0.0301, 0.0324, 0.0184, 0.0218, 0.0229],
+      submissions: [3.6406, 2.8216, 2.5374, 2.4353, 2.6323, 2.7048, 3.4431, 3.5776, 4.4855, 4.4598, 5.37, 5.5279, 6.2338, 6.3348, 7.0045, 7.7684, 8.2143]
+    },
+    o1: {
+      best: [0.3196, 0.2532, 0.3118, 0.3188, 0.3016, 0.3163, 0.3478, 0.3457, 0.3664, 0.3273, 0.2792, 0.3214, 0.3647, 0.3364, 0.358, 0.3539, 0.3862],
+      final: [0.1835, 0.1701, 0.1853, 0.2028, 0.2009, 0.1951, 0.2143, 0.1988, 0.183, 0.1956, 0.1776, 0.2058, 0.2147, 0.2123, 0.214, 0.2099, 0.244],
+      gap: [0.1913, 0.1305, 0.1713, 0.1613, 0.1449, 0.1599, 0.1736, 0.1844, 0.2099, 0.1719, 0.1454, 0.156, 0.1801, 0.1505, 0.1735, 0.1689, 0.1701],
+      solved: [0.0117, 0.0208, 0.0279, 0.0279, 0.034, 0.034, 0.029, 0.0246, 0.0134, 0.0246, 0.0145, 0.0246, 0.024, 0.0285, 0.0251, 0.0234, 0.0396],
+      submissions: [3.6445, 3.3066, 4.457, 5.2723, 5.2533, 5.3008, 5.9102, 6.6116, 8.1629, 6.7768, 4.5798, 6.2528, 8.3622, 8.9821, 8.6295, 8.7773, 8.9821]
+    },
+    o2: {
+      best: [0.3149, 0.2924, 0.321, 0.3272, 0.3159, 0.3445, 0.3744, 0.3516, 0.326, 0.3571, 0.3218, 0.3446, 0.3231, 0.3617, 0.3681, 0.3977, 0.3463],
+      final: [0.1939, 0.2183, 0.2109, 0.2126, 0.2304, 0.2372, 0.2376, 0.207, 0.2141, 0.2108, 0.2134, 0.2337, 0.2265, 0.2622, 0.2543, 0.2836, 0.2343],
+      gap: [0.1725, 0.1347, 0.151, 0.1582, 0.1402, 0.1578, 0.1766, 0.1794, 0.1439, 0.1731, 0.1374, 0.1465, 0.1244, 0.1307, 0.1396, 0.1416, 0.1344],
+      solved: [0.0234, 0.0254, 0.0312, 0.0346, 0.0318, 0.0363, 0.0329, 0.0296, 0.0307, 0.0357, 0.0229, 0.0273, 0.0285, 0.0391, 0.0346, 0.0363, 0.0195],
+      submissions: [2.4492, 3.1367, 4.1423, 4.2539, 4.1406, 4.8465, 4.9247, 5.3538, 4.9699, 5.5084, 5.2377, 5.4721, 5.4559, 5.7377, 6.3828, 7.4213, 6.1602]
+    },
+    retroA: {
+      best: [0.3581, 0.371, 0.3636, 0.3987, 0.368, 0.3638, 0.3432, 0.3229, 0.3367, 0.3402, 0.3547, 0.3598, 0.361, 0.3867, 0.3855, 0.3782, 0.3856],
+      final: [0.1368, 0.2022, 0.214, 0.256, 0.2371, 0.254, 0.2502, 0.2485, 0.2624, 0.2542, 0.2657, 0.251, 0.257, 0.266, 0.2971, 0.2855, 0.3004],
+      gap: [0.2346, 0.1965, 0.1853, 0.1903, 0.1777, 0.1637, 0.1548, 0.1336, 0.1212, 0.1292, 0.1254, 0.1325, 0.1227, 0.1307, 0.1002, 0.0996, 0.089],
+      solved: [0.0117, 0.028, 0.0257, 0.0374, 0.0268, 0.0335, 0.034, 0.0368, 0.0363, 0.0357, 0.0419, 0.0413, 0.0363, 0.0419, 0.043, 0.0363, 0.034],
+      submissions: [5.0859, 4.4824, 5.1624, 7.7812, 4.5022, 4.6836, 5.0017, 4.8231, 5.4788, 5.4866, 6.4325, 6.8454, 7.697, 8.5229, 8.139, 9.1948, 10.4598]
+    },
+    retroB: {
+      best: [0.2936, 0.3361, 0.3332, 0.3328, 0.3056, 0.3441, 0.3528, 0.358, 0.3626, 0.3736, 0.3682, 0.3775, 0.3773, 0.4031, 0.4043, 0.4012, 0.4141],
+      final: [0.1013, 0.183, 0.1901, 0.2053, 0.1913, 0.2358, 0.2123, 0.22, 0.2237, 0.222, 0.22, 0.2224, 0.2041, 0.217, 0.2112, 0.209, 0.2216],
+      gap: [0.2098, 0.1767, 0.1706, 0.1685, 0.1611, 0.1665, 0.1907, 0.1839, 0.1788, 0.1853, 0.1734, 0.1761, 0.1864, 0.1952, 0.1988, 0.1964, 0.1984],
+      solved: [0.0039, 0.0189, 0.0229, 0.0268, 0.0324, 0.0346, 0.0285, 0.0312, 0.0396, 0.0296, 0.0324, 0.0318, 0.034, 0.034, 0.0251, 0.0335, 0.043],
+      submissions: [4.7227, 4.293, 5.0162, 5.3253, 5.5301, 6.1038, 7.2734, 7.9721, 8.6367, 9.4503, 10.8689, 11.5184, 12.4581, 12.1261, 14.4805, 16.3097, 17.928]
+    }
+  };
+
+  var armSeries = [
+    { key: "baseline", name: "Baseline O0", color: "var(--arm-baseline)" },
+    { key: "o1", name: "O1 best", color: "var(--arm-o1)" },
+    { key: "o2", name: "O2 bonus", color: "var(--arm-o2)" },
+    { key: "retroA", name: "Retro A final", color: "var(--arm-retro-a)" },
+    { key: "retroB", name: "Retro B best", color: "var(--arm-retro-b)" }
+  ];
+
+  function fiveArmSeries(metric) {
+    return armSeries.map(function (arm) {
+      return { name: arm.name, color: arm.color, data: fiveArmCurves[arm.key][metric] };
+    });
+  }
+
+  function formatValue(value, spec) {
+    var digits = spec.digits === undefined ? 2 : spec.digits;
+    var text = Number(value).toFixed(digits);
+    if (Math.abs(value) >= 1000 && !spec.noThousands) text = Math.round(value).toLocaleString("en-US");
+    return (spec.prefix || "") + text + (spec.suffix || "");
+  }
+
+  function svgElement(name, attrs, text) {
+    var element = document.createElementNS("http://www.w3.org/2000/svg", name);
+    Object.keys(attrs || {}).forEach(function (key) { element.setAttribute(key, attrs[key]); });
+    if (text !== undefined) element.textContent = text;
+    return element;
+  }
+
+  function renderLineChart(element, spec) {
+    var width = 900;
+    var height = spec.height || 300;
+    var margin = { top: 18, right: 22, bottom: 42, left: 58 };
+    var plotWidth = width - margin.left - margin.right;
+    var plotHeight = height - margin.top - margin.bottom;
+    var svg = svgElement("svg", { viewBox: "0 0 " + width + " " + height, "aria-hidden": "true" });
+    var x = function (index) { return margin.left + (index / (spec.labels.length - 1)) * plotWidth; };
+    var y = function (value) { return margin.top + ((spec.yMax - value) / (spec.yMax - spec.yMin)) * plotHeight; };
+
+    for (var tick = 0; tick <= 5; tick += 1) {
+      var value = spec.yMin + ((spec.yMax - spec.yMin) * tick / 5);
+      var py = y(value);
+      svg.appendChild(svgElement("line", { x1: margin.left, x2: width - margin.right, y1: py, y2: py, class: "chart-grid" }));
+      svg.appendChild(svgElement("text", { x: margin.left - 9, y: py + 4, "text-anchor": "end", class: "chart-axis" }, formatValue(value, spec)));
+    }
+
+    spec.labels.forEach(function (label, index) {
+      if (index % (spec.xEvery || 2) !== 0 && index !== spec.labels.length - 1) return;
+      svg.appendChild(svgElement("text", { x: x(index), y: height - 14, "text-anchor": "middle", class: "chart-axis" }, label));
+    });
+
+    (spec.referenceLines || []).forEach(function (reference) {
+      var py = y(reference.value);
+      svg.appendChild(svgElement("line", { x1: margin.left, x2: width - margin.right, y1: py, y2: py, class: "chart-ref" }));
+      svg.appendChild(svgElement("text", { x: width - margin.right - 4, y: py - 6, "text-anchor": "end", class: "chart-ref-label" }, reference.label));
+    });
+
+    spec.series.forEach(function (series) {
+      var points = series.data.map(function (value, index) { return x(index) + "," + y(value); }).join(" ");
+      svg.appendChild(svgElement("polyline", { points: points, class: "chart-line", stroke: series.color }));
+      series.data.forEach(function (value, index) {
+        var circle = svgElement("circle", { cx: x(index), cy: y(value), r: 3.2, fill: series.color, class: "chart-point" });
+        circle.appendChild(svgElement("title", {}, series.name + " · step " + spec.labels[index] + ": " + formatValue(value, spec)));
+        svg.appendChild(circle);
+      });
+    });
+    element.replaceChildren(svg);
+  }
+
+  function renderBarChart(element, spec) {
+    var width = 720;
+    var height = spec.height || 290;
+    var margin = { top: 18, right: 18, bottom: 52, left: 60 };
+    var plotWidth = width - margin.left - margin.right;
+    var plotHeight = height - margin.top - margin.bottom;
+    var svg = svgElement("svg", { viewBox: "0 0 " + width + " " + height, "aria-hidden": "true" });
+    var y = function (value) { return margin.top + ((spec.yMax - value) / (spec.yMax - spec.yMin)) * plotHeight; };
+    var groupWidth = plotWidth / spec.labels.length;
+    var barWidth = Math.min(46, (groupWidth * .74) / spec.series.length);
+
+    for (var tick = 0; tick <= 5; tick += 1) {
+      var value = spec.yMin + ((spec.yMax - spec.yMin) * tick / 5);
+      var py = y(value);
+      svg.appendChild(svgElement("line", { x1: margin.left, x2: width - margin.right, y1: py, y2: py, class: "chart-grid" }));
+      svg.appendChild(svgElement("text", { x: margin.left - 9, y: py + 4, "text-anchor": "end", class: "chart-axis" }, formatValue(value, spec)));
+    }
+
+    (spec.referenceLines || []).forEach(function (reference) {
+      var py = y(reference.value);
+      svg.appendChild(svgElement("line", { x1: margin.left, x2: width - margin.right, y1: py, y2: py, class: "chart-ref" }));
+      svg.appendChild(svgElement("text", { x: width - margin.right - 4, y: py - 6, "text-anchor": "end", class: "chart-ref-label" }, reference.label));
+    });
+
+    spec.labels.forEach(function (label, labelIndex) {
+      var center = margin.left + groupWidth * (labelIndex + .5);
+      svg.appendChild(svgElement("text", { x: center, y: height - 18, "text-anchor": "middle", class: "chart-axis" }, label));
+      spec.series.forEach(function (series, seriesIndex) {
+        var value = series.data[labelIndex];
+        var px = center - (spec.series.length * barWidth) / 2 + seriesIndex * barWidth + 2;
+        var py = y(value);
+        var zeroY = y(Math.max(0, spec.yMin));
+        var rect = svgElement("rect", {
+          x: px,
+          y: py,
+          width: Math.max(4, barWidth - 4),
+          height: Math.max(1, zeroY - py),
+          rx: 3,
+          fill: series.color,
+          class: "chart-bar"
+        });
+        rect.appendChild(svgElement("title", {}, series.name + " · " + label + ": " + formatValue(value, spec)));
+        svg.appendChild(rect);
+        if (spec.showValues) {
+          svg.appendChild(svgElement("text", {
+            x: px + (barWidth - 4) / 2,
+            y: Math.max(12, py - 5),
+            "text-anchor": "middle",
+            class: "chart-axis"
+          }, formatValue(value, spec)));
+        }
+      });
+    });
+    element.replaceChildren(svg);
+  }
+
+  function renderCharts() {
+    var charts = [
+      { id: "snapshot-turn-chart", type: "bar", labels: ["Arm A · final", "Arm B · best"], series: [
+        { name: "Mean snapshot turn", color: "var(--blue)", data: [17.38, 17.32] },
+        { name: "Median snapshot turn", color: "var(--arm-baseline)", data: [15, 14] }
+      ], yMin: 0, yMax: 25, digits: 1, showValues: true },
+      { id: "matched-outcomes-chart", type: "bar", labels: ["Arm A · final", "Arm B · best"], series: [
+        { name: "Final verifier reward", color: "var(--blue)", data: [0.271, 0.216] },
+        { name: "Best trajectory reward", color: "var(--green)", data: [0.369, 0.392] }
+      ], yMin: 0, yMax: .45, digits: 3, showValues: true },
+      { id: "outcome-ablation-chart", type: "bar", labels: ["O0 · final", "O1 · best", "O2 · bonus"], series: [
+        { name: "Overall run mean", color: "var(--blue)", data: [0.255, 0.336, 0.347] },
+        { name: "Last 15 rollout mean", color: "var(--green)", data: [0.299, 0.378, 0.364] }
+      ], yMin: 0, yMax: .42, digits: 3, showValues: true },
+      { id: "sibling-chart", type: "bar", labels: ["S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8"], series: [
+        { name: "Sibling final reward", color: "var(--blue)", data: [0.87, 0.9, 0.93, 0.95, 0.95, 0.93, 0.95, 0.95] }
+      ], yMin: .8, yMax: 1, digits: 2, showValues: true, referenceLines: [{ value: .927245, label: "Inherited 0.9272" }] },
+      { id: "branch-cost-chart", type: "bar", labels: ["5 min", "10 min", "15 min", "20 min"], series: [
+        { name: "8 restored sandboxes", color: "var(--blue)", data: [.44, .88, 1.33, 1.77] }
+      ], yMin: 0, yMax: 2, digits: 2, prefix: "$", showValues: true },
+      { id: "training-cost-chart", type: "bar", labels: ["10/arm", "20/arm", "30/arm", "100/arm"], series: [
+        { name: "Two 48-H200 arms", color: "var(--yellow)", data: [2542, 5084, 7627, 25422] }
+      ], yMin: 0, yMax: 28000, digits: 0, prefix: "$", showValues: true },
+      { id: "curve-best", type: "line", labels: comparisonSteps, series: fiveArmSeries("best"), yMin: .15, yMax: .45, digits: 2, height: 330 },
+      { id: "curve-final", type: "line", labels: comparisonSteps, series: fiveArmSeries("final"), yMin: .08, yMax: .33, digits: 2 },
+      { id: "curve-gap", type: "line", labels: comparisonSteps, series: fiveArmSeries("gap"), yMin: .04, yMax: .25, digits: 2 },
+      { id: "curve-solved", type: "line", labels: comparisonSteps, series: fiveArmSeries("solved"), yMin: 0, yMax: .06, digits: 2 },
+      { id: "curve-submissions", type: "line", labels: comparisonSteps, series: fiveArmSeries("submissions"), yMin: 0, yMax: 20, digits: 0, referenceLines: [{ value: 10, label: "Submit-spam watchdog" }] }
+    ];
+    charts.forEach(function (spec) {
+      var element = document.getElementById(spec.id);
+      if (!element) return;
+      if (spec.type === "line") renderLineChart(element, spec);
+      else renderBarChart(element, spec);
+    });
+  }
+
+  document.addEventListener("DOMContentLoaded", function () {
+    initTheme();
+    initTabs();
+    initTables();
+    renderCharts();
+  });
+})();
+</script>
+</body>
+</html>
