@@ -16,7 +16,7 @@ From the repository root:
 
 ```bash
 uv run --with wandb --with matplotlib \
-  python progress/retro-replay/generate_figures.py
+  python agentic_rl/progress/retro-replay/generate_figures.py
 ```
 
 The script reads `junlinwang/Modal`, merges every matching W&B retry in
