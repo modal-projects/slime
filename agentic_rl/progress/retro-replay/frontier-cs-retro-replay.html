@@ -35,6 +35,9 @@ try {
   --arm-o2: #d2553f;
   --arm-retro-a: #c08a2e;
   --arm-retro-b: #2f8f5b;
+  --arm-p25: #2878b5;
+  --arm-p50: #d48a1f;
+  --arm-p75: #2f8f5b;
 }
 [data-theme="dark"] {
   --bg: #0f172a;
@@ -57,6 +60,9 @@ try {
   --arm-o2: #f87171;
   --arm-retro-a: #fbbf24;
   --arm-retro-b: #4ade80;
+  --arm-p25: #38bdf8;
+  --arm-p50: #fbbf24;
+  --arm-p75: #4ade80;
 }
 * { margin: 0; padding: 0; box-sizing: border-box; }
 html { scroll-behavior: smooth; }
@@ -388,6 +394,9 @@ pre code { background: none; padding: 0; color: var(--text); }
 .arm-o2 { color: var(--arm-o2); }
 .arm-retro-a { color: var(--arm-retro-a); }
 .arm-retro-b { color: var(--arm-retro-b); }
+.arm-p25 { color: var(--arm-p25); }
+.arm-p50 { color: var(--arm-p50); }
+.arm-p75 { color: var(--arm-p75); }
 .nowrap { white-space: nowrap; }
 .small { font-size: .84rem; }
 .lead { font-size: 1rem; }
@@ -424,10 +433,10 @@ pre code { background: none; padding: 0; color: var(--text); }
 <main class="container">
   <header>
     <h1>Frontier-CS asynchronous retro replay</h1>
-    <p class="subtitle">Research assessment, live experiment evidence, systems design, cost envelope, and five-arm optimizer curves.</p>
+    <p class="subtitle">Research assessment, live experiment evidence, systems design, cost envelope, five-arm curves, and trajectory-position ablations.</p>
     <div class="meta-bar">
-      <span>built 2026-08-13</span><span>·</span>
-      <span>evidence through 2026-08-09</span><span>·</span>
+      <span>updated 2026-08-14</span><span>·</span>
+      <span>evidence through 2026-08-14</span><span>·</span>
       <span>84 updates per current arm</span><span>·</span>
       <span>offline self-contained report</span>
     </div>
@@ -443,6 +452,7 @@ pre code { background: none; padding: 0; color: var(--text); }
   <nav class="tab-bar" aria-label="Report sections">
     <button class="tab-btn active" data-tab="research-report">Research report</button>
     <button class="tab-btn" data-tab="five-arm-curves">Five-arm curves</button>
+    <button class="tab-btn" data-tab="position-ablation">P25 / P50 / P75</button>
   </nav>
 
   <section class="tab-panel active" id="research-report" aria-labelledby="research-report-tab">
@@ -1091,8 +1101,115 @@ pre code { background: none; padding: 0; color: var(--text); }
     </section>
   </section>
 
+  <section class="tab-panel" id="position-ablation">
+    <div class="panel-heading">
+      <div>
+        <h2>Trajectory-position ablation: P25 / P50 / P75</h2>
+        <p class="subtitle">Same final-reward retro configuration; only the target branch position changes · canonical W&amp;B retries · 7-step trailing means.</p>
+      </div>
+      <span class="badge warn">P25/P50 complete · P75 at 68/85</span>
+    </div>
+
+    <div class="legend" aria-label="Position-ablation chart legend">
+      <strong>Arm identity</strong>
+      <span class="legend-item"><span class="legend-swatch" style="background:var(--arm-p25)"></span> P25 · branch near 25% of realized trajectory</span>
+      <span class="legend-item"><span class="legend-swatch" style="background:var(--arm-p50)"></span> P50 · branch near 50%</span>
+      <span class="legend-item"><span class="legend-swatch" style="background:var(--arm-p75)"></span> P75 · branch near 75%</span>
+      <span class="legend-item"><span class="legend-swatch" style="background:var(--arm-baseline)"></span> Retro A · original 50% reference</span>
+    </div>
+
+    <div class="verdict pursue">
+      <span class="verdict-badge">Current read</span>
+      <h2>P25 and P50 finish effectively tied; P75 is not yet rankable.</h2>
+      <p>P25 has the highest step-84 smoothed final reward at 0.367, only 0.004 above P50 at 0.363. P50 ends with fewer submissions (8.08 versus 8.77). That difference is too small and the curves cross too often to call a branch-position winner. P75 reaches 0.326 at step 67 but still lacks 17 updates.</p>
+    </div>
+
+    <div class="grid four">
+      <div class="card">
+        <div class="card-title">P25 · complete metrics</div>
+        <div class="card-value">0.367</div>
+        <div class="card-detail">step-84 final reward · 8.77 submissions/episode</div>
+      </div>
+      <div class="card">
+        <div class="card-title">P50 · complete</div>
+        <div class="card-value">0.363</div>
+        <div class="card-detail">step-84 final reward · 8.08 submissions/episode</div>
+      </div>
+      <div class="card">
+        <div class="card-title">P75 · partial</div>
+        <div class="card-value">0.326</div>
+        <div class="card-detail">step-67 final reward · 5.02 submissions/episode</div>
+      </div>
+      <div class="card">
+        <div class="card-title">Original Retro A reference</div>
+        <div class="card-value">0.300</div>
+        <div class="card-detail">step-84 final reward · 10.46 submissions/episode</div>
+      </div>
+    </div>
+
+    <div class="callout warn">
+      <div class="callout-title">Do not interpret the current ordering as retro-position causality yet</div>
+      P75 is incomplete, the curves are training-batch statistics rather than shared held-out evaluation, and the original Retro A extension had a fresh-only fallback integrity failure. Complete P75, verify accepted retro-group counts for all three runs, and compare shared start-state evaluation before choosing a target position.
+    </div>
+
+    <section class="section">
+      <div class="chart-card">
+        <div class="chart-title">Final verifier reward</div>
+        <div class="chart-subtitle">7-step trailing mean; P25/P50 through step 84, P75 through step 67</div>
+        <div class="chart" id="position-final-curve" role="img" aria-label="P25 P50 P75 and Retro A final reward curves"></div>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">Submissions per episode</div>
+        <div class="chart-subtitle">7-step trailing mean; dashed line marks the submission watchdog at 10</div>
+        <div class="chart" id="position-submissions-curve" role="img" aria-label="P25 P50 P75 and Retro A submissions per episode curves"></div>
+      </div>
+      <p class="source-note">Source: every matching W&amp;B retry in <code>junlinwang/Modal</code>, merged chronologically so later relaunches replace overlapping optimizer steps. The local refresh script is <code>agentic_rl/progress/retro-replay/generate_figures.py</code>.</p>
+    </section>
+
+    <section class="section" id="position-endpoints">
+      <div class="section-title"><span class="section-icon">📍</span> Latest smoothed endpoints</div>
+      <div class="table-wrap">
+        <table id="position-endpoint-table" aria-label="Position ablation latest endpoint metrics">
+          <thead><tr><th data-sort>Arm</th><th data-sort="num">Target</th><th data-sort="num">Coverage</th><th data-sort>Status</th><th data-sort="num" data-goal="max" class="num">Final reward</th><th data-sort="num" data-goal="min" class="num">Submissions</th></tr></thead>
+          <tbody>
+            <tr class="endpoint-row"><td class="arm-p25">P25</td><td class="num">0.25 ± 0.40</td><td class="num">85 / 85</td><td><span class="badge running">metrics complete; finalizing</span></td><td class="num best">0.367</td><td class="num">8.77</td></tr>
+            <tr class="endpoint-row"><td class="arm-p50">P50</td><td class="num">0.50 ± 0.40</td><td class="num">85 / 85</td><td><span class="badge done">complete</span></td><td class="num">0.363</td><td class="num best">8.08</td></tr>
+            <tr class="endpoint-row"><td class="arm-p75">P75</td><td class="num">0.75 ± 0.40</td><td class="num">68 / 85</td><td><span class="badge running">running</span></td><td class="num">0.326†</td><td class="num">5.02†</td></tr>
+            <tr class="endpoint-row"><td class="arm-baseline">Retro A reference</td><td class="num">0.50 ± 0.40</td><td class="num">85 / 85</td><td><span class="badge warn">fresh-only extension caveat</span></td><td class="num">0.300</td><td class="num">10.46</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="source-note">† P75 is a partial endpoint at step 67 and must not be ranked against step-84 endpoints.</p>
+    </section>
+
+    <section class="section">
+      <div class="section-title"><span class="section-icon">🧪</span> Controlled surface</div>
+      <div class="grid two">
+        <div class="card">
+          <div class="card-title">Only intended difference</div>
+          <p class="lead"><code>RETRO_TARGET_TRAJECTORY_FRACTION</code> = 0.25, 0.50, or 0.75.</p>
+          <p class="muted">The selector chooses the nearest matching submission within a maximum fraction error of 0.40.</p>
+        </div>
+        <div class="card">
+          <div class="card-title">Shared controls</div>
+          <p>Final-solution reward · 32 prompt groups × 8 siblings · 25% retro groups · deterministic seed 20260802 · hashed promising/recovery assignment · 50/50 replay pool · newest-first · policy age 0–4 · DAPO nonzero-std filter.</p>
+        </div>
+      </div>
+      <div class="callout good">
+        <div class="callout-title">What the completed curves currently support</div>
+        P25 and P50 both end above the original Retro A training-curve reference while staying below the submission watchdog at the final point. They do not establish a meaningful P25-over-P50 effect: the terminal margin is 0.004 and both curves remain noisy.
+      </div>
+      <div class="links">
+        <a href="https://wandb.ai/junlinwang/Modal/runs/zds0wk4f">P25 latest segment</a>
+        <a href="https://wandb.ai/junlinwang/Modal/runs/jbl66sfj">P50 completed segment</a>
+        <a href="https://wandb.ai/junlinwang/Modal/runs/yv67p7az">P75 live segment</a>
+        <a href="https://wandb.ai/junlinwang/Modal/runs/zgvorsmh">Original Retro A reference</a>
+      </div>
+    </section>
+  </section>
+
   <footer class="footer">
-    <p>Built by Cursor Agent / GPT-5.6 Sol / 2026-08-13</p>
+    <p>Built by Cursor Agent / GPT-5.6 Sol · updated 2026-08-14</p>
     <p>Source artifact: <code>frontier-cs-retro-replay-plan.canvas.tsx</code> · offline rendering uses only inline CSS, JavaScript, SVG, and embedded data; links are optional navigation and are not required to render this report.</p>
   </footer>
 </main>
@@ -1200,6 +1317,26 @@ pre code { background: none; padding: 0; color: var(--text); }
     }
   };
 
+  var positionSteps = ["0", "5", "10", "15", "20", "25", "30", "35", "40", "45", "50", "55", "60", "65", "67", "70", "75", "80", "84"];
+  var positionCurves = {
+    p25: {
+      final: [0.1764, 0.2423, 0.2462, 0.2546, 0.2506, 0.2580, 0.3134, 0.3236, 0.3239, 0.3165, 0.2962, 0.2686, 0.2889, 0.3170, null, 0.3413, 0.3411, 0.3334, 0.3674],
+      submissions: [4.3047, 4.4616, 4.5848, 4.6417, 4.6881, 4.1456, 5.7963, 6.3175, 6.2098, 5.9961, 5.2746, 5.7662, 6.4258, 6.7400, null, 8.2980, 8.6077, 10.1680, 8.7746]
+    },
+    p50: {
+      final: [0.1425, 0.2484, 0.2666, 0.2735, 0.2908, 0.2736, 0.2919, 0.2653, 0.3381, 0.3137, 0.3070, 0.3114, 0.3162, 0.3533, null, 0.3409, 0.3651, 0.3033, 0.3633],
+      submissions: [4.1289, 4.0365, 4.0759, 4.1769, 3.9704, 3.8722, 3.6730, 4.2768, 4.4330, 5.0134, 5.7746, 5.5106, 6.0491, 5.0240, null, 6.7651, 7.3499, 8.9939, 8.0753]
+    },
+    p75: {
+      final: [0.1568, 0.2095, 0.2381, 0.2663, 0.2831, 0.2775, 0.2754, 0.3063, 0.2807, 0.2911, 0.3342, 0.3353, 0.3215, 0.2969, 0.3259, null, null, null, null],
+      submissions: [4.1289, 3.5579, 3.7879, 3.9018, 3.8443, 4.5670, 4.6713, 4.8566, 3.7176, 5.0474, 4.8772, 5.0631, 4.7712, 4.2444, 5.0162, null, null, null, null]
+    },
+    retroA: {
+      final: [0.1368, 0.2022, 0.2140, 0.2513, 0.2487, 0.2615, 0.2658, 0.2485, 0.2624, 0.2542, 0.2657, 0.2510, 0.2570, 0.2660, null, 0.2971, 0.2855, 0.2775, 0.3004],
+      submissions: [5.0859, 4.4824, 5.1624, 7.7634, 4.4559, 4.8220, 4.6791, 4.8231, 5.4788, 5.4866, 6.4325, 6.8454, 7.6970, 8.5229, null, 8.1390, 9.1948, 9.8320, 10.4598]
+    }
+  };
+
   var armSeries = [
     { key: "baseline", name: "Baseline O0", color: "var(--arm-baseline)" },
     { key: "o1", name: "O1 best", color: "var(--arm-o1)" },
@@ -1211,6 +1348,19 @@ pre code { background: none; padding: 0; color: var(--text); }
   function fiveArmSeries(metric) {
     return armSeries.map(function (arm) {
       return { name: arm.name, color: arm.color, data: fiveArmCurves[arm.key][metric] };
+    });
+  }
+
+  var positionArmSeries = [
+    { key: "p25", name: "P25", color: "var(--arm-p25)" },
+    { key: "p50", name: "P50", color: "var(--arm-p50)" },
+    { key: "p75", name: "P75", color: "var(--arm-p75)" },
+    { key: "retroA", name: "Retro A reference", color: "var(--arm-baseline)" }
+  ];
+
+  function positionSeries(metric) {
+    return positionArmSeries.map(function (arm) {
+      return { name: arm.name, color: arm.color, data: positionCurves[arm.key][metric] };
     });
   }
 
@@ -1257,9 +1407,12 @@ pre code { background: none; padding: 0; color: var(--text); }
     });
 
     spec.series.forEach(function (series) {
-      var points = series.data.map(function (value, index) { return x(index) + "," + y(value); }).join(" ");
+      var points = series.data.map(function (value, index) {
+        return value === null ? null : x(index) + "," + y(value);
+      }).filter(function (point) { return point !== null; }).join(" ");
       svg.appendChild(svgElement("polyline", { points: points, class: "chart-line", stroke: series.color }));
       series.data.forEach(function (value, index) {
+        if (value === null) return;
         var circle = svgElement("circle", { cx: x(index), cy: y(value), r: 3.2, fill: series.color, class: "chart-point" });
         circle.appendChild(svgElement("title", {}, series.name + " · step " + spec.labels[index] + ": " + formatValue(value, spec)));
         svg.appendChild(circle);
@@ -1351,7 +1504,9 @@ pre code { background: none; padding: 0; color: var(--text); }
       { id: "curve-final", type: "line", labels: comparisonSteps, series: fiveArmSeries("final"), yMin: .08, yMax: .33, digits: 2 },
       { id: "curve-gap", type: "line", labels: comparisonSteps, series: fiveArmSeries("gap"), yMin: .04, yMax: .25, digits: 2 },
       { id: "curve-solved", type: "line", labels: comparisonSteps, series: fiveArmSeries("solved"), yMin: 0, yMax: .06, digits: 2 },
-      { id: "curve-submissions", type: "line", labels: comparisonSteps, series: fiveArmSeries("submissions"), yMin: 0, yMax: 20, digits: 0, referenceLines: [{ value: 10, label: "Submit-spam watchdog" }] }
+      { id: "curve-submissions", type: "line", labels: comparisonSteps, series: fiveArmSeries("submissions"), yMin: 0, yMax: 20, digits: 0, referenceLines: [{ value: 10, label: "Submit-spam watchdog" }] },
+      { id: "position-final-curve", type: "line", labels: positionSteps, series: positionSeries("final"), yMin: .08, yMax: .40, digits: 2, height: 330 },
+      { id: "position-submissions-curve", type: "line", labels: positionSteps, series: positionSeries("submissions"), yMin: 0, yMax: 20, digits: 0, height: 330, referenceLines: [{ value: 10, label: "Submission watchdog" }] }
     ];
     charts.forEach(function (spec) {
       var element = document.getElementById(spec.id);
