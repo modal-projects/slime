@@ -40,9 +40,17 @@ from agentic_rl.retro.launch_config import (
     materialize_yaml_configs,
 )
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+# Locally this file sits at <repo>/agentic_rl/retro/modal_train.py and REPO_ROOT
+# feeds add_local_dir. In the container Modal >= 1.0 imports the entrypoint at
+# /root/modal_train.py (no package path, only two parents), where the repo copy
+# lives at SLIME_ROOT — REPO_ROOT is never used there beyond this definition.
+REPO_ROOT = Path(__file__).resolve().parents[2] if modal.is_local() else Path(SLIME_ROOT)
 RAY_PORT = 6379
 RAY_DASHBOARD_PORT = 8265
+FINAL_COMMIT_BARRIER = "retro-final-commit-barrier"
+FINAL_COMMIT_NAMESPACE = "retro-launcher"
+FINAL_COMMIT_TIMEOUT_SEC = 3600
+PERIODIC_COMMIT_SEC = 60
 
 modal_cfg, slime_cfg = build_launch_configs()
 
@@ -233,6 +241,119 @@ def _start_ray_head(my_ip: str, expected_nodes: int) -> None:
     raise RuntimeError(f"timed out waiting for {expected_nodes} Ray nodes")
 
 
+async def _periodic_volume_commit() -> None:
+    """Bound the uncommitted-upload backlog behind the checkpoints mount.
+
+    A single torch_dist save writes hundreds of GB through the FUSE mount and
+    Modal's background commits lag far behind; anything still uncommitted when
+    the cluster dies is lost (observed as truncated .distcp shards in the
+    staleness cohort's final saves). Best-effort — a failed commit only defers
+    flushing to the next tick or the final barrier.
+    """
+
+    while True:
+        await asyncio.sleep(PERIODIC_COMMIT_SEC)
+        try:
+            await checkpoints_volume.commit.aio()
+        except Exception as exc:
+            print(f"Periodic checkpoints commit failed (will retry): {exc}", flush=True)
+
+
+async def _cancel_task(task: asyncio.Task) -> None:
+    task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, Exception):
+        pass
+
+
+async def _park_worker_and_commit_on_signal() -> None:
+    """Park a non-rank-0 node; flush its checkpoint mount when rank 0 signals.
+
+    Modal tears the whole cluster down the moment rank 0 returns, so worker
+    containers never exit gracefully: volume writes newer than the last
+    commit — the final save's shard data still uploading plus its trailing
+    files (.metadata, metadata.json, latest_checkpointed_iteration.txt), which
+    the Megatron save coordinator may write from any train node — would be
+    lost.
+    """
+
+    import ray
+
+    ray.shutdown()
+    committer = asyncio.create_task(_periodic_volume_commit())
+    connected = False
+    while True:
+        await asyncio.sleep(5)
+        if not connected:
+            try:
+                ray.init(address="auto", ignore_reinit_error=True)
+                connected = True
+            except Exception:
+                continue
+        try:
+            barrier = ray.get_actor(FINAL_COMMIT_BARRIER, namespace=FINAL_COMMIT_NAMESPACE)
+        except ValueError:
+            continue
+        except Exception:
+            # Stale client from a retried attempt against a restarted cluster.
+            ray.shutdown()
+            connected = False
+            continue
+        await _cancel_task(committer)
+        ok = True
+        try:
+            await checkpoints_volume.commit.aio()
+        except Exception as exc:
+            ok = False
+            print(f"Checkpoints volume commit failed on worker: {exc}", flush=True)
+        ray.get(barrier.ack.remote(ok))
+        break
+    while True:
+        await asyncio.sleep(10)
+
+
+async def _commit_checkpoints_cluster_wide(nodes: int) -> None:
+    """Commit every node's checkpoint mount before rank 0 returns (= teardown)."""
+
+    import ray
+
+    @ray.remote(num_cpus=0)
+    class FinalCommitBarrier:
+        def __init__(self) -> None:
+            self.acks = 0
+            self.failures = 0
+
+        def ack(self, ok: bool) -> None:
+            self.acks += 1
+            if not ok:
+                self.failures += 1
+
+        def counts(self) -> tuple[int, int]:
+            return self.acks, self.failures
+
+    barrier = FinalCommitBarrier.options(
+        name=FINAL_COMMIT_BARRIER,
+        namespace=FINAL_COMMIT_NAMESPACE,
+        lifetime="detached",
+    ).remote()
+    await checkpoints_volume.commit.aio()
+    expected = nodes - 1
+    acks = failures = 0
+    deadline = time.time() + FINAL_COMMIT_TIMEOUT_SEC
+    while acks < expected and time.time() < deadline:
+        await asyncio.sleep(2)
+        acks, failures = ray.get(barrier.counts.remote())
+    if acks < expected or failures:
+        print(
+            f"WARNING: checkpoint commit barrier incomplete: {acks}/{expected} worker acks, "
+            f"{failures} failed commits — the last save may be missing files",
+            flush=True,
+        )
+    else:
+        print(f"Checkpoints volume committed on all {nodes} nodes", flush=True)
+
+
 @app.function(
     image=image,
     gpu=f"{modal_cfg.gpu}:{slime_cfg.actor_num_gpus_per_node}",
@@ -278,8 +399,7 @@ async def train() -> None:
                 f"{master_addr}:{RAY_PORT}",
             ]
         )
-        while True:
-            await asyncio.sleep(10)
+        await _park_worker_and_commit_on_signal()
 
     _start_ray_head(my_ip, nodes)
     _prepare_config()
@@ -306,12 +426,19 @@ async def train() -> None:
         display_env["env_vars"]["WANDB_API_KEY"] = "<redacted>"
     print(f"Command: {command}, runtime_env: {display_env}", flush=True)
 
-    async with modal.forward(RAY_DASHBOARD_PORT) as tunnel:
-        print(f"Ray dashboard: {tunnel.url}", flush=True)
-        async for line in client.tail_job_logs(job_id):
-            print(line, end="", flush=True)
+    committer = asyncio.create_task(_periodic_volume_commit())
+    try:
+        async with modal.forward(RAY_DASHBOARD_PORT) as tunnel:
+            print(f"Ray dashboard: {tunnel.url}", flush=True)
+            async for line in client.tail_job_logs(job_id):
+                print(line, end="", flush=True)
+    finally:
+        await _cancel_task(committer)
 
     status = client.get_job_status(job_id)
     print(f"Ray job {job_id} finished with status: {status}", flush=True)
+    # Flush even on failure so interval saves survive; must finish before this
+    # function returns, because returning tears down the worker containers.
+    await _commit_checkpoints_cluster_wide(nodes)
     if str(status) != "SUCCEEDED":
         raise RuntimeError(f"Ray job {job_id} ended with status {status}")
