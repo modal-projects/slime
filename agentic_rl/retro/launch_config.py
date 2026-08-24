@@ -335,6 +335,12 @@ def build_launch_configs(
         {
             "LAUNCH_STAMP": slime.launch_stamp,
             "MSWEA_SILENT_STARTUP": "1",
+            # The entrypoint is imported in-container at /root/modal_train.py
+            # and must resolve agentic_rl from the repo copy at /root/slime.
+            # Older Modal clients auto-mounted imported local packages next to
+            # the entrypoint; Modal >= 1.0 does not, so the image must put the
+            # repo on sys.path itself.
+            "PYTHONPATH": f"/root/Megatron-LM/:{SLIME_ROOT}",
         }
     )
     modal = ModalLaunchConfig(
