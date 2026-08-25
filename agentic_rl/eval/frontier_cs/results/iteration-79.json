@@ -1,0 +1,93 @@
+{
+  "evaluation": "frontier-cs-heldout-avg3",
+  "checkpoint_step": 79,
+  "num_tasks": 38,
+  "samples_per_task": 3,
+  "num_samples_per_arm": 114,
+  "protocol": {
+    "temperature": 1.0,
+    "top_p": 1.0,
+    "top_k": -1,
+    "max_response_len": 24576,
+    "max_context_len": 65536,
+    "max_steps": 75,
+    "episode_timeout_seconds": 1800,
+    "verifier_timeout_seconds": 600,
+    "exec_timeout_seconds": 60,
+    "think_closure": false,
+    "rollout_seed": 20260802
+  },
+  "split": {
+    "train_tasks": 150,
+    "eval_tasks": 38,
+    "instance_overlap": 0,
+    "problem_id_overlap": 0,
+    "train_sha256": "04abc7196598db245948e724ed63ae9d718f66f1ee2e3d44ea450dd0f04db5e7",
+    "eval_sha256": "e7d5fe276467ab9b8d677980529c74a5f75bbf3ab0432363ef8d11532d28fa61"
+  },
+  "arms": {
+    "baseline": {
+      "avg_at_3": 0.192755570350731,
+      "task_standard_error": 0.04405884324232642,
+      "pass_at_3": 0.02631578947368421,
+      "sample_solve_rate": 0.017543859649122806,
+      "dump_sha256": "7cf210447159a20ed1c07a8e6c5a4905aa2c739407ad510a8ef62702f665e2ea",
+      "wandb_url": "https://wandb.ai/junlinwang/Modal/runs/3bss2sq7"
+    },
+    "p25": {
+      "avg_at_3": 0.21070455850525202,
+      "task_standard_error": 0.044700953689628786,
+      "pass_at_3": 0.02631578947368421,
+      "sample_solve_rate": 0.008771929824561403,
+      "dump_sha256": "e6fa6dd719e8c04882d295b1d0f10028032ea2aae2ab735ec2065987367e901d",
+      "wandb_url": "https://wandb.ai/junlinwang/Modal/runs/twz1cgoc"
+    },
+    "p50": {
+      "avg_at_3": 0.21533418443936508,
+      "task_standard_error": 0.04886222851130807,
+      "pass_at_3": 0.02631578947368421,
+      "sample_solve_rate": 0.008771929824561403,
+      "dump_sha256": "03516bad0f2039ddb221bb0d22d6b5f8f6b297e5d4552d0b4a84d00ae8265284",
+      "wandb_url": "https://wandb.ai/junlinwang/Modal/runs/yzf74vu1"
+    },
+    "p75": {
+      "avg_at_3": 0.1596104523458939,
+      "task_standard_error": 0.03961779620863319,
+      "pass_at_3": 0.02631578947368421,
+      "sample_solve_rate": 0.017543859649122806,
+      "dump_sha256": "ee3c1c21eea97574deacfa24650a792b749fcd8b87077af771e5001394210564",
+      "wandb_url": "https://wandb.ai/junlinwang/Modal/runs/b4j6g0ls"
+    }
+  },
+  "paired_vs_baseline": {
+    "p25": {
+      "mean_difference": 0.01794898815452102,
+      "paired_standard_error": 0.030447063940507058,
+      "bootstrap_95_interval": [-0.032710614563870796, 0.08458405609512669],
+      "wins_ties_losses": [18, 8, 12]
+    },
+    "p50": {
+      "mean_difference": 0.022578614088634087,
+      "paired_standard_error": 0.03157514132493753,
+      "bootstrap_95_interval": [-0.031205977939690897, 0.09043086368269841],
+      "wins_ties_losses": [17, 11, 10]
+    },
+    "p75": {
+      "mean_difference": -0.03314511800483709,
+      "paired_standard_error": 0.021271733584259392,
+      "bootstrap_95_interval": [-0.0757584677060067, 0.006916654210952389],
+      "wins_ties_losses": [12, 13, 13]
+    }
+  },
+  "p50_vs_p25": {
+    "mean_difference": 0.004629625934113064,
+    "paired_standard_error": 0.020630389630392286,
+    "bootstrap_95_interval": [-0.033501929044834296, 0.04714329903469784],
+    "wins_ties_losses": [16, 9, 13]
+  },
+  "bootstrap": {
+    "replicates": 50000,
+    "seed": 20260817,
+    "unit": "held-out task"
+  }
+}

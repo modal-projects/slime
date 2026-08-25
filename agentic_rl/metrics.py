@@ -11,8 +11,12 @@ of slime's defaults.
              trained_token_frac, removed_frac (fully-masked, no-gradient samples).
   async/*    off-policy health of each training batch — version_span (weight
              versions a multi-turn episode straddled), version_lag (updates-stale
-             vs the freshest in the batch), versions_in_batch, sample_age_sec
-             (gen-finish -> train dwell).
+             vs the freshest in the batch — a lower bound on true staleness: a
+             uniformly stale batch reads 0), behavior_lag (updates-stale vs the
+             TRAINER: rollout t generates under absolute weight version t+1, so
+             lag = t+1 - oldest token version; this is the quantity
+             --rollout-max-behavior-lag enforces), versions_in_batch,
+             sample_age_sec (gen-finish -> train dwell).
 """
 
 from __future__ import annotations
@@ -322,6 +326,26 @@ def _agentic_metrics(samples, args) -> dict:
             np.mean([1.0 if (o.get("invalid_scores") or 0) > 0 else 0.0 for o in outcomes])
         )
 
+    # Turn-level reward shaping (O3, turn_reward.py). Recomputed here from
+    # metadata.agentic because this hook runs BEFORE the reward post-process
+    # sets train_metadata. coverage = samples that ship a turn component
+    # (recorded turns AND >=1 scored aligned submission); reward = the raw
+    # next-submission r_t in [0,1] painted over turns pre-normalization.
+    from .turn_reward import TURN_RULES, compute_turn_rewards, resolve_turn_strategy
+
+    strategy = resolve_turn_strategy()
+    if strategy in TURN_RULES and any("turn_spans" in s for s in stats):
+        per = [compute_turn_rewards(s, strategy) for s in stats]
+        covered = [p for p in per if p is not None]
+        out["agentic/turn/coverage_frac"] = len(covered) / len(stats)
+        turn_rewards = [r for p in covered for r in p[1]]
+        if turn_rewards:
+            out["agentic/turn/reward/mean"] = float(np.mean(turn_rewards))
+            out["agentic/turn/reward/nonzero_frac"] = float(np.mean([1.0 if r > 1e-9 else 0.0 for r in turn_rewards]))
+        spans_per = [len(s.get("turn_spans") or ()) for s in stats]
+        if any(spans_per):
+            out["agentic/turn/spans_per_sample/mean"] = float(np.mean(spans_per))
+
     # Per-turn shaping precursor: fraction of episodes with >=1 positive
     # best-so-far delta across their submission sequence (the r_t > 0 events
     # potential-based shaping would reward). Denominator = every episode in the
@@ -380,7 +404,7 @@ def _best_traj_reward(s) -> float:
     return max(final, float(best)) if best is not None else final
 
 
-def _async_metrics(samples, now: float) -> dict:
+def _async_metrics(samples, now: float, trainer_version: int | None = None) -> dict:
     out: dict = {}
 
     def add_segment(prefix: str, segment) -> None:
@@ -400,6 +424,13 @@ def _async_metrics(samples, now: float) -> dict:
                 out[f"{prefix}/version_lag/mean"] = float(np.mean(lags))
                 out[f"{prefix}/version_lag/max"] = float(max(lags))
                 out[f"{prefix}/versions_in_batch"] = float(len({n for ns in nums for n in ns}))
+                if trainer_version is not None:
+                    # True staleness: vs the trainer's publishing version, not
+                    # the freshest sibling. This is what rollout_max_behavior_lag
+                    # bounds; version_lag above can read 0 on a uniformly stale batch.
+                    tlags = [trainer_version - min(ns) for ns in nums]
+                    out[f"{prefix}/behavior_lag/mean"] = float(np.mean(tlags))
+                    out[f"{prefix}/behavior_lag/max"] = float(max(tlags))
         ages = [
             now - s.metadata["agentic"]["gen_timestamp"]
             for s in segment
@@ -436,7 +467,12 @@ def log_rollout_data(rollout_id, args, samples, rollout_extra_metrics, rollout_t
     from slime.ray.rollout import compute_rollout_step
     from slime.utils import logging_utils
 
-    extra = {**_agentic_metrics(samples, args), **_async_metrics(samples, time.time())}
+    # Rollout t generates under absolute weight version t + 1 (the updater
+    # increments before publishing; resumes preserve absolute numbering).
+    extra = {
+        **_agentic_metrics(samples, args),
+        **_async_metrics(samples, time.time(), trainer_version=int(rollout_id) + 1),
+    }
     # Fraction of the batch shipped fully-masked (remove_sample) -- contributes no
     # gradient, so it shrinks the effective batch. Read off the samples, not the stats.
     if samples:

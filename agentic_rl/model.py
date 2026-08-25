@@ -58,6 +58,14 @@ class Chain:
     prompt_len: int = 0
     seen_msgs: int = 0
     msg_hashes: list[str] = field(default_factory=list)
+    # One (start, end) token span per SURVIVING turn (query() call), in absolute
+    # chain-token indices: every generated segment plus injected think-closure
+    # ids, excluding the observation delta. Rolled-back turns leave no span.
+    turn_spans: list[tuple[int, int]] = field(default_factory=list)
+    # Wall-clock (epoch sec) at each turn's generation END — i.e. just before its
+    # tool call executes — so mid-episode judge submissions (server ts) can be
+    # aligned to the turn that produced them (turn-level reward shaping).
+    turn_ts: list[float] = field(default_factory=list)
     # Decoded text of a rolled-back terminal generation (a turn with no tool call,
     # dropped from the trained token stream). Kept for the dashboard so a runaway /
     # length-truncated <think> is visible instead of lost. {"text","tokens","finish"}.
@@ -209,6 +217,8 @@ class RecordingModel:
                 raise
 
         self._empty_streak = 0
+        c.turn_spans.append((turn_start, len(c.tokens)))
+        c.turn_ts.append(time.time())
         message: dict = {"role": "assistant", "content": parsed.text or None, "extra": {"actions": actions, "cost": 0.0}}
         if parsed.reasoning:
             message["reasoning_content"] = parsed.reasoning

@@ -226,6 +226,12 @@ def _build_samples(sample, model, result, tokenizer, md, args, *, elapsed: float
         # Per-chain debug surfaces for the dashboard: the exact rendered prompt, and a
         # rolled-back terminal generation (length-truncated think, etc.) if any.
         agentic = {**stats, "full_prompt": c.full_prompt}
+        # Per-turn token spans (response-relative) + generation-end timestamps:
+        # the join keys turn-level reward shaping needs to align mid-episode judge
+        # submissions (server ts) with the turn whose tool call produced them.
+        if c.turn_spans:
+            agentic["turn_spans"] = [[s - c.prompt_len, e - c.prompt_len] for s, e in c.turn_spans]
+            agentic["turn_ts"] = list(c.turn_ts)
         if c.truncated_tail is not None:
             agentic["truncated_tail"] = c.truncated_tail
         s.metadata = {**(sample.metadata or {}), "instance_id": md["instance_id"], "agentic": agentic}

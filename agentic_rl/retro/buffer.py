@@ -88,6 +88,9 @@ class RetroBuffer:
         self.max_items = max_items
         self.store = store
         self._items: deque[RetroSnapshotManifest] = deque()
+        # Snapshot ids this buffer has finished with (consumed or evicted), so
+        # refresh_from_store never re-adopts one it already retired.
+        self._retired: set[str] = set()
         self._lock = threading.Lock()
         if store is not None:
             for manifest in sorted(store.load_latest(), key=lambda item: item.created_at):
@@ -96,6 +99,32 @@ class RetroBuffer:
                 if manifest.is_eligible():
                     self._items.append(manifest)
             self._trim()
+
+    def refresh_from_store(self) -> int:
+        """Adopt newly activated snapshots from the store; return the count added.
+
+        A long-lived buffer (the retro prefetch worker owns one across steps)
+        must pick up snapshots that fresh episodes activate after construction.
+        Unlike ``__init__`` this neither releases LEASED manifests (they may be
+        in flight right now) nor re-persists what it adopts, and unlike ``add``
+        it tolerates ineligible records instead of raising.
+        """
+
+        if self.store is None:
+            return 0
+        with self._lock:
+            known = {manifest.snapshot_id for manifest in self._items} | self._retired
+            added = 0
+            for manifest in sorted(self.store.load_latest(), key=lambda item: item.created_at):
+                if manifest.snapshot_id in known or not manifest.is_eligible():
+                    continue
+                self._items.append(manifest)
+                added += 1
+            for item in self._trim():
+                item.status = SnapshotStatus.INVALID
+                self._retired.add(item.snapshot_id)
+                self._persist_transition(item)
+            return added
 
     def add(self, manifest: RetroSnapshotManifest) -> list[RetroSnapshotManifest]:
         """Add an available snapshot and return evicted manifests for deletion."""
@@ -108,6 +137,7 @@ class RetroBuffer:
             self._persist_full(manifest)
             for item in evicted:
                 item.status = SnapshotStatus.INVALID
+                self._retired.add(item.snapshot_id)
                 self._persist_transition(item)
             return evicted
 
@@ -164,6 +194,7 @@ class RetroBuffer:
             manifest = self._get(snapshot_id)
             manifest.consume(rollout_id)
             self._items.remove(manifest)
+            self._retired.add(snapshot_id)
             self._persist_transition(manifest)
             return manifest
 

@@ -53,6 +53,8 @@ RETRO_TARGET_TRAJECTORY_FRACTION=0.75 \
 RETRO_MAX_FRACTION_ERROR=0.40 \
 RETRO_SELECTOR_ASSIGNMENT=hashed \
 RETRO_CAPTURE_PROMISING_RATIO=0.50 \
+RETRO_PROMISING_CONSECUTIVE=0 \
+RETRO_STAGNANT_SUBMISSIONS=2 \
 RETRO_POOL_PROMISING_RATIO=0.50 \
 RETRO_POOL_ORDER=newest \
 RETRO_MIN_POLICY_AGE=0 \
@@ -69,7 +71,7 @@ RESUME=qwen3.6-27b-frontier-cs-retro-final-p75-<stamp> \
 RETRO_REWARD_ARM=final \
 RETRO_TARGET_TRAJECTORY_FRACTION=0.75 \
 RETRO_PHASE2_GROUPS=32 \
-RETRO_PHASE2_ROLLOUTS=85 \
+RETRO_PHASE2_ROLLOUTS=100 \
   uv run --with modal modal run -d agentic_rl/retro/modal_train.py::train
 ```
 
@@ -92,4 +94,8 @@ RETRO_TARGET_TRAJECTORY_FRACTION=0.75
 
 All three use `RETRO_MAX_FRACTION_ERROR=0.40`, hashed 50/50 capture
 assignment, a 4/4 promising/recovery replay pool, newest-first selection, and
-policy age 0–4.
+policy age 0–4. `RETRO_PROMISING_CONSECUTIVE=0` means no additional
+confirmation after the first qualifying new best; `1` requires two consecutive
+qualifying new-best submissions. `RETRO_STAGNANT_SUBMISSIONS=2` marks recovery
+after two consecutive submissions that fail to set a new best, while a score
+regression of at least `RETRO_REGRESSION_DELTA` triggers recovery immediately.

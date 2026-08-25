@@ -91,5 +91,5 @@ over-sampling), not at this batch size.
 
 - `metrics.json` — per-step numbers for all three runs + engine static facts.
 - `fp8.launch.log` — full launch/run log of the FP8 run.
-- Config: `multinode-training-guide/slime/configs/w_qwen3_6_27b_frontier_cs_noncolocate_5n_fp8.py`
+- Config: `multinode-training-guide/slime/configs/frontier_cs/w_qwen3_6_27b_frontier_cs_noncolocate_5n_fp8.py`
   (docstring documents the checkpoint-vs-updater quantized-set verification).

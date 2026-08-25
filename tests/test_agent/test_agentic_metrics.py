@@ -39,6 +39,17 @@ try:
 except Exception as exc:  # pragma: no cover - unsatisfiable import env
     pytest.skip(f"agentic_rl.metrics unimportable: {exc}", allow_module_level=True)
 
+# ``_agentic_metrics`` lazily imports turn_reward, which imports torch. Preserve
+# the file's CPU-only contract even when torch is absent from the test runner.
+if "torch" not in sys.modules:
+    try:
+        import torch  # noqa: F401
+    except ImportError:
+        torch_stub = types.ModuleType("torch")
+        torch_stub.__getattr__ = lambda _name: MagicMock()
+        sys.modules["torch"] = torch_stub
+
+
 def _s(*, remove_sample=False, **agentic):
     return SimpleNamespace(
         metadata={"agentic": agentic},

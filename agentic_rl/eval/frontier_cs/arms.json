@@ -1,0 +1,79 @@
+{
+  "protocol": {
+    "dataset": "/data/frontier_cs/eval.jsonl",
+    "training_dataset": "/data/frontier_cs/train.jsonl",
+    "eval_sha256": "e7d5fe276467ab9b8d677980529c74a5f75bbf3ab0432363ef8d11532d28fa61",
+    "train_sha256": "04abc7196598db245948e724ed63ae9d718f66f1ee2e3d44ea450dd0f04db5e7",
+    "expected_tasks": 38,
+    "samples_per_task": 3,
+    "temperature": 1.0,
+    "top_p": 1.0,
+    "top_k": -1,
+    "max_response_len": 24576,
+    "max_context_len": 65536,
+    "max_steps": 75,
+    "episode_timeout_seconds": 1800,
+    "verifier_timeout_seconds": 600,
+    "exec_timeout_seconds": 60,
+    "think_closure": false,
+    "rollout_seed": 20260802
+  },
+  "arms": {
+    "baseline": {
+      "label": "Ordinary RL baseline",
+      "source_run_tag": "qwen3.6-27b-frontier-cs-noncolocate-5n-baseline-20260710-125341",
+      "checkpoint_step": 79
+    },
+    "p25": {
+      "label": "Retro P25",
+      "source_run_tag": "qwen3.6-27b-frontier-cs-retro-a-final-p25-20260810-000459",
+      "checkpoint_step": 79
+    },
+    "p50": {
+      "label": "Retro P50",
+      "source_run_tag": "qwen3.6-27b-frontier-cs-retro-a-final-p50-20260810-000459",
+      "checkpoint_step": 79
+    },
+    "p75": {
+      "label": "Retro P75",
+      "source_run_tag": "qwen3.6-27b-frontier-cs-retro-a-final-p75-20260810-000459",
+      "checkpoint_step": 79
+    },
+    "p50-v2": {
+      "label": "Round-2 p50_v2 (concurrent lanes, retro depth 0)",
+      "source_run_tag": "qwen3.6-27b-frontier-cs-retro-a-final-p50-v2-20260821-010000",
+      "checkpoint_step": 79
+    },
+    "rdepth2": {
+      "label": "Round-2 rdepth2 (retro prefetch depth 2)",
+      "source_run_tag": "qwen3.6-27b-frontier-cs-retro-a-final-p50-rdepth2-20260821-010100",
+      "checkpoint_step": 79
+    },
+    "rdepth4": {
+      "label": "Round-2 rdepth4 (retro prefetch depth 4)",
+      "source_run_tag": "qwen3.6-27b-frontier-cs-retro-a-final-p50-rdepth4-20260821-020000",
+      "checkpoint_step": 79
+    },
+    "baseline74": {
+      "label": "Ordinary RL baseline at iteration 74 (O-cohort anchor)",
+      "source_run_tag": "qwen3.6-27b-frontier-cs-noncolocate-5n-baseline-20260710-125341",
+      "checkpoint_step": 74
+    },
+    "o1": {
+      "label": "O1 best-of-trajectory at iteration 74",
+      "source_run_tag": "qwen3.6-27b-frontier-cs-o1-best-20260714-225603",
+      "checkpoint_step": 74
+    },
+    "o2": {
+      "label": "O2 final plus solved bonus at iteration 74",
+      "source_run_tag": "qwen3.6-27b-frontier-cs-o2-bonus-20260714-235055",
+      "checkpoint_step": 74
+    },
+    "base": {
+      "label": "Vanilla Qwen3.6-27B (no RL, release checkpoint)",
+      "source_run_tag": "qwen3.6-27b-base-release",
+      "checkpoint_step": null,
+      "load_path": "/checkpoints/Qwen3.6-27B_torch_dist"
+    }
+  }
+}

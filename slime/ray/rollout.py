@@ -886,6 +886,9 @@ class RolloutManager:
                 "rollout_routed_experts",
                 "prompt",
                 "teacher_log_probs",
+                # per-sample train_metadata (e.g. agentic turn-level advantage
+                # spans/values) — plain dicts, passed through untensorized.
+                "metadata",
             ]:
                 if key not in data:
                     continue

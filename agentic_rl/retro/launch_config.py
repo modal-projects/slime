@@ -52,12 +52,21 @@ class RetroSlimeConfig:
         if arm not in ("final", "best"):
             raise ValueError("RETRO_REWARD_ARM must be final or best")
         groups = max(2, _env_int(env, "RETRO_PHASE2_GROUPS", 4))
-        rollouts = max(1, _env_int(env, "RETRO_PHASE2_ROLLOUTS", 1))
+        # Canonical production run since 2026-08-24: 100 updates, checkpoint
+        # every 10. The bare 4-group engineering smoke keeps its 1-rollout
+        # default.
+        rollouts = max(1, _env_int(env, "RETRO_PHASE2_ROLLOUTS", 100 if groups >= 32 else 1))
         retro_ratio = _bounded_fraction(env, "RETRO_GROUP_RATIO", 0.25)
         target_fraction = _bounded_fraction(env, "RETRO_TARGET_TRAJECTORY_FRACTION", 0.5)
         max_fraction_error = _bounded_fraction(env, "RETRO_MAX_FRACTION_ERROR", 0.4)
         capture_promising_ratio = _bounded_fraction(env, "RETRO_CAPTURE_PROMISING_RATIO", 0.5)
         pool_promising_ratio = _bounded_fraction(env, "RETRO_POOL_PROMISING_RATIO", 0.5)
+        stagnant_submissions = _env_int(env, "RETRO_STAGNANT_SUBMISSIONS", 2)
+        promising_consecutive = _env_int(env, "RETRO_PROMISING_CONSECUTIVE", 0)
+        if stagnant_submissions < 1:
+            raise ValueError("RETRO_STAGNANT_SUBMISSIONS must be at least 1")
+        if promising_consecutive < 0:
+            raise ValueError("RETRO_PROMISING_CONSECUTIVE must be non-negative")
         selector_assignment = env.get("RETRO_SELECTOR_ASSIGNMENT", "hashed").strip().lower()
         if selector_assignment not in ("hashed", "alternating", "promising", "recovery", "any"):
             raise ValueError(
@@ -67,9 +76,21 @@ class RetroSlimeConfig:
         if pool_order not in ("newest", "fifo"):
             raise ValueError("RETRO_POOL_ORDER must be newest or fifo")
 
+        # retro (default) runs the mixed retro rollout; vanilla runs the stock
+        # slime fully-async path with the plain agentic generate — no snapshot
+        # capture, no retro envs, no manifest store. Everything else (model,
+        # data, reward shaping, DAPO, prefetch/lag knobs) is shared, so a
+        # vanilla arm is the retro stack's true no-retro control.
+        rollout_mode = env.get("ROLLOUT_MODE", "retro").strip().lower()
+        if rollout_mode not in ("retro", "vanilla"):
+            raise ValueError("ROLLOUT_MODE must be retro or vanilla")
+
         launch_stamp = env.get("LAUNCH_STAMP") or f"{datetime.now():%Y%m%d-%H%M%S}"
         fraction_tag = f"p{round(target_fraction * 100):02d}"
-        default_name = f"qwen3.6-27b-frontier-cs-retro-{arm}-{fraction_tag}"
+        if rollout_mode == "vanilla":
+            default_name = f"qwen3.6-27b-frontier-cs-vanilla-{arm}"
+        else:
+            default_name = f"qwen3.6-27b-frontier-cs-retro-{arm}-{fraction_tag}"
         run_tag = f"{env.get('WANDB_GROUP') or default_name}-{launch_stamp}"
         resume = env.get("RESUME")
         state_tag = resume or run_tag
@@ -89,19 +110,48 @@ class RetroSlimeConfig:
         self.update_weights_interval = 1
         self.update_weight_buffer_size = 2147483648
         self.async_mode = True
-        self.rollout_max_staleness = 4 if full_topology else 1
-        self.rollout_function_path = "agentic_rl.retro.rollout.generate_retro_mixed"
+        # Staleness is split into orthogonal knobs (see slime/rollout/fully_async_rollout.py):
+        # prefetch sizes the in-flight pool (capacity/throughput only), while the
+        # per-lane max_behavior_lag values are HARD per-group bounds enforced at
+        # batch assembly (rollout t trains only groups whose oldest token is
+        # <= lag updates behind version t+1). FRESH_MAX_BEHAVIOR_LAG binds the
+        # fresh lane (slime flag); RETRO_MAX_BEHAVIOR_LAG binds retro
+        # continuations (env, > 1 also admits mixed-version continuations).
+        # Snapshot *state* age stays a separate axis (ASYNC_RL_RETRO_MIN/MAX_POLICY_AGE).
+        # A value of 0 (or negative) DISABLES the corresponding hard gate —
+        # the pre-2026-08-18 unenforced behavior, needed to recreate the old
+        # P50 cohort faithfully.
+        self.rollout_prefetch_batches = _env_int(env, "ROLLOUT_PREFETCH_BATCHES", 1)
+        fresh_max_behavior_lag = _env_int(env, "FRESH_MAX_BEHAVIOR_LAG", 1)
+        self.rollout_max_behavior_lag = fresh_max_behavior_lag if fresh_max_behavior_lag > 0 else None
+        retro_max_behavior_lag = _env_int(env, "RETRO_MAX_BEHAVIOR_LAG", 1)
+        if rollout_mode == "vanilla":
+            self.rollout_function_path = (
+                "slime.rollout.fully_async_rollout.generate_rollout_fully_async"
+            )
+        else:
+            self.rollout_function_path = "agentic_rl.retro.rollout.generate_retro_mixed"
         self.use_fault_tolerance = True
         self.sglang_server_concurrency = 64 if full_topology else 16
         self.no_check_for_nan_in_loss_and_grad = True
 
-        # Agentic rollout.
-        self.custom_generate_function_path = "agentic_rl.retro.generate.generate"
+        # Agentic rollout. The retro generate is the plain agentic generate
+        # plus a task_type stamp that routes episodes to the capture-capable
+        # retro env; vanilla mode uses the plain generate directly, so its
+        # episodes never attempt snapshot capture.
+        if rollout_mode == "vanilla":
+            self.custom_generate_function_path = "agentic_rl.generate.generate"
+        else:
+            self.custom_generate_function_path = "agentic_rl.retro.generate.generate"
         self.custom_rollout_log_function_path = "agentic_rl.metrics.log_rollout_data"
         self.custom_config_path = {
             "agentic_max_steps": 75,
             "agentic_episode_timeout": 1800,
             "agentic_eval_timeout": 600,
+            # Per-turn /generate cap. At prefetch > 1 the engines run tens of
+            # concurrent streams, so a max-length turn decodes several times
+            # slower than in the near-idle regime the old 600s default assumed.
+            "agentic_query_timeout": _env_int(env, "AGENTIC_QUERY_TIMEOUT", 1200),
             "agentic_exec_timeout": 60,
             "agentic_close_think_on_length": env.get("THINK_CLOSURE", "0") == "1",
             "agentic_max_think_closures": 2,
@@ -118,7 +168,13 @@ class RetroSlimeConfig:
         self.rm_type = None
         self.balance_data = True
 
-        # Rollout sizing and deterministic sibling sampling.
+        # Rollout sizing. Deterministic inference is OFF by default since the
+        # 2026-08-18 inference A/B (profiles/inference_ab/REPORT.md): it costs
+        # ~1.3x per-stream decode (pytorch sampler + NCCL-tree all-reduce +
+        # batch-invariant kernels) and training doesn't need reproducible
+        # sampling. Set RETRO_DETERMINISTIC=1 only for seed-replicate arm
+        # designs (e.g. the rlag4/rlag8 pair), where matched sampling is the
+        # point of the experiment.
         self.num_rollout = rollouts
         self.rollout_batch_size = groups
         self.rollout_max_response_len = 24576
@@ -131,7 +187,7 @@ class RetroSlimeConfig:
         self.sglang_reasoning_parser = "qwen3"
         self.sglang_tool_call_parser = "qwen3_coder"
         self.rollout_seed = 20260802
-        self.sglang_enable_deterministic_inference = True
+        self.sglang_enable_deterministic_inference = env.get("RETRO_DETERMINISTIC", "0") == "1"
 
         # SGLang engine.
         self.rollout_num_gpus_per_engine = 2
@@ -176,7 +232,12 @@ class RetroSlimeConfig:
         # Checkpointing and optimizer.
         self.save = f"{CHECKPOINTS_PATH}/swe_ckpts/{state_tag}"
         self.load = self.save
-        self.save_interval = 5
+        # Interval saves land at iters 9, 19, ..., 99. The final one coincides
+        # with job teardown and can miss the Modal volume's last commit (5 of 6
+        # staleness-cohort runs lost iter-84's metadata this way), so treat the
+        # second-to-last checkpoint as the safe endpoint until the durability
+        # fix (explicit volume commit after the final save) lands.
+        self.save_interval = 10
         self.ckpt_step = resume_ckpt_step
         self.override_opt_param_scheduler = bool(resume)
         self.save_debug_rollout_data = (
@@ -215,37 +276,55 @@ class RetroSlimeConfig:
             "ASYNC_RL_OUTCOME_REWARD": arm,
             "ASYNC_RL_SOLVED_BONUS": "0",
             "ASYNC_RL_OUTCOME_GAMMA": env.get("ASYNC_RL_OUTCOME_GAMMA", "0.4"),
-            "ASYNC_RL_RETRO_RUN_TAG": state_tag,
-            "ASYNC_RL_RETRO_MANIFEST_PATH": manifest_path,
-            "ASYNC_RL_RETRO_SNAPSHOT_KIND": env.get("RETRO_SNAPSHOT_KIND", "directory"),
-            "ASYNC_RL_RETRO_SNAPSHOT_PATH": "/app",
-            "ASYNC_RL_RETRO_SNAPSHOT_TTL": env.get(
-                "RETRO_SNAPSHOT_TTL", str(48 * 60 * 60)
-            ),
-            "ASYNC_RL_RETRO_CAPTURE_STATUS": "tentative",
-            "ASYNC_RL_RETRO_MIN_SCORE": env.get("RETRO_MIN_SCORE", "0.1"),
-            "ASYNC_RL_RETRO_MAX_SCORE": env.get("RETRO_MAX_SCORE", "0.95"),
-            "ASYNC_RL_RETRO_MIN_REMAINING": env.get("RETRO_MIN_REMAINING", "0.0"),
-            "ASYNC_RL_RETRO_MIN_TURN": env.get("RETRO_MIN_TURN", "2"),
-            "ASYNC_RL_RETRO_REGRESSION_DELTA": env.get(
-                "RETRO_REGRESSION_DELTA", "0.1"
-            ),
-            "ASYNC_RL_RETRO_STAGNANT_SUBMISSIONS": env.get(
-                "RETRO_STAGNANT_SUBMISSIONS", "2"
-            ),
-            "ASYNC_RL_RETRO_TARGET_TRAJECTORY_FRACTION": str(target_fraction),
-            "ASYNC_RL_RETRO_MAX_FRACTION_ERROR": str(max_fraction_error),
-            "ASYNC_RL_RETRO_SELECTOR_ASSIGNMENT": selector_assignment,
-            "ASYNC_RL_RETRO_CAPTURE_PROMISING_RATIO": str(capture_promising_ratio),
-            "ASYNC_RL_RETRO_SELECTOR_SEED": env.get("RETRO_SELECTOR_SEED", "20260802"),
-            "ASYNC_RL_RETRO_SELECTOR_FALLBACK": env.get("RETRO_SELECTOR_FALLBACK", "0"),
-            "ASYNC_RL_RETRO_GROUP_RATIO": str(retro_ratio),
-            "ASYNC_RL_RETRO_POOL_PROMISING_RATIO": str(pool_promising_ratio),
-            "ASYNC_RL_RETRO_POOL_ORDER": pool_order,
-            "ASYNC_RL_RETRO_MIN_POLICY_AGE": env.get("RETRO_MIN_POLICY_AGE", "0"),
-            "ASYNC_RL_RETRO_MAX_POLICY_AGE": env.get("RETRO_MAX_POLICY_AGE", "4"),
-            "ASYNC_RL_RETRO_MAX_ATTEMPTS": env.get("RETRO_MAX_ATTEMPTS", "3"),
         }
+        if rollout_mode == "retro":
+            self.environment.update(
+                {
+                    "ASYNC_RL_RETRO_RUN_TAG": state_tag,
+                    "ASYNC_RL_RETRO_MANIFEST_PATH": manifest_path,
+                    "ASYNC_RL_RETRO_SNAPSHOT_KIND": env.get("RETRO_SNAPSHOT_KIND", "directory"),
+                    "ASYNC_RL_RETRO_SNAPSHOT_PATH": "/app",
+                    "ASYNC_RL_RETRO_SNAPSHOT_TTL": env.get(
+                        "RETRO_SNAPSHOT_TTL", str(48 * 60 * 60)
+                    ),
+                    "ASYNC_RL_RETRO_CAPTURE_STATUS": "tentative",
+                    "ASYNC_RL_RETRO_MIN_SCORE": env.get("RETRO_MIN_SCORE", "0.1"),
+                    "ASYNC_RL_RETRO_MAX_SCORE": env.get("RETRO_MAX_SCORE", "0.95"),
+                    "ASYNC_RL_RETRO_MIN_REMAINING": env.get("RETRO_MIN_REMAINING", "0.0"),
+                    "ASYNC_RL_RETRO_MIN_TURN": env.get("RETRO_MIN_TURN", "2"),
+                    "ASYNC_RL_RETRO_REGRESSION_DELTA": env.get(
+                        "RETRO_REGRESSION_DELTA", "0.1"
+                    ),
+                    "ASYNC_RL_RETRO_STAGNANT_SUBMISSIONS": str(stagnant_submissions),
+                    "ASYNC_RL_RETRO_PROMISING_CONSECUTIVE": str(promising_consecutive),
+                    "ASYNC_RL_RETRO_TARGET_TRAJECTORY_FRACTION": str(target_fraction),
+                    "ASYNC_RL_RETRO_MAX_FRACTION_ERROR": str(max_fraction_error),
+                    "ASYNC_RL_RETRO_SELECTOR_ASSIGNMENT": selector_assignment,
+                    "ASYNC_RL_RETRO_CAPTURE_PROMISING_RATIO": str(capture_promising_ratio),
+                    "ASYNC_RL_RETRO_SELECTOR_SEED": env.get("RETRO_SELECTOR_SEED", "20260802"),
+                    "ASYNC_RL_RETRO_SELECTOR_FALLBACK": env.get("RETRO_SELECTOR_FALLBACK", "0"),
+                    "ASYNC_RL_RETRO_GROUP_RATIO": str(retro_ratio),
+                    "ASYNC_RL_RETRO_POOL_PROMISING_RATIO": str(pool_promising_ratio),
+                    "ASYNC_RL_RETRO_POOL_ORDER": pool_order,
+                    "ASYNC_RL_RETRO_MIN_POLICY_AGE": env.get("RETRO_MIN_POLICY_AGE", "0"),
+                    "ASYNC_RL_RETRO_MAX_POLICY_AGE": env.get("RETRO_MAX_POLICY_AGE", "4"),
+                    # 0 keeps the made-to-order retro lane (effectively synchronous:
+                    # measured behavior lag <= 1, and a straggler barrier that gated
+                    # 68-73% of steps in rlag4/rlag8). > 0 pre-generates retro groups
+                    # in a background worker so they age across updates, which both
+                    # removes the barrier and makes RETRO_MAX_BEHAVIOR_LAG bind.
+                    "ASYNC_RL_RETRO_PREFETCH_BATCHES": env.get("RETRO_PREFETCH_BATCHES", "0"),
+                    # Pre-2026-08-18 leg schedule: fresh completes, then retro,
+                    # with the buffer built after the fresh leg so age-0
+                    # snapshots are leasable. Only meaningful at prefetch 0.
+                    "ASYNC_RL_RETRO_SEQUENTIAL_LEGS": env.get("RETRO_SEQUENTIAL_LEGS", "0"),
+                    "ASYNC_RL_RETRO_MAX_ATTEMPTS": env.get("RETRO_MAX_ATTEMPTS", "3"),
+                }
+            )
+            if retro_max_behavior_lag > 0:
+                self.environment["ASYNC_RL_RETRO_MAX_BEHAVIOR_LAG"] = str(retro_max_behavior_lag)
+            # <= 0 omits the env, so the retro lane falls back to the fresh
+            # flag; with both disabled the lane is ungated (old behavior).
         self.use_wandb = True
         self.wandb_project = env.get("WANDB_PROJECT")
         self.wandb_group = run_tag
@@ -329,6 +408,11 @@ def build_launch_configs(
             "THINK_CLOSURE",
             "MODAL_ENVIRONMENT",
             "FRONTIER_CS_JUDGE_URL",
+            "ROLLOUT_PREFETCH_BATCHES",
+            "FRESH_MAX_BEHAVIOR_LAG",
+            "AGENTIC_QUERY_TIMEOUT",
+            "ROLLOUT_MODE",
+            "SGLANG_VERSION",
         }
     }
     image_env.update(
@@ -343,16 +427,35 @@ def build_launch_configs(
             "PYTHONPATH": f"/root/Megatron-LM/:{SLIME_ROOT}",
         }
     )
+    image_run_commands = [
+        f"rm -rf {HF_CACHE_PATH}",
+        "apt-get update && apt-get install -y --no-install-recommends rdma-core libibverbs1 ibverbs-providers",
+        "uv pip install --system modal mini-swe-agent datasets huggingface_hub pyyaml",
+    ]
+    if sglang_version := env.get("SGLANG_VERSION", "").strip():
+        # Upgrade the rollout engine in place (the base image ships
+        # 0.5.15.post1 — the newest sglang upstream slime supports; 0.5.18
+        # measured another +16% in rollout_sim but requires torch 2.13/cu13,
+        # which the pin below rejects by design). Pin torch to whatever the
+        # base image already has: Megatron is built against it, and letting
+        # sglang's resolver replace it would corrupt training silently. If the
+        # pin is unsatisfiable for this sglang version, the image build fails
+        # loudly instead.
+        image_run_commands.append(
+            'TORCH_PIN=$(python -c "import torch; print(torch.__version__.split(\'+\')[0])") '
+            f'&& uv pip install --system "sglang[all]=={sglang_version}" "torch==$TORCH_PIN"'
+        )
     modal = ModalLaunchConfig(
-        docker_image="slimerl/slime:nightly-dev-20260529a",
+        # Canonical inference stack since 2026-08-24 (rollout_sim benchmark,
+        # profiles/rollout_sim/README.md): sglang 0.5.15.post1 = 844 tok/GPU/s
+        # vs 728 on the old 20260529a image (sglang 0.5.12), same torch
+        # 2.11+cu129 / megatron-core stack. 0.5.18 (978) needs the cu13 stack
+        # and waits on upstream slime.
+        docker_image="slimerl/slime:nightly-dev-20260810a-cu129",
         gpu="H200",
         memory=(1024, int(2 * 1024 * 1024)),
         ephemeral_disk=2 * 1024 * 1024,
-        image_run_commands=(
-            f"rm -rf {HF_CACHE_PATH}",
-            "apt-get update && apt-get install -y --no-install-recommends rdma-core libibverbs1 ibverbs-providers",
-            "uv pip install --system modal mini-swe-agent datasets huggingface_hub pyyaml",
-        ),
+        image_run_commands=tuple(image_run_commands),
         image_env=image_env,
     )
     return modal, slime

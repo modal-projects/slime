@@ -433,12 +433,39 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 type=int,
                 default=None,
                 help=(
-                    "Staleness window (in weight updates) for the fully-async rollout worker. "
-                    "Caps the in-flight pool at rollout_max_staleness * rollout_batch_size groups, so a "
-                    "sample is trained at most ~rollout_max_staleness updates after generation "
-                    "(Little's law: lag = in-flight / consumed-per-step). None keeps the legacy pool "
-                    "size of sglang_server_concurrency * num_engines groups, whose lag is unbounded "
-                    "relative to the trainer. Only read by fully_async_rollout."
+                    "DEPRECATED alias for --rollout-prefetch-batches. Despite the name this only "
+                    "sizes the in-flight pool (capacity), bounding behavior-policy lag on average "
+                    "via Little's law but never per sample; stragglers and queued groups routinely "
+                    "exceed it. Use --rollout-prefetch-batches for capacity and "
+                    "--rollout-max-behavior-lag for an enforced staleness bound. "
+                    "Ignored when --rollout-prefetch-batches is set. Only read by fully_async_rollout."
+                ),
+            )
+            parser.add_argument(
+                "--rollout-prefetch-batches",
+                type=int,
+                default=None,
+                help=(
+                    "Capacity knob for the fully-async rollout worker: caps the in-flight pool "
+                    "(generating + completed-but-unshipped) at rollout_prefetch_batches * "
+                    "rollout_batch_size groups. Pure throughput/pipelining depth — makes NO "
+                    "staleness guarantee; pair with --rollout-max-behavior-lag for that. "
+                    "None falls back to --rollout-max-staleness, else to the engine cap "
+                    "(sglang_server_concurrency * num_engines). Only read by fully_async_rollout."
+                ),
+            )
+            parser.add_argument(
+                "--rollout-max-behavior-lag",
+                type=int,
+                default=None,
+                help=(
+                    "HARD bound on behavior-policy staleness, enforced at batch assembly. A group "
+                    "is admitted to the batch for rollout t only if (t + 1) - min(weight versions "
+                    "of its tokens) <= this value (weight version t+1 is what generates rollout t; "
+                    "versions are absolute across resumes). Violating groups are discarded and "
+                    "their prompts requeued for regeneration. Applies to both fresh and retro "
+                    "lanes. Groups with no recorded weight versions are admitted ungated. "
+                    "None disables enforcement (legacy behavior)."
                 ),
             )
 

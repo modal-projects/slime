@@ -328,6 +328,7 @@ def _selection_config(source: dict[str, Any]) -> SelectionConfig:
         min_turn=_env_int("ASYNC_RL_RETRO_MIN_TURN", 2),
         regression_delta=_env_float("ASYNC_RL_RETRO_REGRESSION_DELTA", 0.1),
         stagnant_submissions=_env_int("ASYNC_RL_RETRO_STAGNANT_SUBMISSIONS", 2),
+        promising_consecutive=_env_int("ASYNC_RL_RETRO_PROMISING_CONSECUTIVE", 0),
         target_fraction=_env_float("ASYNC_RL_RETRO_TARGET_TRAJECTORY_FRACTION", 0.5),
         max_fraction_error=_env_float("ASYNC_RL_RETRO_MAX_FRACTION_ERROR", 0.4),
         preferred_event=preferred,

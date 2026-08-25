@@ -144,6 +144,70 @@ def test_event_selector_promising_and_recovery():
     assert event.best_score == 0.6
 
 
+def test_promising_consecutive_counts_additional_confirmations():
+    selector = EventSelector(
+        SelectionConfig(
+            preferred_event=BranchEventType.PROMISING,
+            allow_fallback=False,
+            promising_consecutive=1,
+        )
+    )
+    assert (
+        selector.observe_log(
+            _submission_log(0.2),
+            turn_index=3,
+            max_steps=10,
+            elapsed_seconds=10,
+            wall_time_seconds=100,
+        )
+        is None
+    )
+    event = selector.observe_log(
+        _submission_log(0.2, 0.3),
+        turn_index=4,
+        max_steps=10,
+        elapsed_seconds=20,
+        wall_time_seconds=100,
+    )
+    assert event is not None and event.event_type == BranchEventType.PROMISING
+
+    reset = EventSelector(
+        SelectionConfig(
+            preferred_event=BranchEventType.PROMISING,
+            allow_fallback=False,
+            promising_consecutive=1,
+        )
+    )
+    assert reset.observe_log(
+        _submission_log(0.2),
+        turn_index=3,
+        max_steps=10,
+        elapsed_seconds=10,
+        wall_time_seconds=100,
+    ) is None
+    assert reset.observe_log(
+        _submission_log(0.2, 0.15),
+        turn_index=4,
+        max_steps=10,
+        elapsed_seconds=20,
+        wall_time_seconds=100,
+    ) is None
+    assert reset.observe_log(
+        _submission_log(0.2, 0.15, 0.3),
+        turn_index=5,
+        max_steps=10,
+        elapsed_seconds=30,
+        wall_time_seconds=100,
+    ) is None
+
+
+def test_selection_config_rejects_invalid_streak_thresholds():
+    with pytest.raises(ValueError, match="stagnant_submissions"):
+        SelectionConfig(stagnant_submissions=0)
+    with pytest.raises(ValueError, match="promising_consecutive"):
+        SelectionConfig(promising_consecutive=-1)
+
+
 def test_event_selector_keeps_candidate_nearest_realized_fraction():
     selector = EventSelector(
         SelectionConfig(

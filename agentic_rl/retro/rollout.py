@@ -12,7 +12,7 @@ import uuid
 
 from slime.rollout.base_types import RolloutFnTrainOutput
 from slime.rollout.filter_hub.base_types import call_dynamic_filter
-from slime.rollout.fully_async_rollout import _generate_rollout_async
+from slime.rollout.fully_async_rollout import _generate_rollout_async, behavior_lag
 from slime.rollout.sglang_rollout import GenerateState, generate_and_rm_group
 from slime.utils.async_utils import run
 from slime.utils.misc import load_function
@@ -21,6 +21,7 @@ from slime.utils.types import Sample
 from .buffer import ManifestStore, RetroBuffer
 from .group import make_branch_group, template_from_manifest
 from .manifest import RetroSnapshotManifest, SnapshotStatus
+from .prefetch import drain_ready_groups, get_worker as get_prefetch_worker, retro_prefetch_groups
 from .snapshot import delete_snapshot
 
 logger = logging.getLogger("agentic_rl.retro")
@@ -129,6 +130,7 @@ async def _generate_retro_groups(
     target: int,
     buffer: RetroBuffer,
     delete_consumed: bool,
+    prefetch_worker=None,
 ) -> tuple[list[list[Sample]], dict[str, int | float]]:
     state = GenerateState(args)
     dynamic_filter = (
@@ -137,12 +139,19 @@ async def _generate_retro_groups(
         else None
     )
     completed: list[list[Sample]] = []
+    max_behavior_lag = _retro_max_behavior_lag(args)
+    # With a bound of <=1 (or none) keep the legacy invariant that a retro
+    # group is single-behavior-version; a looser bound admits mixed-version
+    # continuations and relies on the lag gate alone.
+    allow_mixed_versions = max_behavior_lag is not None and max_behavior_lag > 1
     stats: dict[str, int | float] = {
         "requested": target,
         "generated": 0,
         "accepted": 0,
         "dropped": 0,
         "failed": 0,
+        "lag_rejected": 0,
+        "version_crossed_admitted": 0,
         "accepted_promising": 0,
         "accepted_recovery": 0,
     }
@@ -161,6 +170,45 @@ async def _generate_retro_groups(
     synthetic_base = 1_000_000_000 + rollout_id * 1_000_000
     max_attempts = max(target, target * _env_int("ASYNC_RL_RETRO_MAX_ATTEMPTS", 3))
     next_group_number = 0
+
+    # Prefetch lane: take whatever the background worker already generated
+    # before falling back to made-to-order generation for the remainder. These
+    # groups were produced under an earlier policy version, so their behavior
+    # lag is genuinely > 0 — that is the point of the buffer.
+    if prefetch_worker is not None and target > 0:
+        drained, drain_counters = drain_ready_groups(
+            prefetch_worker,
+            args=args,
+            rollout_id=rollout_id,
+            target=target,
+            event_targets=event_targets,
+            max_behavior_lag=max_behavior_lag,
+        )
+        stats["prefetch_lag_rejected"] = drain_counters["lag_rejected"]
+        stats["prefetch_quota_deferred"] = drain_counters["quota_deferred"]
+        stats["prefetch_aborted"] = drain_counters["aborted"]
+        stats["lag_rejected"] += drain_counters["lag_rejected"]
+        for manifest, group in drained:
+            policy_age = manifest.policy_age(current_update)
+            if policy_age is not None:
+                snapshot_policy_ages.append(policy_age)
+            filter_output = call_dynamic_filter(dynamic_filter, args, group)
+            buffer.consume(manifest.snapshot_id, rollout_id)
+            if delete_consumed:
+                try:
+                    await asyncio.to_thread(delete_snapshot, manifest.snapshot_id)
+                except RuntimeError as exc:
+                    logger.warning("retro snapshot cleanup %s: %s", manifest.snapshot_id, exc)
+            stats["generated"] += 1
+            if not filter_output.keep:
+                stats["dropped"] += 1
+                continue
+            completed.append(group)
+            stats["accepted"] += 1
+            accepted_by_event[manifest.event_type] += 1
+            stats[f"accepted_{manifest.event_type}"] += 1
+        stats["prefetch_taken"] = len(drained)
+        stats["prefetch_queue_left"] = prefetch_worker.queue_size()
 
     while len(completed) < target and stats["generated"] < max_attempts:
         desired_types = [
@@ -243,7 +291,7 @@ async def _generate_retro_groups(
                 for version in getattr(sample, "weight_versions", ())
                 if version is not None
             }
-            if len(versions) > 1:
+            if len(versions) > 1 and not allow_mixed_versions:
                 buffer.release(manifest.snapshot_id)
                 stats["failed"] += 1
                 logger.warning(
@@ -252,6 +300,22 @@ async def _generate_retro_groups(
                     sorted(versions),
                 )
                 continue
+            if len(versions) > 1:
+                stats["version_crossed_admitted"] += 1
+            if max_behavior_lag is not None:
+                lag = behavior_lag(result, rollout_id)
+                if lag is not None and lag > max_behavior_lag:
+                    # Continuation too stale to train on. The snapshot itself is
+                    # still valid — release it so a refill pass can retry it.
+                    buffer.release(manifest.snapshot_id)
+                    stats["lag_rejected"] += 1
+                    logger.warning(
+                        "retro mixed snapshot %s continuation behavior lag %d > %d; releasing",
+                        manifest.snapshot_id,
+                        lag,
+                        max_behavior_lag,
+                    )
+                    continue
 
             filter_output = call_dynamic_filter(dynamic_filter, args, result)
             buffer.consume(manifest.snapshot_id, rollout_id)
@@ -319,12 +383,23 @@ async def _transition_group_candidates(
             logger.warning("retro tentative snapshot cleanup %s: %s", manifest.snapshot_id, exc)
 
 
+def retro_group_split(total: int, ratio: float) -> tuple[int, int]:
+    """(retro_target, fresh_target) for a batch of ``total`` groups.
+
+    ratio 0 disables the retro lane entirely (fresh gets the whole batch),
+    which is the retro-off control arm: the mixed path then reduces to the
+    stock fully-async rollout plus in-episode snapshot capture.
+    """
+    ratio = min(1.0, max(0.0, ratio))
+    retro_target = min(total - 1, round(total * ratio)) if total > 1 else 0
+    return retro_target, total - retro_target
+
+
 async def _generate_retro_mixed(args, rollout_id: int, data_buffer) -> RolloutFnTrainOutput:
     rollout_started = time.perf_counter()
     total = int(args.rollout_batch_size)
-    ratio = min(1.0, max(0.0, _env_float("ASYNC_RL_RETRO_GROUP_RATIO", 0.25)))
-    retro_target = min(total - 1, round(total * ratio)) if total > 1 else 0
-    fresh_target = total - retro_target
+    ratio = _env_float("ASYNC_RL_RETRO_GROUP_RATIO", 0.25)
+    retro_target, fresh_target = retro_group_split(total, ratio)
     manifest_path = os.environ.get("ASYNC_RL_RETRO_MANIFEST_PATH")
     if not manifest_path:
         raise ValueError("ASYNC_RL_RETRO_MANIFEST_PATH is required for mixed retro rollout")
@@ -338,35 +413,99 @@ async def _generate_retro_mixed(args, rollout_id: int, data_buffer) -> RolloutFn
 
     fresh_args = copy.copy(args)
     fresh_args.rollout_batch_size = fresh_target
-    # The mixed path spends a second phase generating retro groups. A 4×
-    # staleness window would let the background fresh worker pre-generate
-    # 96 groups (768 episodes) during that phase, overwhelming the router and
-    # causing 600s request timeouts. Keep one fresh step warm instead.
-    fresh_args.rollout_max_staleness = 1
-    fresh_started = time.perf_counter()
-    fresh_output = await _generate_rollout_async(
-        fresh_args,
-        rollout_id,
-        data_buffer,
-        group_accept_hook=accept_primary,
-        group_reject_hook=reject_candidate_group,
-    )
-    fresh_seconds = time.perf_counter() - fresh_started
-    fresh_groups = list(fresh_output.samples)
+    if getattr(fresh_args, "rollout_prefetch_batches", None) is None:
+        # Capacity guard: without an explicit prefetch the worker pool defaults
+        # to the engine cap (hundreds of groups), which overwhelms the router.
+        # One batch matches this path's historical behavior; raise it via
+        # --rollout-prefetch-batches once --rollout-max-behavior-lag is set.
+        fresh_args.rollout_prefetch_batches = 1
+    fresh_args.rollout_max_staleness = None  # superseded by rollout_prefetch_batches
 
-    buffer = RetroBuffer(
-        max_items=max(1024, total * 16),
-        store=store,
-    )
-    retro_started = time.perf_counter()
-    retro_groups, retro_stats = await _generate_retro_groups(
-        args,
-        rollout_id=rollout_id,
-        target=retro_target,
-        buffer=buffer,
-        delete_consumed=True,
-    )
-    retro_seconds = time.perf_counter() - retro_started
+    # Old-P50-compatibility switch: run the legs in the pre-2026-08-18
+    # sequential order (fresh completes, then retro), with the RetroBuffer
+    # built AFTER the fresh leg so this step's own activated captures are
+    # leasable (snapshot policy age >= 0). The concurrent schedule can never
+    # offer age-0 snapshots — they don't exist yet when its retro leg runs —
+    # so this switch is the only way to reproduce the old retro data
+    # distribution for attribution runs. Costs the old straggler barrier.
+    sequential_legs = os.environ.get("ASYNC_RL_RETRO_SEQUENTIAL_LEGS", "0") == "1"
+
+    # With prefetch enabled the worker owns the only long-lived RetroBuffer —
+    # constructing another here would release its in-flight leases. (Depth > 0
+    # with sequential legs is contradictory — the worker pre-generates across
+    # steps, so buffer timing no longer decides snapshot age — but harmless:
+    # the worker's buffer wins.)
+    prefetch_worker = get_prefetch_worker(args, manifest_path=manifest_path)
+
+    def _make_buffer() -> RetroBuffer:
+        return RetroBuffer(
+            max_items=max(1024, total * 16),
+            store=store,
+        )
+
+    buffer = None
+    if prefetch_worker is not None:
+        buffer = prefetch_worker.buffer
+    elif not sequential_legs:
+        # The buffer view is taken here, before this step's fresh captures are
+        # activated, so the retro lane can only lease snapshots from earlier
+        # updates: effective snapshot policy age is >= 1 (was >= 0 when the legs
+        # ran sequentially and the buffer was built after the fresh leg).
+        buffer = _make_buffer()
+
+    async def _timed(coro):
+        t0 = time.perf_counter()
+        result = await coro
+        return result, time.perf_counter() - t0
+
+    if sequential_legs:
+        fresh_output, fresh_seconds = await _timed(
+            _generate_rollout_async(
+                fresh_args,
+                rollout_id,
+                data_buffer,
+                group_accept_hook=accept_primary,
+                group_reject_hook=reject_candidate_group,
+            )
+        )
+        if buffer is None:
+            buffer = _make_buffer()
+        (retro_groups, retro_stats), retro_seconds = await _timed(
+            _generate_retro_groups(
+                args,
+                rollout_id=rollout_id,
+                target=retro_target,
+                buffer=buffer,
+                delete_consumed=True,
+                prefetch_worker=prefetch_worker,
+            )
+        )
+    else:
+        # Fresh and retro legs run concurrently on the shared engine fleet; the
+        # sequential fresh-then-retro schedule left the engines mostly idle and
+        # made the retro leg pure added wall time.
+        (fresh_output, fresh_seconds), ((retro_groups, retro_stats), retro_seconds) = await asyncio.gather(
+            _timed(
+                _generate_rollout_async(
+                    fresh_args,
+                    rollout_id,
+                    data_buffer,
+                    group_accept_hook=accept_primary,
+                    group_reject_hook=reject_candidate_group,
+                )
+            ),
+            _timed(
+                _generate_retro_groups(
+                    args,
+                    rollout_id=rollout_id,
+                    target=retro_target,
+                    buffer=buffer,
+                    delete_consumed=True,
+                    prefetch_worker=prefetch_worker,
+                )
+            ),
+        )
+    fresh_groups = list(fresh_output.samples)
 
     missing = total - len(fresh_groups) - len(retro_groups)
     fallback_groups: list[list[Sample]] = []
@@ -375,7 +514,9 @@ async def _generate_retro_mixed(args, rollout_id: int, data_buffer) -> RolloutFn
     if missing > 0:
         fallback_args = copy.copy(args)
         fallback_args.rollout_batch_size = missing
-        fallback_args.rollout_max_staleness = 1
+        if getattr(fallback_args, "rollout_prefetch_batches", None) is None:
+            fallback_args.rollout_prefetch_batches = 1
+        fallback_args.rollout_max_staleness = None  # superseded by rollout_prefetch_batches
         fallback_started = time.perf_counter()
         fallback_output = await _generate_rollout_async(
             fallback_args,
@@ -414,9 +555,22 @@ async def _generate_retro_mixed(args, rollout_id: int, data_buffer) -> RolloutFn
             max_policy_age=_env_int("ASYNC_RL_RETRO_MAX_POLICY_AGE", 4),
             event_type="recovery",
         ),
-        "retro/staleness/fresh_pool_max_updates": fresh_args.rollout_max_staleness,
+        "retro/staleness/fresh_prefetch_batches": fresh_args.rollout_prefetch_batches,
+        "retro/staleness/fresh_max_behavior_lag": (
+            -1
+            if getattr(args, "rollout_max_behavior_lag", None) is None
+            else int(args.rollout_max_behavior_lag)
+        ),
+        "retro/staleness/retro_max_behavior_lag": (
+            -1 if _retro_max_behavior_lag(args) is None else int(_retro_max_behavior_lag(args))
+        ),
+        # 0 = made-to-order retro lane (effectively synchronous, lag <= 1);
+        # > 0 = groups pre-generated and aged across updates, so realized retro
+        # behavior lag can actually reach the bound above.
+        "retro/staleness/retro_prefetch_groups": retro_prefetch_groups(args),
         "retro/staleness/snapshot_min_policy_age_updates": _env_int("ASYNC_RL_RETRO_MIN_POLICY_AGE", 0),
         "retro/staleness/snapshot_max_policy_age_updates": _env_int("ASYNC_RL_RETRO_MAX_POLICY_AGE", 4),
+        "retro/staleness/sequential_legs": int(sequential_legs),
         "retro/mix/pool_promising_ratio": _env_float("ASYNC_RL_RETRO_POOL_PROMISING_RATIO", 0.5),
         "retro/timing/fresh_seconds": fresh_seconds,
         "retro/timing/retro_seconds": retro_seconds,
@@ -446,6 +600,15 @@ def _env_int(name: str, default: int) -> int:
         return int(os.environ.get(name, default))
     except ValueError:
         return default
+
+
+def _retro_max_behavior_lag(args) -> int | None:
+    """Retro-lane behavior-lag bound: ASYNC_RL_RETRO_MAX_BEHAVIOR_LAG when set,
+    else the fresh lane's --rollout-max-behavior-lag, else None (unbounded)."""
+    raw = os.environ.get("ASYNC_RL_RETRO_MAX_BEHAVIOR_LAG", "").strip()
+    if raw:
+        return int(raw)
+    return getattr(args, "rollout_max_behavior_lag", None)
 
 
 def _env_float(name: str, default: float) -> float:

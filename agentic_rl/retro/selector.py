@@ -31,6 +31,10 @@ class SelectionConfig:
     min_turn: int = 2
     regression_delta: float = 0.1
     stagnant_submissions: int = 2
+    # Number of *additional* consecutive qualifying new-best submissions to
+    # require after the first. Zero preserves the original immediate-new-best
+    # behavior; one requires two consecutive qualifying improvements.
+    promising_consecutive: int = 0
     target_fraction: float = 0.5
     max_fraction_error: float = 0.4
     preferred_event: BranchEventType | None = None
@@ -41,6 +45,10 @@ class SelectionConfig:
             raise ValueError("retro target_fraction must be in [0, 1]")
         if not 0.0 <= self.max_fraction_error <= 1.0:
             raise ValueError("retro max_fraction_error must be in [0, 1]")
+        if self.stagnant_submissions < 1:
+            raise ValueError("retro stagnant_submissions must be at least 1")
+        if self.promising_consecutive < 0:
+            raise ValueError("retro promising_consecutive must be non-negative")
 
 
 @dataclass(frozen=True)
@@ -69,6 +77,7 @@ class EventSelector:
         self._previous_score: float | None = None
         self._best_score: float | None = None
         self._stagnant = 0
+        self._promising_streak = 0
 
     def observe_log(
         self,
@@ -146,6 +155,11 @@ class EventSelector:
             self._stagnant = 0
         else:
             self._stagnant += 1
+        qualifying_improvement = improved and self.config.min_score <= score <= self.config.max_score
+        if qualifying_improvement:
+            self._promising_streak += 1
+        else:
+            self._promising_streak = 0
         self._previous_score = score
 
         remaining_steps = max(0, max_steps - turn_index)
@@ -176,7 +190,8 @@ class EventSelector:
             if self._accept(candidate.event_type):
                 return candidate
 
-        if self.config.min_score <= score <= self.config.max_score and improved:
+        required_promising_streak = self.config.promising_consecutive + 1
+        if qualifying_improvement and self._promising_streak >= required_promising_streak:
             candidate = BranchEvent(
                 event_type=BranchEventType.PROMISING,
                 turn_index=turn_index,
