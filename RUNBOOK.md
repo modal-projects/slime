@@ -96,14 +96,15 @@ slime/  (repo root — slime fork)
 │   │   ├── rewards.py                  ✅ step shapes (SHAPERS) + episode outcomes (OUTCOMES)
 │   │   ├── turn_reward.py              ✅ O3 rollout side          └── turn_advantage.py  ✅ O3 train side
 │   │
-│   ├── retro/                          ✅ retro replay runtime (re-abstraction = §7.1, next step)
+│   ├── retro/                          ✅ retro replay runtime (§7.1 re-abstraction landed 2026-08-26)
+│   │   ├── pool.py                     ✅ ReplayPool + Lease: the ONE owner of transitions + snapshot GC
+│   │   ├── protocols.py                ✅ the coupling surface: ScoreTrace / SnapshotBackend / AgentCheckpoint
+│   │   ├── backends/                   ✅ modal_snapshot.py (Modal images) · miniswe_checkpoint.py (Chain)
+│   │   ├── manifest.py / buffer.py     ✅ record schema + internal JSONL store/queue (behind pool.py)
 │   │   ├── env.py                      ✅ RetroFrontierCsEnv: capture (fresh) + replay (branch) episodes
 │   │   ├── selector.py                 ✅ branch-point choice (PROMISING/RECOVERY, target fraction)
-│   │   ├── snapshot.py                 ✅ Modal directory snapshots
-│   │   ├── manifest.py / buffer.py     ✅ snapshot manifest schema + JSONL store + replay pool
-│   │   ├── model.py / agent.py         ✅ ChainCheckpoint + SnapshottingAgent (resume support)
-│   │   ├── group.py                    ✅ manifest → 8-sample branch group
-│   │   ├── prefetch.py                 ✅ cross-step retro queue-ahead worker (staleness dose)
+│   │   ├── agent.py / group.py         ✅ SnapshottingAgent · manifest → 8-sample branch group
+│   │   ├── prefetch.py                 ✅ cross-step queue-ahead worker (holds Leases; staleness dose)
 │   │   ├── rollout.py                  ✅ generate_retro_mixed (--rollout-function-path in retro mode)
 │   │   ├── generate.py                 ✅ 6-line task_type stamp wrapper → core.generate
 │   │   └── README.md                   ✅ bootstrap + arm recipes
@@ -437,12 +438,12 @@ Three corrections to the intuitive mental model: (a) there is **no RetroManager 
 | # | Pain | Evidence | Fix |
 |---|---|---|---|
 | P1 | One env class does both capture and replay, switching on manifest presence, with thread-local episode state | env.py:74, :53 | Split: `CaptureTap` wraps any capturable env; a separate branch runner replays |
-| P2 | Lifecycle transitions written from 4 modules; snapshot deletion decided at ≥2 call sites outside the store | env.py:301; rollout.py:365-383, :321-326; buffer.py; prefetch.py:344 | One `ReplayPool` owns every transition **and** snapshot GC; callers never call `delete_snapshot` |
-| P3 | Two acquisition paths duplicate lease→group→generate, and the lag gate is implemented twice | prefetch.py:344 vs rollout.py:305-318 | One `ReplaySource.next_groups(n)`; prefetch depth is an internal detail (depth 0 = synchronous) |
+| P2 | ✅ FIXED 2026-08-26 (pool.py). ~~Lifecycle transitions written from 4 modules; snapshot deletion decided at ≥2 call sites outside the store~~ | env.py:301; rollout.py:365-383, :321-326; buffer.py; prefetch.py:344 | One `ReplayPool` owns every transition **and** snapshot GC; callers never call `delete_snapshot` |
+| P3 | ◐ Leases unified through ReplayPool 2026-08-26; the two generate choreographies (prefetch vs made-to-order) still live in prefetch.py/rollout.py — folding them into one ReplaySource remains | prefetch.py:344 vs rollout.py:305-318 | One `ReplaySource.next_groups(n)`; prefetch depth is an internal detail (depth 0 = synchronous) |
 | P4 | Family coupling: selector reads the judge submissions log; capture env subclasses `FrontierCsEnv` | selector.py:16; env.py:47 | `ScoreTrace` protocol — a stream of `(turn, score, ts)` events; harbor adapter = per-step `reward.json` trace |
-| P5 | Process-global state: prefetch singleton, per-path lock table, `_INDEX_BASE` id trick | prefetch.py:290, :57; buffer.py:12 | Pool + source instantiated once in the rollout fn's state and passed down; the pool allocates ids |
-| P6 | Backend hard-coupling: snapshot.py imports modal; checkpoint knows mini-swe `Chain` | snapshot.py:206; retro/model.py:9 | `SnapshotBackend` / `AgentCheckpoint` protocols; Modal + mini-swe impls stay project-side |
-| P7 | Names shadow the overlay: `retro/model.py`, `retro/generate.py`, `buffer.py` holding two classes | dir listing | Rename by concept: `pool.py`, `source.py`, `mixed.py`, `capture.py`, `checkpoint.py` |
+| P5 | ◐ Pool instantiated per-owner 2026-08-26 (no new globals); prefetch singleton + `_INDEX_BASE` remain | prefetch.py:290, :57; buffer.py:12 | Pool + source instantiated once in the rollout fn's state and passed down; the pool allocates ids |
+| P6 | ✅ FIXED 2026-08-26: backends/{modal_snapshot,miniswe_checkpoint}.py behind protocols.py | snapshot.py:206; retro/model.py:9 | `SnapshotBackend` / `AgentCheckpoint` protocols; Modal + mini-swe impls stay project-side |
+| P7 | ◐ model.py/snapshot.py renamed into backends/ 2026-08-26 (shims kept); pool.py landed; source.py/mixed.py/capture.py renames wait on P1/P3 | dir listing | Rename by concept: `pool.py`, `source.py`, `mixed.py`, `capture.py`, `checkpoint.py` |
 | P8 | ✅ DONE 2026-08-26. The biggest fork file was avoidable: `slime/rollout/fully_async_rollout.py` (+215) was string-loaded via `--rollout-function-path` | §3.10 | Moved to a local copy `core/fully_async.py` (vanilla arms use it too, so not `retro/`); its two CLI flags become `ASYNC_RL_*` knobs. Fork shrinks ~495→~240 lines. The `actor.py` absolute-weight_version fix (+5) cannot move — the lag gate depends on it |
 | P9 | Confusing knob names: `ASYNC_RL_RETRO_SNAPSHOT_PATH` is a sandbox-side *source dir* to photograph; `_MANIFEST_PATH` is a volume-side ledger destination | env.py:217; launch_config.py:98 | Rename to `..._SNAPSHOT_SOURCE_DIR`; make `/checkpoints/frontier_retro/<tag>/` the one volume-side retro home. A volume-tarball `SnapshotBackend` (vs Modal Images) becomes a swappable option |
 
@@ -499,6 +500,6 @@ Protocols at the boundary (the whole coupling surface): `ScoreTrace` (what "prog
 3. ✅ **De-fork the async rollout file (DONE 2026-08-26, P8)**: copied `slime/rollout/fully_async_rollout.py` → `core/fully_async.py`, point `--rollout-function-path` (and retro's imports) at it, convert its two CLI flags to `ASYNC_RL_*` knobs, and revert the slime file + `slime/utils/arguments.py` flags to upstream. Independently shippable; `tests/test_agent/test_behavior_lag.py` guards it.
 4. ✅ **Kill the external-repo dependency** (DONE 2026-08-26, #2): in-repo eval entrypoint (`HeldoutEvalSlimeConfig` + `ROLLOUT_MODE=eval` + `post_process_data`); results roll-up script committed (#7). This was the single highest-leverage change for "agent can start without context".
 5. ✅ **Knob registry** (DONE 2026-08-26, #3): `agentic_rl/knobs.py` — ~90 knobs with type/default/consumer/scope; launch-time validation with did-you-mean; scan-guarded by `test_knobs.py`. Family-specific knobs keep a family namespace (`FRONTIER_CS_*`).
-6. ◐ **Physical moves ✅ (2026-08-26) + retro re-abstraction (§7.1, remaining)** into the layout above — including `verifier_server/ → envs/frontier_cs/judge/` and the `pool/source/mixed/capture` split — updating every string-loaded path (contract #10) in the same commit, with temporary re-export shims (`agentic_rl/generate.py → core/generate.py`) for one deprecation window since old configs and W&B-recorded commands reference the old paths. The retro rewrite is behavior-preserving: same statuses, same JSONL format, same knobs — `tests/test_agent/test_retro.py` + `test_behavior_lag.py` are the harness.
+6. ✅ **Physical moves + retro re-abstraction (both 2026-08-26)** into the layout above — ReplayPool/Lease own every transition + snapshot GC (P2/P5 fixed), both acquisition paths route through the pool (P3), backends/ + protocols.py define the coupling surface (P4/P6 seam), renames done with shims (P7). **Deferred: P1** (splitting env.py's capture/replay dual-mode into a CaptureTap + branch runner — self-contained, do it when adding retro to a second family) — including `verifier_server/ → envs/frontier_cs/judge/` and the `pool/source/mixed/capture` split — updating every string-loaded path (contract #10) in the same commit, with temporary re-export shims (`agentic_rl/generate.py → core/generate.py`) for one deprecation window since old configs and W&B-recorded commands reference the old paths. The retro rewrite is behavior-preserving: same statuses, same JSONL format, same knobs — `tests/test_agent/test_retro.py` + `test_behavior_lag.py` are the harness.
 7. **Onboard Terminal-Bench 2.1, then SWE-Bench Pro** as the proof of the family layout: each should require only a new `envs/<family>/` dir + a dataset key + an arm script — zero edits to `core/`, `rewards/`, or `launch/` machinery. If either needs more, that's a layering bug to fix before calling the restructure done.
 8. **(Deferred — motivation, not a plan.)** If the mechanism half ever proves out and we want it upstream: `MixedRollout` + `ReplayPool`/`Lease` + the fork delta (hooks, `RolloutFnTrainOutput`, behavior-lag gate, prefetch flags) would be the PR, and it would shrink the fork to ~zero. Until then, everything stays under `agentic_rl/retro/` — the clean boundary is its own payoff.

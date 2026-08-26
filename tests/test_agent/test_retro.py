@@ -16,6 +16,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from agentic_rl.retro.buffer import ManifestStore, RetroBuffer
+from agentic_rl.retro.pool import Lease, ReplayPool
 from agentic_rl.retro.manifest import (
     Compatibility,
     RetroSnapshotManifest,
@@ -400,6 +401,74 @@ def test_tentative_manifest_requires_activation_and_newest_pool_order(tmp_path):
         order="newest",
     )
     assert leased is not None and leased.snapshot_id == "im-new"
+
+
+def _pool(tmp_path, *manifests, gc=None):
+    store = ManifestStore(tmp_path / "manifests.jsonl")
+    buffer = RetroBuffer(max_items=16, store=store)
+    for manifest in manifests:
+        buffer.add(manifest)
+    return ReplayPool(store=store, max_items=16, gc=gc)
+
+
+def test_pool_lease_consume_gcs_the_snapshot(tmp_path):
+    deleted = []
+    pool = _pool(tmp_path, _manifest("im-a"), gc=deleted.append)
+    lease = pool.lease("worker-1", event_type="promising", order="newest")
+    assert isinstance(lease, Lease) and lease.snapshot_id == "im-a"
+
+    import asyncio
+
+    asyncio.run(lease.consume(rollout_id=12))
+    assert deleted == ["im-a"]
+    assert pool.available() == 0
+    # A closed lease is inert: release after consume never resurrects it.
+    lease.release()
+    assert pool.available() == 0
+    reloaded = {m.snapshot_id: m for m in ManifestStore(tmp_path / "manifests.jsonl").load_latest()}
+    assert reloaded["im-a"].status == SnapshotStatus.CONSUMED
+    assert reloaded["im-a"].consumed_by_rollout == 12
+
+
+def test_pool_lease_context_exit_auto_releases(tmp_path):
+    deleted = []
+    pool = _pool(tmp_path, _manifest("im-b"), gc=deleted.append)
+    with pool.lease("worker-1") as lease:
+        assert lease.snapshot_id == "im-b"
+        assert pool.available() == 0  # LEASED while inside the block
+    assert deleted == []
+    assert pool.available() == 1  # auto-released → AVAILABLE again
+    again = pool.lease("worker-2")
+    assert again is not None and again.snapshot_id == "im-b"
+
+
+def test_pool_candidate_commit_and_abort(tmp_path):
+    import asyncio
+
+    from agentic_rl.retro.pool import abort_candidates, commit_candidates
+
+    deleted = []
+    store = ManifestStore(tmp_path / "manifests.jsonl")
+    kept = _manifest("im-keep", status=SnapshotStatus.TENTATIVE)
+    dropped = _manifest("im-drop", status=SnapshotStatus.TENTATIVE)
+    store.append(kept)
+    store.append(dropped)
+
+    def _group(manifest):
+        return [SimpleNamespace(metadata={"agentic": {"retro_candidates": [manifest.to_dict()]}})]
+
+    asyncio.run(commit_candidates(store, _group(kept)))
+    asyncio.run(abort_candidates(store, _group(dropped), gc=deleted.append))
+
+    latest = {m.snapshot_id: m for m in store.load_latest()}
+    assert latest["im-keep"].status == SnapshotStatus.AVAILABLE
+    assert latest["im-drop"].status == SnapshotStatus.INVALID
+    assert deleted == ["im-drop"]
+    # Only committed candidates become leasable.
+    pool = ReplayPool(store=store, gc=deleted.append)
+    lease = pool.lease("worker-1")
+    assert lease is not None and lease.snapshot_id == "im-keep"
+    assert pool.lease("worker-2") is None
 
 
 def test_chain_checkpoint_restores_exact_fully_masked_prefix():

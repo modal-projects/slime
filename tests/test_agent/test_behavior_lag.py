@@ -238,7 +238,7 @@ def test_retro_mixed_runs_fresh_and_retro_concurrently(monkeypatch, tmp_path):
     fresh_output = SimpleNamespace(samples=fresh_groups, metrics={})
     monkeypatch.setattr(retro_rollout, "_generate_rollout_async", _make_leg("fresh", fresh_output))
     monkeypatch.setattr(retro_rollout, "_generate_retro_groups", _make_leg("retro", (retro_groups, {})))
-    monkeypatch.setattr(retro_rollout, "RetroBuffer", lambda **kw: SimpleNamespace(available=lambda **k: 0))
+    monkeypatch.setattr(retro_rollout, "ReplayPool", lambda **kw: SimpleNamespace(available=lambda **k: 0))
 
     args = SimpleNamespace(
         rollout_batch_size=4,  # default 0.25 retro ratio -> 1 retro + 3 fresh
@@ -417,7 +417,7 @@ def test_retro_mixed_ratio_zero_reduces_to_fresh_only(monkeypatch, tmp_path):
 
     monkeypatch.setattr(retro_rollout, "_generate_rollout_async", _fresh)
     monkeypatch.setattr(retro_rollout, "_generate_retro_groups", _retro)
-    monkeypatch.setattr(retro_rollout, "RetroBuffer", lambda **kw: SimpleNamespace(available=lambda **k: 0))
+    monkeypatch.setattr(retro_rollout, "ReplayPool", lambda **kw: SimpleNamespace(available=lambda **k: 0))
 
     args = SimpleNamespace(
         rollout_batch_size=4,
@@ -464,7 +464,7 @@ def test_retro_mixed_sequential_legs_restores_old_schedule(monkeypatch, tmp_path
         buffer_built_at.append(time.monotonic())
         return SimpleNamespace(available=lambda **k: 0)
 
-    monkeypatch.setattr(retro_rollout, "RetroBuffer", _buffer)
+    monkeypatch.setattr(retro_rollout, "ReplayPool", _buffer)
 
     args = SimpleNamespace(
         rollout_batch_size=4,  # default 0.25 retro ratio -> 1 retro + 3 fresh

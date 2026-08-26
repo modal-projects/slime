@@ -6,8 +6,12 @@ This package now contains both the retro runtime and its Modal launch surface:
   and HF→Megatron conversion.
 - `launch_config.py` — Qwen3.6-27B topology, optimizer, checkpoint paths, reward
   arm, and retro ablation flags.
-- `env.py`, `selector.py`, `snapshot.py`, `manifest.py`, `buffer.py`,
-  `rollout.py` — capture and replay runtime.
+- `env.py`, `selector.py`, `manifest.py`, `pool.py` (ReplayPool + Lease — the
+  one owner of manifest lifecycle + snapshot GC; `buffer.py` is its internal
+  JSONL store/queue), `prefetch.py`, `rollout.py` — capture and replay runtime.
+- `protocols.py` — the coupling surface (ScoreTrace / SnapshotBackend /
+  AgentCheckpoint); `backends/` — the Modal-snapshot and mini-swe-checkpoint
+  implementations behind those protocols.
 
 The launcher no longer requires `multinode-training-guide`.
 

@@ -47,8 +47,8 @@ from slime.rollout.sglang_rollout import GenerateState, generate_and_rm_group
 from slime.utils.http_utils import get_rollout_num_engines
 from slime.utils.types import Sample
 
-from .buffer import ManifestStore, RetroBuffer
 from .group import make_branch_group, template_from_manifest
+from .pool import Lease, ReplayPool
 
 logger = logging.getLogger("agentic_rl.retro.prefetch")
 
@@ -111,21 +111,21 @@ def check_concurrency_headroom(args, retro_groups: int) -> None:
 class RetroPrefetchWorker:
     """Background thread keeping ``depth`` retro groups generated-and-waiting.
 
-    Owns the only long-lived :class:`RetroBuffer`: constructing a second one
-    would release this worker's in-flight leases (``RetroBuffer.__init__``
-    releases every LEASED manifest it loads).
+    Owns the only long-lived :class:`ReplayPool`: constructing a second one
+    would release this worker's in-flight leases (the pool's reload releases
+    every LEASED manifest it finds).
     """
 
     def __init__(self, args, *, manifest_path: str, depth: int):
         self.args = args
         self.depth = depth
-        self.store = ManifestStore(manifest_path)
-        self.buffer = RetroBuffer(
+        self.pool = ReplayPool(
+            manifest_path,
             max_items=max(1024, int(getattr(args, "rollout_batch_size", 8)) * 16),
-            store=self.store,
         )
-        # (manifest, group) pairs, generated and awaiting a training step.
-        self.ready: queue.Queue[tuple[object, list[Sample]]] = queue.Queue()
+        self.store = self.pool.store
+        # (lease, group) pairs, generated and awaiting a training step.
+        self.ready: queue.Queue[tuple[Lease, list[Sample]]] = queue.Queue()
         self.running = True
         self.thread: threading.Thread | None = None
         self._index_lock = threading.Lock()
@@ -152,10 +152,10 @@ class RetroPrefetchWorker:
     def queue_size(self) -> int:
         return self.ready.qsize()
 
-    def drain(self, limit: int) -> list[tuple[object, list[Sample]]]:
-        """Take up to ``limit`` ready (manifest, group) pairs."""
+    def drain(self, limit: int) -> list[tuple[Lease, list[Sample]]]:
+        """Take up to ``limit`` ready (lease, group) pairs."""
 
-        out: list[tuple[object, list[Sample]]] = []
+        out: list[tuple[Lease, list[Sample]]] = []
         while len(out) < limit:
             try:
                 out.append(self.ready.get_nowait())
@@ -163,18 +163,18 @@ class RetroPrefetchWorker:
                 break
         return out
 
-    def give_back(self, item: tuple[object, list[Sample]]) -> None:
+    def give_back(self, item: tuple[Lease, list[Sample]]) -> None:
         """Return a ready group unconsumed (e.g. it did not match the event
         quota this step). It keeps its snapshot lease and ages another update,
         which is the intended prefetch behavior."""
 
         self.ready.put(item)
 
-    def release(self, manifest) -> None:
+    def release(self, lease: Lease) -> None:
         try:
-            self.buffer.release(manifest.snapshot_id)
+            lease.release()
         except KeyError:
-            logger.warning("retro prefetch: snapshot %s not in buffer", manifest.snapshot_id)
+            logger.warning("retro prefetch: snapshot %s not in pool", lease.snapshot_id)
 
     # -- internals ---------------------------------------------------------
 
@@ -196,15 +196,15 @@ class RetroPrefetchWorker:
                 counts[event_type] += 1
         with self.ready.mutex:
             pending = list(self.ready.queue)
-        for manifest, _ in pending:
-            event_type = getattr(manifest, "event_type", None)
+        for lease, _ in pending:
+            event_type = getattr(lease, "event_type", None)
             if event_type in counts:
                 counts[event_type] += 1
         return counts
 
     async def _loop(self) -> None:
         state = GenerateState(self.args)
-        active: dict[asyncio.Task, tuple[object, str]] = {}
+        active: dict[asyncio.Task, tuple[Lease, str]] = {}
         pool_order = os.environ.get("ASYNC_RL_RETRO_POOL_ORDER", "newest").strip().lower()
         min_age = _env_int("ASYNC_RL_RETRO_MIN_POLICY_AGE", 0)
         max_age = _env_int("ASYNC_RL_RETRO_MAX_POLICY_AGE", 4)
@@ -212,22 +212,22 @@ class RetroPrefetchWorker:
         while self.running:
             try:
                 for task in [t for t in active if t.done()]:
-                    manifest, _ = active.pop(task)
+                    lease, _ = active.pop(task)
                     try:
                         result = task.result()
                     except Exception as exc:  # noqa: BLE001
                         self.stats["failed"] += 1
-                        self.release(manifest)
-                        logger.warning("retro prefetch generate failed (%s): %r", manifest.snapshot_id, exc)
+                        self.release(lease)
+                        logger.warning("retro prefetch generate failed (%s): %r", lease.snapshot_id, exc)
                         continue
                     if not isinstance(result, list) or len(result) != 8:
                         self.stats["failed"] += 1
-                        self.release(manifest)
+                        self.release(lease)
                         continue
                     self.stats["generated"] += 1
-                    self.ready.put((manifest, result))
+                    self.ready.put((lease, result))
 
-                self.buffer.refresh_from_store()
+                self.pool.refresh()
                 targets = self._quota_targets()
                 counts = self._queued_by_type([t for _, t in active.values()])
                 # The trainer's version is not visible here; policy-age filtering
@@ -240,14 +240,14 @@ class RetroPrefetchWorker:
                         and len(active) + self.ready.qsize() < self.depth
                     ):
                         consumer_id = f"prefetch-{uuid.uuid4().hex[:8]}"
-                        manifest = self.buffer.lease(
+                        lease = self.pool.lease(
                             consumer_id,
                             min_policy_age=min_age,
                             max_policy_age=max_age,
                             event_type=event_type,
                             order=pool_order,
                         )
-                        if manifest is None:
+                        if lease is None:
                             self.stats["lease_misses"] += 1
                             break
                         self.stats["leased"] += 1
@@ -255,13 +255,13 @@ class RetroPrefetchWorker:
                         n = self._claim_index()
                         try:
                             group = make_branch_group(
-                                template_from_manifest(manifest),
-                                manifest,
+                                template_from_manifest(lease.manifest),
+                                lease.manifest,
                                 group_index=_INDEX_BASE // 8 + n,
                                 first_sample_index=_INDEX_BASE + n * 8,
                             )
                         except Exception:  # noqa: BLE001
-                            self.release(manifest)
+                            self.release(lease)
                             logger.exception("retro prefetch: could not build branch group")
                             continue
                         task = asyncio.create_task(
@@ -272,7 +272,7 @@ class RetroPrefetchWorker:
                                 evaluation=False,
                             )
                         )
-                        active[task] = (manifest, event_type)
+                        active[task] = (lease, event_type)
 
                 await asyncio.sleep(1)
             except Exception:  # noqa: BLE001
@@ -310,7 +310,7 @@ def drain_ready_groups(
     target: int,
     event_targets: dict[str, int],
     max_behavior_lag: int | None,
-) -> tuple[list[tuple[object, list[Sample]]], dict[str, int]]:
+) -> tuple[list[tuple[Lease, list[Sample]]], dict[str, int]]:
     """Pull up to ``target`` groups honoring the event quota and the lag gate.
 
     Groups that do not fit this step's quota are handed back to the queue
@@ -318,26 +318,26 @@ def drain_ready_groups(
     are dropped and their snapshots released for a later attempt.
     """
 
-    taken: list[tuple[object, list[Sample]]] = []
+    taken: list[tuple[Lease, list[Sample]]] = []
     accepted_by_event = {"promising": 0, "recovery": 0}
     counters = {"lag_rejected": 0, "quota_deferred": 0, "aborted": 0}
     # Bound the scan so a queue full of wrong-type groups cannot spin.
     for item in worker.drain(max(target * 4, target + 8)):
-        manifest, group = item
+        lease, group = item
         if len(taken) >= target:
             worker.give_back(item)
             continue
         if any(getattr(s, "status", None) == Sample.Status.ABORTED for s in group):
             counters["aborted"] += 1
-            worker.release(manifest)
+            worker.release(lease)
             continue
         if max_behavior_lag is not None:
             lag = behavior_lag(group, rollout_id)
             if lag is not None and lag > max_behavior_lag:
                 counters["lag_rejected"] += 1
-                worker.release(manifest)
+                worker.release(lease)
                 continue
-        event_type = getattr(manifest, "event_type", None)
+        event_type = getattr(lease, "event_type", None)
         if event_type in accepted_by_event and accepted_by_event[event_type] >= event_targets.get(event_type, 0):
             counters["quota_deferred"] += 1
             worker.give_back(item)

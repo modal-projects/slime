@@ -1,0 +1,1 @@
+"""Infrastructure backends behind the retro protocols (RUNBOOK §7.1).\n\n``modal_snapshot`` implements SnapshotBackend with Modal directory-snapshot\nImages; ``miniswe_checkpoint`` implements AgentCheckpoint for the mini-swe\nagent (Chain capture/restore). Swappable without touching pool/source/mixed.\n"""

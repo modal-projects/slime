@@ -18,11 +18,10 @@ from slime.utils.async_utils import run
 from slime.utils.misc import load_function
 from slime.utils.types import Sample
 
-from .buffer import ManifestStore, RetroBuffer
+from .buffer import ManifestStore
 from .group import make_branch_group, template_from_manifest
-from .manifest import RetroSnapshotManifest, SnapshotStatus
+from .pool import ReplayPool, abort_candidates, commit_candidates
 from .prefetch import drain_ready_groups, get_worker as get_prefetch_worker, retro_prefetch_groups
-from .snapshot import delete_snapshot
 
 logger = logging.getLogger("agentic_rl.retro")
 
@@ -32,7 +31,7 @@ async def _generate_retro_groups(
     *,
     rollout_id: int,
     target: int,
-    buffer: RetroBuffer,
+    pool: ReplayPool,
     delete_consumed: bool,
     prefetch_worker=None,
 ) -> tuple[list[list[Sample]], dict[str, int | float]]:
@@ -92,25 +91,20 @@ async def _generate_retro_groups(
         stats["prefetch_quota_deferred"] = drain_counters["quota_deferred"]
         stats["prefetch_aborted"] = drain_counters["aborted"]
         stats["lag_rejected"] += drain_counters["lag_rejected"]
-        for manifest, group in drained:
-            policy_age = manifest.policy_age(current_update)
+        for lease, group in drained:
+            policy_age = lease.manifest.policy_age(current_update)
             if policy_age is not None:
                 snapshot_policy_ages.append(policy_age)
             filter_output = call_dynamic_filter(dynamic_filter, args, group)
-            buffer.consume(manifest.snapshot_id, rollout_id)
-            if delete_consumed:
-                try:
-                    await asyncio.to_thread(delete_snapshot, manifest.snapshot_id)
-                except RuntimeError as exc:
-                    logger.warning("retro snapshot cleanup %s: %s", manifest.snapshot_id, exc)
+            await lease.consume(rollout_id, gc=delete_consumed)
             stats["generated"] += 1
             if not filter_output.keep:
                 stats["dropped"] += 1
                 continue
             completed.append(group)
             stats["accepted"] += 1
-            accepted_by_event[manifest.event_type] += 1
-            stats[f"accepted_{manifest.event_type}"] += 1
+            accepted_by_event[lease.event_type] += 1
+            stats[f"accepted_{lease.event_type}"] += 1
         stats["prefetch_taken"] = len(drained)
         stats["prefetch_queue_left"] = prefetch_worker.queue_size()
 
@@ -125,7 +119,7 @@ async def _generate_retro_groups(
         groups = []
         for offset, event_type in enumerate(desired_types):
             consumer_id = f"train-{rollout_id}-{len(completed)}-{offset}-{uuid.uuid4().hex[:8]}"
-            manifest = buffer.lease(
+            lease = pool.lease(
                 consumer_id,
                 current_update=current_update,
                 min_policy_age=min_policy_age,
@@ -133,10 +127,10 @@ async def _generate_retro_groups(
                 event_type=event_type,
                 order=pool_order,
             )
-            if manifest is None:
+            if lease is None:
                 continue
-            leased.append(manifest)
-            policy_age = manifest.policy_age(current_update)
+            leased.append(lease)
+            policy_age = lease.manifest.policy_age(current_update)
             if policy_age is not None:
                 snapshot_policy_ages.append(policy_age)
             try:
@@ -147,14 +141,14 @@ async def _generate_retro_groups(
                 next_group_number += 1
                 groups.append(
                     make_branch_group(
-                        template_from_manifest(manifest),
-                        manifest,
+                        template_from_manifest(lease.manifest),
+                        lease.manifest,
                         group_index=synthetic_base // 8 + group_number,
                         first_sample_index=synthetic_base + group_number * 8,
                     )
                 )
             except Exception:
-                buffer.release(manifest.snapshot_id)
+                lease.release()
                 raise
         if not groups:
             break
@@ -175,18 +169,18 @@ async def _generate_retro_groups(
         )
         stats["generated"] += len(results)
 
-        for manifest, result in zip(leased, results, strict=True):
+        for lease, result in zip(leased, results, strict=True):
             if isinstance(result, BaseException):
-                buffer.release(manifest.snapshot_id)
+                lease.release()
                 stats["failed"] += 1
-                logger.error("retro mixed snapshot %s: %s", manifest.snapshot_id, result)
+                logger.error("retro mixed snapshot %s: %s", lease.snapshot_id, result)
                 continue
             if (
                 not isinstance(result, list)
                 or len(result) != 8
                 or any(getattr(sample, "status", None) == Sample.Status.ABORTED for sample in result)
             ):
-                buffer.release(manifest.snapshot_id)
+                lease.release()
                 stats["failed"] += 1
                 continue
             versions = {
@@ -196,11 +190,11 @@ async def _generate_retro_groups(
                 if version is not None
             }
             if len(versions) > 1 and not allow_mixed_versions:
-                buffer.release(manifest.snapshot_id)
+                lease.release()
                 stats["failed"] += 1
                 logger.warning(
                     "retro mixed snapshot %s crossed behavior versions %s",
-                    manifest.snapshot_id,
+                    lease.snapshot_id,
                     sorted(versions),
                 )
                 continue
@@ -211,80 +205,31 @@ async def _generate_retro_groups(
                 if lag is not None and lag > max_behavior_lag:
                     # Continuation too stale to train on. The snapshot itself is
                     # still valid — release it so a refill pass can retry it.
-                    buffer.release(manifest.snapshot_id)
+                    lease.release()
                     stats["lag_rejected"] += 1
                     logger.warning(
                         "retro mixed snapshot %s continuation behavior lag %d > %d; releasing",
-                        manifest.snapshot_id,
+                        lease.snapshot_id,
                         lag,
                         max_behavior_lag,
                     )
                     continue
 
             filter_output = call_dynamic_filter(dynamic_filter, args, result)
-            buffer.consume(manifest.snapshot_id, rollout_id)
-            if delete_consumed:
-                try:
-                    await asyncio.to_thread(delete_snapshot, manifest.snapshot_id)
-                except RuntimeError as exc:
-                    logger.warning("retro snapshot cleanup %s: %s", manifest.snapshot_id, exc)
+            await lease.consume(rollout_id, gc=delete_consumed)
             if not filter_output.keep:
                 stats["dropped"] += 1
                 continue
             completed.append(result)
             stats["accepted"] += 1
-            accepted_by_event[manifest.event_type] += 1
-            stats[f"accepted_{manifest.event_type}"] += 1
+            accepted_by_event[lease.event_type] += 1
+            stats[f"accepted_{lease.event_type}"] += 1
             if len(completed) >= target:
                 break
     if snapshot_policy_ages:
         stats["snapshot_policy_age_mean"] = sum(snapshot_policy_ages) / len(snapshot_policy_ages)
         stats["snapshot_policy_age_max"] = max(snapshot_policy_ages)
     return completed, stats
-
-
-def _candidate_manifests(group) -> list[RetroSnapshotManifest]:
-    manifests: dict[str, RetroSnapshotManifest] = {}
-
-    def visit(value) -> None:
-        if isinstance(value, list):
-            for item in value:
-                visit(item)
-            return
-        metadata = getattr(value, "metadata", None) or {}
-        candidates = (metadata.get("agentic") or {}).get("retro_candidates") or []
-        for candidate in candidates:
-            if not isinstance(candidate, dict):
-                continue
-            try:
-                manifest = RetroSnapshotManifest.from_dict(candidate)
-            except (KeyError, TypeError, ValueError):
-                continue
-            manifests[manifest.snapshot_id] = manifest
-
-    visit(group)
-    return list(manifests.values())
-
-
-async def _transition_group_candidates(
-    group,
-    *,
-    store: ManifestStore,
-    activate: bool,
-) -> None:
-    for manifest in _candidate_manifests(group):
-        if manifest.status != SnapshotStatus.TENTATIVE:
-            continue
-        if activate:
-            manifest.activate()
-            store.append_transition(manifest)
-            continue
-        manifest.invalidate()
-        store.append_transition(manifest)
-        try:
-            await asyncio.to_thread(delete_snapshot, manifest.snapshot_id)
-        except RuntimeError as exc:
-            logger.warning("retro tentative snapshot cleanup %s: %s", manifest.snapshot_id, exc)
 
 
 def retro_group_split(total: int, ratio: float) -> tuple[int, int]:
@@ -311,10 +256,10 @@ async def _generate_retro_mixed(args, rollout_id: int, data_buffer) -> RolloutFn
     store = ManifestStore(manifest_path)
 
     async def accept_primary(group) -> None:
-        await _transition_group_candidates(group, store=store, activate=True)
+        await commit_candidates(store, group)
 
     async def reject_candidate_group(group) -> None:
-        await _transition_group_candidates(group, store=store, activate=False)
+        await abort_candidates(store, group)
 
     fresh_args = copy.copy(args)
     fresh_args.rollout_batch_size = fresh_target
@@ -327,7 +272,7 @@ async def _generate_retro_mixed(args, rollout_id: int, data_buffer) -> RolloutFn
     fresh_args.rollout_max_staleness = None  # superseded by rollout_prefetch_batches
 
     # Old-P50-compatibility switch: run the legs in the pre-2026-08-18
-    # sequential order (fresh completes, then retro), with the RetroBuffer
+    # sequential order (fresh completes, then retro), with the ReplayPool
     # built AFTER the fresh leg so this step's own activated captures are
     # leasable (snapshot policy age >= 0). The concurrent schedule can never
     # offer age-0 snapshots — they don't exist yet when its retro leg runs —
@@ -335,28 +280,25 @@ async def _generate_retro_mixed(args, rollout_id: int, data_buffer) -> RolloutFn
     # distribution for attribution runs. Costs the old straggler barrier.
     sequential_legs = os.environ.get("ASYNC_RL_RETRO_SEQUENTIAL_LEGS", "0") == "1"
 
-    # With prefetch enabled the worker owns the only long-lived RetroBuffer —
+    # With prefetch enabled the worker owns the only long-lived ReplayPool —
     # constructing another here would release its in-flight leases. (Depth > 0
     # with sequential legs is contradictory — the worker pre-generates across
-    # steps, so buffer timing no longer decides snapshot age — but harmless:
-    # the worker's buffer wins.)
+    # steps, so pool timing no longer decides snapshot age — but harmless:
+    # the worker's pool wins.)
     prefetch_worker = get_prefetch_worker(args, manifest_path=manifest_path)
 
-    def _make_buffer() -> RetroBuffer:
-        return RetroBuffer(
-            max_items=max(1024, total * 16),
-            store=store,
-        )
+    def _make_pool() -> ReplayPool:
+        return ReplayPool(store=store, max_items=max(1024, total * 16))
 
-    buffer = None
+    pool = None
     if prefetch_worker is not None:
-        buffer = prefetch_worker.buffer
+        pool = prefetch_worker.pool
     elif not sequential_legs:
-        # The buffer view is taken here, before this step's fresh captures are
+        # The pool view is taken here, before this step's fresh captures are
         # activated, so the retro lane can only lease snapshots from earlier
         # updates: effective snapshot policy age is >= 1 (was >= 0 when the legs
-        # ran sequentially and the buffer was built after the fresh leg).
-        buffer = _make_buffer()
+        # ran sequentially and the pool was built after the fresh leg).
+        pool = _make_pool()
 
     async def _timed(coro):
         t0 = time.perf_counter()
@@ -373,14 +315,14 @@ async def _generate_retro_mixed(args, rollout_id: int, data_buffer) -> RolloutFn
                 group_reject_hook=reject_candidate_group,
             )
         )
-        if buffer is None:
-            buffer = _make_buffer()
+        if pool is None:
+            pool = _make_pool()
         (retro_groups, retro_stats), retro_seconds = await _timed(
             _generate_retro_groups(
                 args,
                 rollout_id=rollout_id,
                 target=retro_target,
-                buffer=buffer,
+                pool=pool,
                 delete_consumed=True,
                 prefetch_worker=prefetch_worker,
             )
@@ -404,7 +346,7 @@ async def _generate_retro_mixed(args, rollout_id: int, data_buffer) -> RolloutFn
                     args,
                     rollout_id=rollout_id,
                     target=retro_target,
-                    buffer=buffer,
+                    pool=pool,
                     delete_consumed=True,
                     prefetch_worker=prefetch_worker,
                 )
@@ -443,18 +385,18 @@ async def _generate_retro_mixed(args, rollout_id: int, data_buffer) -> RolloutFn
         "retro/mix/target_groups": retro_target,
         "retro/mix/accepted_groups": len(retro_groups),
         "retro/mix/fresh_groups": len(fresh_groups) + len(fallback_groups),
-        "retro/mix/buffer_available": buffer.available(
+        "retro/mix/buffer_available": pool.available(
             current_update=rollout_id + 1,
             min_policy_age=_env_int("ASYNC_RL_RETRO_MIN_POLICY_AGE", 0),
             max_policy_age=_env_int("ASYNC_RL_RETRO_MAX_POLICY_AGE", 4),
         ),
-        "retro/mix/buffer_promising": buffer.available(
+        "retro/mix/buffer_promising": pool.available(
             current_update=rollout_id + 1,
             min_policy_age=_env_int("ASYNC_RL_RETRO_MIN_POLICY_AGE", 0),
             max_policy_age=_env_int("ASYNC_RL_RETRO_MAX_POLICY_AGE", 4),
             event_type="promising",
         ),
-        "retro/mix/buffer_recovery": buffer.available(
+        "retro/mix/buffer_recovery": pool.available(
             current_update=rollout_id + 1,
             min_policy_age=_env_int("ASYNC_RL_RETRO_MIN_POLICY_AGE", 0),
             max_policy_age=_env_int("ASYNC_RL_RETRO_MAX_POLICY_AGE", 4),

@@ -16,9 +16,9 @@ from agentic_rl.envs.frontier_cs.env import SUBMISSIONS_LOG, FrontierCsEnv
 from .agent import SnapshottingAgent
 from .buffer import ManifestStore
 from .manifest import Compatibility, RetroSnapshotManifest, SnapshotKind, SnapshotStatus
-from .model import ChainCheckpoint, capture_checkpoint, restore_agent, restore_recording_model
+from .backends.miniswe_checkpoint import ChainCheckpoint, capture_checkpoint, restore_agent, restore_recording_model
 from .selector import BranchEvent, EventSelector, SelectionConfig, assign_event_type
-from .snapshot import RestoreResult, SnapshotResult, restore_directory, snapshot_sandbox
+from .backends.modal_snapshot import RestoreResult, SnapshotResult, restore_directory, snapshot_sandbox
 
 RETRO_MANIFEST_KEY = "retro_manifest"
 _STAGING_ROOT = "/tmp/retro_candidates"
