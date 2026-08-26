@@ -314,7 +314,7 @@ uv run pytest tests/test_agent -x
 |---|---|---|---|
 | 1 | `agentic_rl/README.md` claims "no edits to slime/" — false (+495 lines / 10 files) | §3.10 | Rewrite claim; add a `docs/SLIME_DELTA.md` and keep it in PR checklists |
 | 2 | ✅ RESOLVED 2026-08-26 (step 4): held-out eval ported in-repo (`HeldoutEvalSlimeConfig`, `ROLLOUT_MODE=eval`). Old guide `EXPERIMENT_CONFIG` classes remain only as legacy history | eval §3.6; `qwen3_6_frontiercs_eval.sh:4` cds into the guide repo | Port `heldout_avg3` into an in-repo eval entrypoint (an `EvalConfig` sibling of `RetroSlimeConfig` + `modal_train.py::eval`); retire guide dependency |
-| 3 | Config spread over 4 channels (CLI flags, `ASYNC_RL_*` env, custom-config YAML, external config classes); no registry of env knobs | launch_config.py:276-337, env.py:316, rewards.py:20-21,126-128 | One `knobs.py` module: every env var with default, type, consumer; launch validates against it |
+| 3 | ✅ RESOLVED 2026-08-26 (step 5): `agentic_rl/knobs.py` registers every project knob (type, default, consumer, scope); `build_launch_configs` validates and fails on typos; `tests/test_agent/test_knobs.py` scans read sites so the registry cannot drift | — | — |
 | 4 | Dead retro code: `phase1.py`, `survey.SurveyWriter`, `generate_retro_survey` (rollout.py:30,120), `snapshot.create_from_filesystem_snapshot`, `prefetch.reset_worker`, FILESYSTEM snapshot kind | retro map §3.4 | Delete (Phase-1 study is concluded; report lives in `progress/`) |
 | 5 | `async_rl_research/` = stale predecessor copy; `dashboard/app.py:8-9` still documents old paths | root listing | Salvage `notes_remote_judge_integration.md` into `docs/`, delete the dir, fix dashboard docstring |
 | 6 | `tests/test_agent/test_frontier_cs_eval.py` asserts 4 arms, registry has 11 → fails; not in CI matrix | test:32 vs arms.json | Fix assertion, add to `.github/workflows/pr-test.yml` |
@@ -332,7 +332,7 @@ Goal: an agent lands in `agentic_rl/`, reads one README per layer, and can add a
 ```
 agentic_rl/
 ├── RUNBOOK.md                  # this file (moved), kept current
-├── knobs.py                    # ★ new: registry of every ASYNC_RL_*/RETRO_* env knob
+├── knobs.py                    # ✅ registry of every ASYNC_RL_*/RETRO_*/FRONTIER_CS_* env knob (landed 2026-08-26)
 ├── core/                       # the model seam (generate, model, sandbox, prompts, timing)
 ├── envs/
 │   ├── base.py                 # RolloutEnv contract + registry (one entry per family dir)
@@ -505,7 +505,7 @@ Protocols at the boundary (the whole coupling surface): `ScoreTrace` (what "prog
 2. ✅ **Deletions** (2026-08-26): `async_rl_research/`, dead retro code (#4), legacy evalset path (#8), dead knobs (#10). Fix stale test + CI (#6).
 3. ✅ **De-fork the async rollout file (DONE 2026-08-26, P8)**: copied `slime/rollout/fully_async_rollout.py` → `core/fully_async.py`, point `--rollout-function-path` (and retro's imports) at it, convert its two CLI flags to `ASYNC_RL_*` knobs, and revert the slime file + `slime/utils/arguments.py` flags to upstream. Independently shippable; `tests/test_agent/test_behavior_lag.py` guards it.
 4. ✅ **Kill the external-repo dependency** (DONE 2026-08-26, #2): in-repo eval entrypoint (`HeldoutEvalSlimeConfig` + `ROLLOUT_MODE=eval` + `post_process_data`); results roll-up script committed (#7). This was the single highest-leverage change for "agent can start without context".
-5. **Knob registry** (#3): mechanical, high-payoff for discoverability; launch-time validation catches typo'd env vars. Family-specific knobs get a family namespace (`FRONTIER_CS_*` already follows this).
+5. ✅ **Knob registry** (DONE 2026-08-26, #3): `agentic_rl/knobs.py` — ~90 knobs with type/default/consumer/scope; launch-time validation with did-you-mean; scan-guarded by `test_knobs.py`. Family-specific knobs keep a family namespace (`FRONTIER_CS_*`).
 6. **Physical moves + retro re-abstraction (§7.1)** into the layout above — including `verifier_server/ → envs/frontier_cs/judge/` and the `pool/source/mixed/capture` split — updating every string-loaded path (contract #10) in the same commit, with temporary re-export shims (`agentic_rl/generate.py → core/generate.py`) for one deprecation window since old configs and W&B-recorded commands reference the old paths. The retro rewrite is behavior-preserving: same statuses, same JSONL format, same knobs — `tests/test_agent/test_retro.py` + `test_behavior_lag.py` are the harness.
 7. **Onboard Terminal-Bench 2.1, then SWE-Bench Pro** as the proof of the family layout: each should require only a new `envs/<family>/` dir + a dataset key + an arm script — zero edits to `core/`, `rewards/`, or `launch/` machinery. If either needs more, that's a layering bug to fix before calling the restructure done.
 8. **(Deferred — motivation, not a plan.)** If the mechanism half ever proves out and we want it upstream: `MixedRollout` + `ReplayPool`/`Lease` + the fork delta (hooks, `RolloutFnTrainOutput`, behavior-lag gate, prefetch flags) would be the PR, and it would shrink the fork to ~zero. Until then, everything stays under `agentic_rl/retro/` — the clean boundary is its own payoff.

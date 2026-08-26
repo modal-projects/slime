@@ -16,6 +16,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from agentic_rl.knobs import validate_environment
+
 HF_CACHE_PATH = Path("/root/.cache/huggingface")
 DATA_PATH = Path("/data")
 CHECKPOINTS_PATH = Path("/checkpoints")
@@ -731,6 +733,7 @@ def build_launch_configs(
     environ: Mapping[str, str] | None = None,
 ) -> tuple[ModalLaunchConfig, _SlimeConfigBase]:
     env = dict(os.environ if environ is None else environ)
+    validate_environment(env)  # typo'd project knobs fail here, not mid-run
     if env.get("ROLLOUT_MODE", "").strip().lower() == "eval":
         return _build_eval_launch_configs(env)
     slime = RetroSlimeConfig(env)
