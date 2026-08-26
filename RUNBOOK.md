@@ -310,18 +310,18 @@ uv run pytest tests/test_agent -x
 
 | # | Item | Evidence | Suggested action |
 |---|---|---|---|
-| 1 | `agentic_rl/README.md` claims "no edits to slime/" — false (+495 lines / 10 files) | §3.10 | Rewrite claim; add a `docs/SLIME_DELTA.md` and keep it in PR checklists |
+| 1 | ✅ RESOLVED 2026-08-26 (step 1): README claim rewritten; `agentic_rl/docs/SLIME_DELTA.md` is the authoritative fork inventory (updated in the same commit as any `slime/` edit) | §3.10 | — |
 | 2 | ✅ RESOLVED 2026-08-26 (step 4): held-out eval ported in-repo (`HeldoutEvalSlimeConfig`, `ROLLOUT_MODE=eval`). Old guide `EXPERIMENT_CONFIG` classes remain only as legacy history | eval §3.6; `qwen3_6_frontiercs_eval.sh:4` cds into the guide repo | Port `heldout_avg3` into an in-repo eval entrypoint (an `EvalConfig` sibling of `RetroSlimeConfig` + `modal_train.py::eval`); retire guide dependency |
 | 3 | ✅ RESOLVED 2026-08-26 (step 5): `agentic_rl/knobs.py` registers every project knob (type, default, consumer, scope); `build_launch_configs` validates and fails on typos; `tests/test_agent/test_knobs.py` scans read sites so the registry cannot drift | — | — |
-| 4 | Dead retro code: `phase1.py`, `survey.SurveyWriter`, `generate_retro_survey` (rollout.py:30,120), `snapshot.create_from_filesystem_snapshot`, `prefetch.reset_worker`, FILESYSTEM snapshot kind | retro map §3.4 | Delete (Phase-1 study is concluded; report lives in `progress/`) |
-| 5 | `async_rl_research/` = stale predecessor copy; `dashboard/app.py:8-9` still documents old paths | root listing | Salvage `notes_remote_judge_integration.md` into `docs/`, delete the dir, fix dashboard docstring |
-| 6 | `tests/test_agent/test_frontier_cs_eval.py` asserts 4 arms, registry has 11 → fails; not in CI matrix | test:32 vs arms.json | Fix assertion, add to `.github/workflows/pr-test.yml` |
+| 4 | ✅ RESOLVED 2026-08-26 (step 2): dead retro code deleted (`phase1.py`, survey path, FILESYSTEM snapshot kind, `reset_worker`); Phase-1 report lives in `docs/progress/` | retro map §3.4 | — |
+| 5 | ✅ RESOLVED 2026-08-26 (step 2): `async_rl_research/` deleted; `notes_remote_judge_integration.md` salvaged into `agentic_rl/docs/`; dashboard docstring fixed | root listing | — |
+| 6 | ✅ RESOLVED 2026-08-26 (step 2): `test_frontier_cs_eval.py` assertion fixed and file added to the CI agent-test matrix (now 12 CPU files) | test:32 vs arms.json | — |
 | 7 | ✅ RESOLVED 2026-08-26 (step 4): `eval/frontier_cs/rollup.py` reproduces the roll-up (50k reps, seed 20260817, unit=task) | §3.6 | — |
-| 8 | Legacy eval-data path: `evalset.py` + `prepare_eval_data.sh` + HF `agentic-rl-evalsets` superseded by guide `datasets.py` registry | envs/README.md migration list | Delete after last legacy config migrates |
-| 9 | `envs/legacy/swerebench_env.py` env vestigial (live SWE path = harbor conversion); `openthoughts_agent.py` converter unused | env map Q6 | Move to `environment/legacy/` or delete with its two configs |
-| 10 | Dead knobs: `agentic_max_boot_retries` (set everywhere, read nowhere — boot_retries hard-coded in sandbox.py:67); `agentic_grade_timeout` only pads sandbox lifetime | env map Q6 | Wire or delete; document `agentic_eval_timeout` as the real grading budget |
+| 8 | ✅ RESOLVED 2026-08-26 (step 2): legacy eval-data path deleted (`evalset.py` + `prepare_eval_data.sh`); superseded in-repo by `envs/datasets.py` + the `ROLLOUT_MODE=eval` flow | envs/README.md migration list | — |
+| 9 | ✅ RESOLVED 2026-08-26 (step 6a): native swerebench env + openthoughts converter quarantined in `envs/legacy/` | env map Q6 | — |
+| 10 | ✅ RESOLVED 2026-08-26 (step 2): dead knobs deleted; `agentic_eval_timeout` documented in `knobs.py` as the real grading budget | env map Q6 | — |
 | 11 | Legacy in-sandbox verifier (`CANONICAL_EVALUATE_PY`) ships in every task dir but never runs (server-verify default on) | frontiercs.py:50-52 | Keep as explicit fallback but mark; or stop baking it |
-| 12 | Minor: `_verify` reads judge URL from env while `_collect_artifacts` reads `md["judge_url"]` (can diverge); redundant re-filter buffer.py:179; unused `eval_config`/`sglang_config` fields launch_config.py:24 | env+retro maps | One-line fixes during the move |
+| 12 | ◐ PARTIAL 2026-08-26: `eval_config`/`sglang_config` fields are now used by the eval config. Still open: `_verify` reads `FRONTIER_CS_JUDGE_URL` from env while `_collect_artifacts` reads `md["judge_url"]` (envs/frontier_cs/env.py:197 vs :169) | env+retro maps | One-line fix: read the URL from metadata in `_verify` too |
 
 ## 7. Proposed target structure
 
