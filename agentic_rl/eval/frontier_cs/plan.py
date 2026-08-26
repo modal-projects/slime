@@ -1,7 +1,7 @@
 """Print, but never execute, Modal commands for Frontier-CS held-out evals.
 
 Since RUNBOOK §7 step 4 the commands run from THIS repo (ROLLOUT_MODE=eval →
-agentic_rl/retro/modal_train.py); the guide-repo dependency is gone. Run them
+agentic_rl/launch/modal_train.py); the guide-repo dependency is gone. Run them
 from the repo root.
 """
 
@@ -39,7 +39,7 @@ def build_plan(
     }
     prefix = _environment_prefix(environment)
     modal = "uv run --with modal modal run"
-    launcher = "agentic_rl/retro/modal_train.py"
+    launcher = "agentic_rl/launch/modal_train.py"
     dump = f"/checkpoints/swe_rollout_dumps/frontier_cs/heldout_avg3/{eval_id}/rollout_eval_0.pt"
     summary = str(Path(dump).with_name("summary.json"))
     return {

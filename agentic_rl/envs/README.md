@@ -41,7 +41,7 @@ git clone --depth 1 --filter=blob:none --sparse \
 git -C /tmp/hd sparse-checkout set datasets/swegym-lite
 
 # convert: bake task_path=<key>/tasks/<id>, split train/eval (or --eval-only)
-python -m agentic_rl.environment.convert2slime.harbor \
+python -m agentic_rl.envs.harbor.convert \
     --tasks-dir /tmp/hd/datasets/swegym-lite --key swe_gym_lite --eval-n 100 \
     --out-dir /tmp/pub/swe_gym_lite
 #   eval-only dataset (no train.jsonl):  --eval-only   (instead of --eval-n)
@@ -85,7 +85,7 @@ pytest grader** → F2P/P2P resolution) and hands off to `harbor.convert`.
 ```bash
 # Convert a quality-filtered Python pilot (meta.llm_metadata.code=='A', no issues).
 # --scan-limit caps rows examined; --limit caps accepted tasks; --eval-n holds out eval.
-python -m agentic_rl.environment.convert2slime.swerebench \
+python -m agentic_rl.envs.swe_rebench.convert \
     --out-dir /tmp/pub/swe_rebench_v2 --eval-n 100 --limit 300 --scan-limit 4000
 #   widen later: --min-grade none (no quality filter), bigger --limit/--scan-limit.
 
@@ -99,7 +99,7 @@ python -m agentic_rl.environment.convert2slime.swerebench \
 # the one validation that can't run locally — confirms conda 'testbed' activates
 # in the image and the test patch applies. Needs Modal env vars (MODAL_ENVIRONMENT…).
 ASYNC_RL_TASK_ROOT=/tmp/pub MODAL_ENVIRONMENT=junlin-dev \
-    python -m agentic_rl.environment.harbor \
+    python -m agentic_rl.envs.harbor.env \
     /tmp/pub/swe_rebench_v2/train.jsonl --task-root /tmp/pub --limit 3
 ```
 ```python
@@ -121,7 +121,7 @@ repointed at this dataset).
 ## Publish frontier-cs (adds `problems/`)
 
 ```bash
-python -m agentic_rl.environment.convert2slime.frontiercs \
+python -m agentic_rl.envs.frontier_cs.convert \
     --tasks-dir /Users/junlin/Documents/Research/multi-agent-autoresearch/tasks/frontier-cs-algorithm \
     --out-dir /tmp/pub/frontier_cs --eval-n 38 --seed 0
 cp -r /Users/junlin/Documents/Research/Misc/Frontier-CS/algorithmic/problems /tmp/pub/frontier_cs/problems

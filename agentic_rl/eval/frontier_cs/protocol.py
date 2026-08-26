@@ -11,7 +11,7 @@ from typing import Any
 DEFAULT_REGISTRY = Path(__file__).with_name("arms.json")
 # In-repo launch target since RUNBOOK §7 step 4 (was the guide repo's
 # frontier_cs.w_qwen3_6_27b_frontier_cs_heldout_avg3 EXPERIMENT_CONFIG).
-CONFIG_MODULE = "agentic_rl.retro.modal_train (ROLLOUT_MODE=eval)"
+CONFIG_MODULE = "agentic_rl.launch.modal_train (ROLLOUT_MODE=eval)"
 _SAFE_TAG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 

@@ -1,12 +1,12 @@
 """Unit tests for the Frontier-CS iterative-submission log parser.
 
-Pure stdlib target (``agentic_rl.environment.submissions``) — no modal/slime
+Pure stdlib target (``agentic_rl.envs.frontier_cs.submissions``) — no modal/slime
 imports — so this runs without a GPU/sandbox.
 """
 
 import json
 
-from agentic_rl.environment.submissions import parse_submissions_log
+from agentic_rl.envs.frontier_cs.submissions import parse_submissions_log
 
 
 def _log(*records: dict) -> str:

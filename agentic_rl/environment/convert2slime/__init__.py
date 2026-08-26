@@ -1,5 +1,1 @@
-"""Dataset converters: one per env, paired by filename (see environment/base.py).
-
-``environment/convert2slime/<name>.py`` is the only writer of the ``metadata`` schema
-``environment/<name>.py`` reads. Run offline; may carry heavy deps the rollout never imports.
-"""
+"""Deprecated shim package (restructure 2026-08-26): converters live in their family dirs under agentic_rl/envs/."""

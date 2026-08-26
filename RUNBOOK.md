@@ -12,15 +12,15 @@ Quick answers to "where is X":
 
 | What | Where |
 |---|---|
-| Launch scripts (the things you actually run) | `agentic_rl/slime_scripts/frontiercs_*.sh` |
-| The launcher + config compiler behind them | `agentic_rl/retro/modal_train.py`, `agentic_rl/retro/launch_config.py` |
+| Launch scripts (the things you actually run) | `agentic_rl/launch/arms/frontiercs_*.sh` |
+| The launcher + config compiler behind them | `agentic_rl/launch/modal_train.py`, `agentic_rl/launch/launch_config.py` |
 | Retro replay logic | `agentic_rl/retro/` |
 | Rollout core (agent loop ↔ sglang seam) | `agentic_rl/generate.py`, `agentic_rl/model.py`, `agentic_rl/sandbox.py` |
 | Task environments (harbor / frontier_cs) | `agentic_rl/environment/` |
-| Judge (grading server) | `agentic_rl/environment/verifier_server/` |
-| Reward shaping | `agentic_rl/environment/rewards.py`, `agentic_rl/turn_reward.py`, `agentic_rl/turn_advantage.py` |
+| Judge (grading server) | `agentic_rl/envs/frontier_cs/judge/` |
+| Reward shaping | `agentic_rl/rewards/rewards.py`, `agentic_rl/turn_reward.py`, `agentic_rl/turn_advantage.py` |
 | Held-out eval harness + results | `agentic_rl/eval/frontier_cs/` (⚠ launch configs live in the external `multinode-training-guide` repo) |
-| Metrics / W&B / debugging | `agentic_rl/metrics.py`, `agentic_rl/dashboard/` |
+| Metrics / W&B / debugging | `agentic_rl/metrics.py`, `agentic_rl/obs/dashboard/` |
 | Local modifications to slime itself | 10 files, ~+495 lines — see §3.10 |
 | Tests | `tests/test_agent/` (20 files) |
 
@@ -28,13 +28,13 @@ Quick answers to "where is X":
 
 ```
 OFFLINE DATA PREP (once per dataset)
-  environment/convert2slime/{harbor,frontiercs,swerebench}.py
+  envs/<family>/convert.py  (harbor · frontier_cs · swe_rebench)
       → task dirs + train.jsonl/eval.jsonl  → HF → Modal volume `slime-data` (/data)
 
 LAUNCH (per experiment arm)
-  agentic_rl/slime_scripts/frontiercs_<arm>.sh        # exports RETRO_*/ROLLOUT_MODE/DAPO_FILTER env
-    └─ modal run -d agentic_rl/retro/modal_train.py::train
-        └─ build_launch_configs()  (retro/launch_config.py:401)  # env → slime CLI flags + runtime env + Modal image
+  agentic_rl/launch/arms/frontiercs_<arm>.sh        # exports RETRO_*/ROLLOUT_MODE/DAPO_FILTER env
+    └─ modal run -d agentic_rl/launch/modal_train.py::train
+        └─ build_launch_configs()  (launch/launch_config.py:401)  # env → slime CLI flags + runtime env + Modal image
         └─ 6-node H200 clustered fn: rank0 = Ray head → submit `train_async.py <flags>` as Ray job
 
 TRAINING LOOP (inside Ray job)
@@ -55,109 +55,102 @@ EVAL (held-out avg@3, offline protocol)
     → python -m agentic_rl.eval.frontier_cs.aggregate → summary.json → hand-rolled results/*.json
 
 OBSERVABILITY
-  agentic_rl/metrics.py → W&B (agentic/*, async/*, retro/*)   |   dumps → agentic_rl/dashboard/
+  agentic_rl/metrics.py → W&B (agentic/*, async/*, retro/*)   |   dumps → agentic_rl/obs/dashboard/
 ```
 
 ## 2. Directory map
 
-Legend: ✅ live · 🟡 legacy (works, superseded) · ⚪ dead (no callers) · 📦 external dependency
+Legend: ✅ live · 🟡 legacy (works, superseded) · 📦 external dependency. Layout = the family-scoped structure from §7 (physical moves landed 2026-08-26; old module paths remain importable via deprecation shims for one window — see `tests/test_agent/test_layout_shims.py`).
 
 ```
 slime/  (repo root — slime fork)
+├── RUNBOOK.md                          ✅ this file (kept at root: it documents the fork delta + repo-wide contracts)
 ├── train.py, train_async.py            ✅ unmodified upstream entries (eval-only branch: train.py:35)
-├── slime/                              ✅ the framework — LOCALLY MODIFIED, see §3.10
-│   ├── rollout/fully_async_rollout.py  ⬜ back at upstream (de-forked 2026-08-26 → agentic_rl/core/fully_async.py)
-│   ├── utils/arguments.py              ✅ +40: --rollout-prefetch-batches / --rollout-max-behavior-lag
+├── slime/                              ✅ the framework — small audited delta, see agentic_rl/docs/SLIME_DELTA.md
 │   ├── utils/wandb_utils.py            ✅ +107: sgl-router /engine_metrics scraper
 │   └── backends/megatron_utils/…       ✅ small deltas (loss max-metric, absolute weight_version)
-├── slime_plugins/                      ✅ unmodified; qwen3.5 model spec used via scripts/models/qwen3.5-27B.sh
 ├── scripts/models/qwen3.5-27B.sh       ✅ MODEL_ARGS sourced by the launcher
 │
-├── agentic_rl/                         ✅ THE OVERLAY (everything below)
-│   ├── README.md                       🟡 good design doc; "no edits to slime/" claim is now FALSE
-│   ├── generate.py                     ✅ slime hook (--custom-generate-function-path): 1 call = 1 episode
-│   ├── model.py                        ✅ RecordingModel: in-process mini-swe model, token-exact recording
-│   ├── sandbox.py                      ✅ Modal sandbox = mini-swe bash Environment + deadlines/retries
-│   ├── prompts.py                      ✅ pinned prompt scaffold + BASH_TOOL + submit sentinel
-│   ├── metrics.py                      ✅ --custom-rollout-log-function-path: agentic/* async/* retro/*
-│   ├── turn_reward.py                  ✅ O3 rollout side (--custom-reward-post-process-path)
-│   ├── turn_advantage.py               ✅ O3 train side (--custom-advantage-function-path)
-│   ├── timing.py                       ✅ PhaseTimer (used by harbor episodes)
-│   ├── evalset.py                      🟡 legacy eval-subset builder (superseded by guide datasets.py)
+├── agentic_rl/                         ✅ THE OVERLAY
+│   ├── README.md                       ✅ design doc (model seam first-principles)
+│   ├── knobs.py                        ✅ registry of every project env knob + launch-time validation
 │   ├── config_example.yaml             ✅ template for --custom-config-path (agentic_* knobs)
 │   │
-│   ├── environment/                    ✅ task-family abstraction
-│   │   ├── base.py                     ✅ RolloutEnv contract + registry (load_env, ENVS; base.py:142)
-│   │   ├── harbor.py                   ✅ harbor tasks: in-place grading, step loop, oracle CLI
-│   │   ├── frontiercs.py               ✅ Frontier-CS = harbor + judge injection + server-side scoring
-│   │   ├── swerebench.py               🟡 native SWE-rebench env; live path now goes via harbor
-│   │   ├── rewards.py                  ✅ step shapes (SHAPERS) + episode outcomes (OUTCOMES)
-│   │   ├── submissions.py              ✅ parse/merge iterative submissions (server = source of truth)
-│   │   ├── verifier_server/            ✅ Node+go-judge judge: autostart.py, client.py, server/ (vendored)
-│   │   └── convert2slime/              ✅ offline dataset→jsonl converters (schema writers)
-│   │       ├── harbor.py               ✅ canonical writer   ├── frontiercs.py  ✅
-│   │       ├── swerebench.py           ✅ HF→harbor          └── openthoughts_agent.py 🟡 unused
+│   ├── core/                           ✅ the model seam (family-agnostic mechanism)
+│   │   ├── generate.py                 ✅ slime hook (--custom-generate-function-path): 1 call = 1 episode
+│   │   ├── model.py                    ✅ RecordingModel: in-process mini-swe model, token-exact recording
+│   │   ├── sandbox.py                  ✅ Modal sandbox = mini-swe bash Environment + deadlines/retries
+│   │   ├── prompts.py                  ✅ pinned prompt scaffold + BASH_TOOL + submit sentinel
+│   │   ├── timing.py                   ✅ PhaseTimer (used by harbor episodes)
+│   │   └── fully_async.py              ✅ de-forked async rollout (--rollout-function-path, vanilla arms)
 │   │
-│   ├── retro/                          ✅ retro replay runtime + THE launch surface
-│   │   ├── modal_train.py              ✅ ENTRY: modal run …::{train,download_model,download_data,convert_hf_to_megatron_checkpoint}
-│   │   ├── launch_config.py            ✅ env-var → full slime config compiler (RetroSlimeConfig)
+│   ├── envs/                           ✅ task families, one dir each
+│   │   ├── base.py                     ✅ RolloutEnv contract + ENVS registry (load_env)
+│   │   ├── README.md                   ✅ converter workflow + dataset registry guide
+│   │   ├── harbor/                     ✅ shared substrate: env.py (in-place grading, oracle CLI) + convert.py (canonical writer)
+│   │   ├── frontier_cs/                ✅ env.py (judge injection, server-side scoring) + convert.py + submissions.py + judge/ (Node+go-judge: autostart, client, server/)
+│   │   ├── swe_rebench/                ✅ convert.py (HF → harbor task dirs); env = harbor
+│   │   └── legacy/                     🟡 quarantined: native swerebench env + openthoughts converter
+│   │
+│   ├── rewards/                        ✅ family-agnostic reward layers
+│   │   ├── rewards.py                  ✅ step shapes (SHAPERS) + episode outcomes (OUTCOMES)
+│   │   ├── turn_reward.py              ✅ O3 rollout side          └── turn_advantage.py  ✅ O3 train side
+│   │
+│   ├── retro/                          ✅ retro replay runtime (re-abstraction = §7.1, next step)
 │   │   ├── env.py                      ✅ RetroFrontierCsEnv: capture (fresh) + replay (branch) episodes
 │   │   ├── selector.py                 ✅ branch-point choice (PROMISING/RECOVERY, target fraction)
-│   │   ├── snapshot.py                 ✅ Modal directory snapshots (⚪ filesystem-kind branch dead)
+│   │   ├── snapshot.py                 ✅ Modal directory snapshots
 │   │   ├── manifest.py / buffer.py     ✅ snapshot manifest schema + JSONL store + replay pool
 │   │   ├── model.py / agent.py         ✅ ChainCheckpoint + SnapshottingAgent (resume support)
 │   │   ├── group.py                    ✅ manifest → 8-sample branch group
 │   │   ├── prefetch.py                 ✅ cross-step retro queue-ahead worker (staleness dose)
 │   │   ├── rollout.py                  ✅ generate_retro_mixed (--rollout-function-path in retro mode)
-│   │   ├── generate.py                 ✅ 6-line task_type stamp wrapper → agentic_rl.generate
-│   │   ├── phase1.py / survey.py       ⚪ Phase-1 feasibility analyzers; no callers in training
+│   │   ├── generate.py                 ✅ 6-line task_type stamp wrapper → core.generate
 │   │   └── README.md                   ✅ bootstrap + arm recipes
 │   │
-│   ├── slime_scripts/                  launch wrappers (env-var setters, ~30 lines each)
-│   │   ├── frontiercs_retro0_s4.sh     ✅ retro harness @ dose 0 (overhead A/B)
-│   │   ├── frontiercs_vanilla_dapo_s4.sh / _r2.sh  ✅ no-retro control (DAPO on)
-│   │   ├── frontiercs_vanilla_grpo_nodapo.sh       ✅ control w/ DAPO filter off
-│   │   ├── frontiercs_oldp50_recreate.sh           ✅ p50 recreation arm
-│   │   ├── qwen3_6_frontiercs_eval.sh  🟡 legacy eval launcher (points at 📦 guide repo, 35B config)
-│   │   ├── prepare_eval_data.sh        🟡 legacy evalset publisher
-│   │   └── qwen3_6_swe_*.sh, glm4_7_*, qwen3_swe*  🟡 older SWE arms (guide-repo stack)
+│   ├── launch/                         ✅ THE launch surface
+│   │   ├── modal_train.py              ✅ ENTRY: modal run …::{train,download_model,download_data,post_process_data,convert_hf_to_megatron_checkpoint}
+│   │   ├── launch_config.py            ✅ env-var → full slime config compiler (RetroSlimeConfig + HeldoutEvalSlimeConfig)
+│   │   ├── arms/frontiercs_*.sh        ✅ live training arms (~30-line env-var setters)
+│   │   └── legacy/                     🟡 old guide-repo-stack scripts (SWE/GLM arms, exploratory eval)
 │   │
-│   ├── eval/frontier_cs/               ✅ held-out avg@3 protocol harness
+│   ├── eval/frontier_cs/               ✅ held-out avg@3 protocol harness (fully in-repo since step 4)
 │   │   ├── arms.json                   ✅ source of truth: protocol block + 11 checkpoint arms
 │   │   ├── protocol.py                 ✅ typed registry (EvalProtocol, ArmSpec)
-│   │   ├── plan.py                     ✅ ENTRY: python -m …plan → prints modal commands
+│   │   ├── plan.py                     ✅ ENTRY: python -m …plan → prints in-repo modal commands
 │   │   ├── aggregate.py                ✅ ENTRY: dump.pt → strict per-task avg@k summary.json
+│   │   ├── rollup.py                   ✅ ENTRY: per-arm summaries → results JSON (bootstrap SE + paired)
 │   │   ├── split.py                    ✅ train/eval disjointness + SHA-256 pin
-│   │   └── results/                    ✅ iteration-79.json (tracked), heldout-avg3-20260824.json (untracked)
-│   │       # ⚠ hand-assembled; the bootstrap script that made `paired` is NOT in the repo
+│   │   └── results/                    ✅ iteration-79.json + heldout-avg3-20260824.json (tracked)
 │   │
-│   ├── dashboard/                      ✅ Bun/TS rollout-dump viewer (Modal web app)
+│   ├── obs/                            ✅ observability
+│   │   ├── metrics.py                  ✅ --custom-rollout-log-function-path: agentic/* async/* retro/*
+│   │   └── dashboard/                  ✅ Bun/TS rollout-dump viewer (Modal web app)
+│   │
+│   ├── docs/                           ✅ SLIME_DELTA.md · notes_remote_judge_integration.md · progress/ (reports)
 │   ├── profiles/                       ✅ perf harnesses (judge, inference A/B, rollout sim, fp8, train profile)
-│   └── progress/retro-replay/          ✅ experiment report HTML + figures + fig-gen scripts
+│   │
+│   └── (shims)                         🟡 one deprecation window: generate.py, metrics.py, model.py, sandbox.py,
+│       environment/…, retro/{launch_config,modal_train}.py — each re-exports its new module
 │
-├── tests/test_agent/                   ✅ 20 CPU-only tests, fakes for all 4 external boundaries (_fakes.py)
-│   └── test_frontier_cs_eval.py        ⚠ STALE: expects 4 arms, registry has 11; not in CI
-├── tests/test_adapter_cross_loop_shutdown.py   ✅ untracked regression test
-│
-├── async_rl_research/                  ⚪ STALE predecessor copy of agentic_rl (untracked) — delete after
-│                                          salvaging notes_remote_judge_integration.md
-└── 📦 ../multinode-training-guide/     EXTERNAL repo: EXPERIMENT_CONFIG classes; still load-bearing for
-      slime/configs/frontier_cs/…       the held-out eval (w_qwen3_6_27b_frontier_cs_heldout_avg3.py)
+├── tests/test_agent/                   ✅ CPU-only suite (fakes for all 4 external boundaries); 9 files in CI
+└── 📦 ../multinode-training-guide/     EXTERNAL repo: legacy EXPERIMENT_CONFIG stack — no longer load-bearing
+                                        (held-out eval ported in-repo, RUNBOOK §7 step 4)
 ```
 
 ## 3. Subsystem guides
 
-### 3.1 Launch surface — `slime_scripts/` + `retro/{modal_train,launch_config}.py`
+### 3.1 Launch surface — `launch/` (arms/*.sh + modal_train.py + launch_config.py)
 
 The `frontiercs_*.sh` scripts are pure env-var wrappers; **all real config lives in `launch_config.py`**. Chain:
 
 ```
-frontiercs_<arm>.sh  →  modal run -d agentic_rl/retro/modal_train.py::train
-  build_launch_configs(os.environ)         retro/launch_config.py:401
+frontiercs_<arm>.sh  →  modal run -d agentic_rl/launch/modal_train.py::train
+  build_launch_configs(os.environ)         launch/launch_config.py:401
     → RetroSlimeConfig.cli_args()          :349   # every slime CLI flag, reflected from attrs
     → .environment                         :276   # ASYNC_RL_* runtime env → Ray runtime_env
     → ModalLaunchConfig                    :36    # image slimerl/slime:nightly-dev-20260810a-cu129, H200
-  train() @clustered(6, rdma=True)         retro/modal_train.py:371
+  train() @clustered(6, rdma=True)         launch/modal_train.py:371
     rank0: Ray head → JobSubmissionClient.submit_job(train_async.py + flags)   :418
     all ranks: periodic checkpoints-volume commit + teardown barrier            :244-354
 ```
@@ -180,7 +173,7 @@ One `generate()` call = one episode, run in a wide worker thread pool (`generate
 
 ### 3.3 Task environments — `environment/`
 
-`RolloutEnv` (base.py:61) owns one family's whole episode; rows route by `metadata.task_type` — `"harbor"`, `"frontier_cs"`, `"swerebench"`, or any `"pkg.module:Class"` spec (base.py:151 `load_env` — this is how retro injects its env). The schema each env reads is written **only** by its paired `convert2slime/<name>.py` (convert2slime/__init__.py).
+`RolloutEnv` (base.py:61) owns one family's whole episode; rows route by `metadata.task_type` — `"harbor"`, `"frontier_cs"`, `"swerebench"`, or any `"pkg.module:Class"` spec (base.py:151 `load_env` — this is how retro injects its env). The schema each env reads is written **only** by its family's `envs/<family>/convert.py`.
 
 **Frontier-CS episode, end-to-end** (the path that matters):
 
@@ -192,7 +185,7 @@ One `generate()` call = one episode, run in a wide worker thread pool (`generate
 6. Shaping: per-step `rewards.shape` (SHAPERS: fractional|binary|thresholded), then episode-level `shape_outcome` (OUTCOMES: final|best|disc_sum; `ASYNC_RL_OUTCOME_REWARD`, `ASYNC_RL_OUTCOME_GAMMA`, `ASYNC_RL_SOLVED_BONUS` — rewards.py:126-209).
 
 Oracle check (reference solution through the exact rollout path):
-`python -m agentic_rl.environment.harbor out/tasks.jsonl --task-root out --limit 3` (harbor.py:327).
+`python -m agentic_rl.envs.harbor.env out/tasks.jsonl --task-root out --limit 3` (harbor.py:327).
 
 ### 3.4 Retro replay — `retro/`
 
@@ -214,7 +207,7 @@ The fresh lane has its own pair: `--rollout-prefetch-batches` (capacity) vs `--r
 
 | Layer | Where | Wire-up | Knobs |
 |---|---|---|---|
-| Per-step shape | `environment/rewards.py` SHAPERS | called by env | `ASYNC_RL_REWARD_SHAPE`, `_THRESHOLD` |
+| Per-step shape | `rewards/rewards.py` SHAPERS | called by env | `ASYNC_RL_REWARD_SHAPE`, `_THRESHOLD` |
 | Episode outcome | `rewards.py` OUTCOMES (final/best/disc_sum) | called by harbor.py:223 | `ASYNC_RL_OUTCOME_REWARD`, `_GAMMA`, `_SOLVED_BONUS` |
 | Turn-level mix (O3) | `turn_reward.py` (rollout) + `turn_advantage.py` (train) | `--custom-reward-post-process-path` + `--custom-advantage-function-path` | `ASYNC_RL_TURN_REWARD=next_sub`, `ASYNC_RL_TURN_MIX_WEIGHT` (0.3) |
 
@@ -243,7 +236,7 @@ Load-bearing facts:
 ### 3.7 Metrics & debugging
 
 - `metrics.py:490 log_rollout_data` (`--custom-rollout-log-function-path`) → `agentic/*` (episode behavior, exec stats, submissions, outcome uplift), `async/*` (behavior lag vs trainer version), `retro/*` + per-lane `agentic/fresh|retro/*` splits. **Metric audit caveat:** headline rewards are post-DAPO-filter; use `dynamic_sampling/raw_reward_all` for unbiased reward.
-- Debug dumps: `--save-debug-rollout-data` → `slime-checkpoints` volume `/checkpoints/swe_rollout_dumps/<tag>/rollout_{id}.pt`; view with `agentic_rl/dashboard/` (Modal web app) or analyze with `eval/frontier_cs/aggregate.py`.
+- Debug dumps: `--save-debug-rollout-data` → `slime-checkpoints` volume `/checkpoints/swe_rollout_dumps/<tag>/rollout_{id}.pt`; view with `agentic_rl/obs/dashboard/` (Modal web app) or analyze with `eval/frontier_cs/aggregate.py`.
 - sglang engine gauges: local scraper in `slime/utils/wandb_utils.py` polls the router's `/engine_metrics` → `sgl_engine/*` (means across engines).
 - Experiment reports: `agentic_rl/progress/retro-replay/` (HTML report + `generate_figures.py` rebuilding from W&B).
 
@@ -264,7 +257,7 @@ Relative to merge-base with `main`: 8 framework files, ~+233 lines (was 10 / ~+4
 
 ## 4. Contracts & invariants (don't break these)
 
-1. **`metadata.task_type` is the routing key**; its schema is written only by the paired `convert2slime/` converter. `task_path` resolves against `ASYNC_RL_TASK_ROOT` (= `/data` on Modal).
+1. **`metadata.task_type` is the routing key**; its schema is written only by the family's `envs/<family>/convert.py` converter. `task_path` resolves against `ASYNC_RL_TASK_ROOT` (= `/data` on Modal).
 2. **Reward is set inline in generate**; `rm_type=None`. Never add a custom-rm path without removing the inline reward.
 3. **Group width 8** for retro branch groups (group.py:30) and `n_samples_per_prompt=8` for fresh — GRPO normalization assumes it.
 4. **`weight_versions` are absolute** across resumes (actor.py fix). The behavior-lag gate and `async/*` metrics depend on this.
@@ -279,16 +272,16 @@ Relative to merge-base with `main`: 8 framework files, ~+233 lines (was 10 / ~+4
 
 ```bash
 # Launch a training arm (from repo root)
-bash agentic_rl/slime_scripts/frontiercs_retro0_s4.sh          # or any frontiercs_*.sh
+bash agentic_rl/launch/arms/frontiercs_retro0_s4.sh          # or any frontiercs_*.sh
 
 # Inspect the resolved config without GPUs
 RETRO_REWARD_ARM=final RETRO_TARGET_TRAJECTORY_FRACTION=0.75 \
-  uv run --with modal modal run agentic_rl/retro/modal_train.py     # show_config local entrypoint
+  uv run --with modal modal run agentic_rl/launch/modal_train.py     # show_config local entrypoint
 
 # One-time bootstrap (model / data / megatron ckpt)
-MODAL_ENVIRONMENT=junlin-dev uv run --with modal modal run agentic_rl/retro/modal_train.py::download_model
-MODAL_ENVIRONMENT=junlin-dev uv run --with modal modal run agentic_rl/retro/modal_train.py::download_data
-MODAL_ENVIRONMENT=junlin-dev uv run --with modal modal run agentic_rl/retro/modal_train.py::convert_hf_to_megatron_checkpoint
+MODAL_ENVIRONMENT=junlin-dev uv run --with modal modal run agentic_rl/launch/modal_train.py::download_model
+MODAL_ENVIRONMENT=junlin-dev uv run --with modal modal run agentic_rl/launch/modal_train.py::download_data
+MODAL_ENVIRONMENT=junlin-dev uv run --with modal modal run agentic_rl/launch/modal_train.py::convert_hf_to_megatron_checkpoint
 
 # Held-out eval (plan prints per-arm in-repo modal commands; aggregate/rollup post-process)
 python -m agentic_rl.eval.frontier_cs.plan
@@ -296,16 +289,16 @@ python -m agentic_rl.eval.frontier_cs.aggregate <dump.pt> --output summary.json
 python -m agentic_rl.eval.frontier_cs.rollup --summary p50=<summary.json> --pair "p50 - base"
 
 # Oracle-check a converted dataset
-python -m agentic_rl.environment.harbor out/tasks.jsonl --task-root out --limit 3
+python -m agentic_rl.envs.harbor.env out/tasks.jsonl --task-root out --limit 3
 
 # Tests (CPU-only, fakes for sandbox/sglang/tokenizer/CLI)
 uv run pytest tests/test_agent -x
 ```
 
 **Adding things (the intended extension points):**
-- *New task family*: write `environment/convert2slime/<name>.py` (schema writer) + `environment/<name>.py` (RolloutEnv subclass) + register in `base.py:142 ENVS`. Run the oracle check before training.
-- *New reward shape/outcome*: add to `SHAPERS`/`OUTCOMES` in `environment/rewards.py`; select via `ASYNC_RL_REWARD_SHAPE` / `ASYNC_RL_OUTCOME_REWARD`. No env edits needed.
-- *New training arm*: new ~30-line `slime_scripts/frontiercs_<arm>.sh` setting env vars; add any new knob to `launch_config.py` (+ its test `tests/test_agent/test_retro_launch_config.py`).
+- *New task family*: create `envs/<family>/` with `convert.py` (schema writer) + `env.py` (RolloutEnv subclass, or reuse harbor) + register in `envs/base.py` `ENVS`. Run the oracle check before training.
+- *New reward shape/outcome*: add to `SHAPERS`/`OUTCOMES` in `rewards/rewards.py`; select via `ASYNC_RL_REWARD_SHAPE` / `ASYNC_RL_OUTCOME_REWARD`. No env edits needed.
+- *New training arm*: new ~30-line `launch/arms/frontiercs_<arm>.sh` setting env vars; add any new knob to `launch_config.py` (+ its test `tests/test_agent/test_retro_launch_config.py`).
 - *New eval arm*: append to `eval/frontier_cs/arms.json`; `protocol.py` validates on load.
 
 ## 6. Known debt (cleanup inventory)
@@ -319,8 +312,8 @@ uv run pytest tests/test_agent -x
 | 5 | `async_rl_research/` = stale predecessor copy; `dashboard/app.py:8-9` still documents old paths | root listing | Salvage `notes_remote_judge_integration.md` into `docs/`, delete the dir, fix dashboard docstring |
 | 6 | `tests/test_agent/test_frontier_cs_eval.py` asserts 4 arms, registry has 11 → fails; not in CI matrix | test:32 vs arms.json | Fix assertion, add to `.github/workflows/pr-test.yml` |
 | 7 | ✅ RESOLVED 2026-08-26 (step 4): `eval/frontier_cs/rollup.py` reproduces the roll-up (50k reps, seed 20260817, unit=task) | §3.6 | — |
-| 8 | Legacy eval-data path: `evalset.py` + `prepare_eval_data.sh` + HF `agentic-rl-evalsets` superseded by guide `datasets.py` registry | convert2slime/README migration list | Delete after last legacy config migrates |
-| 9 | `environment/swerebench.py` env vestigial (live SWE path = harbor conversion); `openthoughts_agent.py` converter unused | env map Q6 | Move to `environment/legacy/` or delete with its two configs |
+| 8 | Legacy eval-data path: `evalset.py` + `prepare_eval_data.sh` + HF `agentic-rl-evalsets` superseded by guide `datasets.py` registry | envs/README.md migration list | Delete after last legacy config migrates |
+| 9 | `envs/legacy/swerebench_env.py` env vestigial (live SWE path = harbor conversion); `openthoughts_agent.py` converter unused | env map Q6 | Move to `environment/legacy/` or delete with its two configs |
 | 10 | Dead knobs: `agentic_max_boot_retries` (set everywhere, read nowhere — boot_retries hard-coded in sandbox.py:67); `agentic_grade_timeout` only pads sandbox lifetime | env map Q6 | Wire or delete; document `agentic_eval_timeout` as the real grading budget |
 | 11 | Legacy in-sandbox verifier (`CANONICAL_EVALUATE_PY`) ships in every task dir but never runs (server-verify default on) | frontiercs.py:50-52 | Keep as explicit fallback but mark; or stop baking it |
 | 12 | Minor: `_verify` reads judge URL from env while `_collect_artifacts` reads `md["judge_url"]` (can diverge); redundant re-filter buffer.py:179; unused `eval_config`/`sglang_config` fields launch_config.py:24 | env+retro maps | One-line fixes during the move |
@@ -353,8 +346,8 @@ agentic_rl/
 
 **Planned task families:**
 
-- **Terminal-Bench 2.1** — harbor IS the terminal-bench task format, so this is near-zero env code: convert with the canonical harbor converter and register a dataset key. The real work is the v1 scope-gate audit (`convert2slime/harbor.py:112-121`: linux-only, no GPU/MCP, no docker-compose, no network restrictions, shared verifier only) against the TB 2.1 task set — decide which gates to lift vs how many tasks they exclude. Grading is the existing in-place `test.sh → reward.json` path.
-- **SWE-Bench Pro** — follow the SWE-rebench pattern (`convert2slime/swerebench.py` as the template): HF rows → harbor task dirs using the prebuilt per-task images directly. Known image quirks from prior runs: empty `ENTRYPOINT` + no keepalive (the shared sandbox's `sleep infinity` boot already handles this), and broken/poisoned pip indexes + missing curl in some images — so keep the grader self-contained (vendored stdlib test parser, as swerebench does) and provision nothing at episode time. Decide in-place vs fresh-sandbox grading explicitly (in-place is the harbor default; fresh-sandbox is the anti-reward-hack option the native swerebench env used).
+- **Terminal-Bench 2.1** — harbor IS the terminal-bench task format, so this is near-zero env code: convert with the canonical harbor converter and register a dataset key. The real work is the v1 scope-gate audit (`envs/harbor/convert.py` v1 scope gates: linux-only, no GPU/MCP, no docker-compose, no network restrictions, shared verifier only) against the TB 2.1 task set — decide which gates to lift vs how many tasks they exclude. Grading is the existing in-place `test.sh → reward.json` path.
+- **SWE-Bench Pro** — follow the SWE-rebench pattern (`envs/swe_rebench/convert.py` as the template): HF rows → harbor task dirs using the prebuilt per-task images directly. Known image quirks from prior runs: empty `ENTRYPOINT` + no keepalive (the shared sandbox's `sleep infinity` boot already handles this), and broken/poisoned pip indexes + missing curl in some images — so keep the grader self-contained (vendored stdlib test parser, as swerebench does) and provision nothing at episode time. Decide in-place vs fresh-sandbox grading explicitly (in-place is the harbor default; fresh-sandbox is the anti-reward-hack option the native swerebench env used).
 
 ### 7.1 Retro re-abstraction (clean layering under `retro/`)
 
@@ -506,6 +499,6 @@ Protocols at the boundary (the whole coupling surface): `ScoreTrace` (what "prog
 3. ✅ **De-fork the async rollout file (DONE 2026-08-26, P8)**: copied `slime/rollout/fully_async_rollout.py` → `core/fully_async.py`, point `--rollout-function-path` (and retro's imports) at it, convert its two CLI flags to `ASYNC_RL_*` knobs, and revert the slime file + `slime/utils/arguments.py` flags to upstream. Independently shippable; `tests/test_agent/test_behavior_lag.py` guards it.
 4. ✅ **Kill the external-repo dependency** (DONE 2026-08-26, #2): in-repo eval entrypoint (`HeldoutEvalSlimeConfig` + `ROLLOUT_MODE=eval` + `post_process_data`); results roll-up script committed (#7). This was the single highest-leverage change for "agent can start without context".
 5. ✅ **Knob registry** (DONE 2026-08-26, #3): `agentic_rl/knobs.py` — ~90 knobs with type/default/consumer/scope; launch-time validation with did-you-mean; scan-guarded by `test_knobs.py`. Family-specific knobs keep a family namespace (`FRONTIER_CS_*`).
-6. **Physical moves + retro re-abstraction (§7.1)** into the layout above — including `verifier_server/ → envs/frontier_cs/judge/` and the `pool/source/mixed/capture` split — updating every string-loaded path (contract #10) in the same commit, with temporary re-export shims (`agentic_rl/generate.py → core/generate.py`) for one deprecation window since old configs and W&B-recorded commands reference the old paths. The retro rewrite is behavior-preserving: same statuses, same JSONL format, same knobs — `tests/test_agent/test_retro.py` + `test_behavior_lag.py` are the harness.
+6. ◐ **Physical moves ✅ (2026-08-26) + retro re-abstraction (§7.1, remaining)** into the layout above — including `verifier_server/ → envs/frontier_cs/judge/` and the `pool/source/mixed/capture` split — updating every string-loaded path (contract #10) in the same commit, with temporary re-export shims (`agentic_rl/generate.py → core/generate.py`) for one deprecation window since old configs and W&B-recorded commands reference the old paths. The retro rewrite is behavior-preserving: same statuses, same JSONL format, same knobs — `tests/test_agent/test_retro.py` + `test_behavior_lag.py` are the harness.
 7. **Onboard Terminal-Bench 2.1, then SWE-Bench Pro** as the proof of the family layout: each should require only a new `envs/<family>/` dir + a dataset key + an arm script — zero edits to `core/`, `rewards/`, or `launch/` machinery. If either needs more, that's a layering bug to fix before calling the restructure done.
 8. **(Deferred — motivation, not a plan.)** If the mechanism half ever proves out and we want it upstream: `MixedRollout` + `ReplayPool`/`Lease` + the fork delta (hooks, `RolloutFnTrainOutput`, behavior-lag gate, prefetch flags) would be the PR, and it would shrink the fork to ~zero. Until then, everything stays under `agentic_rl/retro/` — the clean boundary is its own payoff.

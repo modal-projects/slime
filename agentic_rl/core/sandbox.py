@@ -1,0 +1,274 @@
+"""Modal sandbox booted from the task image; also mini-swe-agent's bash
+``Environment`` (duck-typed). One per rollout, run synchronously in a worker
+thread. The sandbox is a bare bash executor — the agent loop runs in-process on
+the head node, so nothing is provisioned inside.
+
+Beyond agentic_rl's original 65-line executor this keeps the hardening the
+general task families need: Dockerfile-built images, per-sandbox env injection
+(FrontierCS judge URL), cpu/memory sizing, the gVisor/vm_runtime toggle, boot
+retries, and separate stdout/stderr with an output cap.
+"""
+
+from __future__ import annotations
+
+import os
+import shlex
+import threading
+import time
+from dataclasses import dataclass
+
+import modal
+
+from minisweagent.exceptions import Submitted
+
+from .prompts import SUBMIT_SENTINEL
+
+DEFAULT_APP = "agentic-rl-sandboxes"
+OUTPUT_CAP = 1_000_000  # per-stream char cap; oversized output is head+tail elided
+# A wedged Modal exec stream has no client deadline; bound the whole round-trip at the
+# command's timeout + this grace (lets Modal's server-side timeout fire first in the
+# normal case, so the grace only bites when the stream is genuinely stuck).
+_EXEC_GRACE_SEC = 30
+
+
+@dataclass(frozen=True)
+class DockerfileImage:
+    """Build the image from a task Dockerfile instead of a registry ref."""
+
+    path: str
+    context_dir: str
+
+
+class SandboxBootError(RuntimeError):
+    """Sandbox creation failed after all retries; the sample aborts + recycles."""
+
+
+def _build_image(image: str | DockerfileImage):
+    if isinstance(image, DockerfileImage):
+        return modal.Image.from_dockerfile(image.path, context_dir=image.context_dir)
+    return modal.Image.from_registry(image)
+
+
+class Sandbox:
+    config = None  # mini-swe Environment protocol
+
+    def __init__(
+        self,
+        image: str | DockerfileImage,
+        *,
+        cwd: str = "/",
+        lifetime: int = 1800,
+        exec_timeout: int = 120,
+        app_name: str = DEFAULT_APP,
+        env: dict[str, str] | None = None,
+        cpu: float | None = None,
+        memory_mb: int | None = None,
+        vm_runtime: bool = False,
+        boot_retries: int = 2,
+    ):
+        # Default sandbox resources from env when the task doesn't size them
+        # (Modal's defaults are too small for running tests/builds).
+        if cpu is None and os.environ.get("SLIME_AGENT_SANDBOX_CPU"):
+            cpu = float(os.environ["SLIME_AGENT_SANDBOX_CPU"])
+        if memory_mb is None and os.environ.get("SLIME_AGENT_SANDBOX_MEMORY_MB"):
+            memory_mb = int(os.environ["SLIME_AGENT_SANDBOX_MEMORY_MB"])
+
+        app = modal.App.lookup(app_name, create_if_missing=True)
+        kwargs: dict = {"image": _build_image(image), "app": app, "timeout": lifetime}
+        if env:
+            kwargs["secrets"] = [modal.Secret.from_dict(dict(env))]
+        if cpu:
+            kwargs["cpu"] = float(cpu)
+        if memory_mb:
+            kwargs["memory"] = int(memory_mb)
+        if vm_runtime:
+            kwargs["experimental_options"] = {"vm_runtime": True}
+
+        t0 = time.perf_counter()
+        self.sb = self._create_with_retry(kwargs, boot_retries)
+        self.boot_time = time.perf_counter() - t0
+        self.cwd = cwd
+        self.exec_timeout = exec_timeout
+        self.exec_time = 0.0  # cumulative bash wall-time
+        self.exec_count = 0  # total bash commands dispatched
+        self.exec_timeouts = 0  # commands cut short by the client-side timeout (wedged/over-run)
+        self.exec_durations: list[float] = []  # one wall-time observation per dispatched/attempted command
+        # Monotonic per-command wall-clock deadline, armed by run_agent_leg for the
+        # duration of an agent leg so each exec is capped at the episode's remaining
+        # budget. None outside a leg (boot/prep/verify use their own timeouts).
+        self.deadline: float | None = None
+
+    @staticmethod
+    def _create_with_retry(kwargs: dict, retries: int):
+        # Keepalive "sleep infinity": some task images blank ENTRYPOINT, so a
+        # sandbox with no foreground command exits rc128 on boot.
+        last = None
+        for attempt in range(retries + 1):
+            try:
+                return modal.Sandbox.create("sleep", "infinity", **kwargs)
+            except Exception as e:  # noqa: BLE001 - transient boot errors retried, then surfaced
+                last = e
+                if attempt < retries:
+                    time.sleep(2 * (attempt + 1))
+        raise SandboxBootError(f"sandbox boot failed after {retries + 1} attempts: {last}")
+
+    def exec(
+        self,
+        command: str,
+        *,
+        cwd: str | None = None,
+        timeout: int | None = None,
+        check: bool = False,
+        env: dict[str, str] | None = None,
+    ) -> tuple[int, str, str]:
+        """Run ``command`` in a login shell; return ``(returncode, stdout, stderr)``.
+
+        The whole round-trip is bounded client-side. Modal's ``exec(timeout=)`` only
+        kills the SERVER-side process; the stream reads below have no deadline, so a
+        wedged gRPC stream can block for hours (the straggler that ran ~3h on one bash
+        call). While an agent leg is active ``self.deadline`` further caps the command
+        at the episode's remaining wall-time, so no single command outlasts the budget.
+        A hung / over-budget command returns rc 124 (so the agent sees a timeout
+        observation and the episode keeps moving) unless ``check`` is set, in which case
+        it raises like any other failure.
+        """
+        t0 = time.perf_counter()
+        self.exec_count += 1
+        budget = timeout or self.exec_timeout
+        if self.deadline is not None:
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0:
+                self._record_exec_duration(t0)
+                if check:
+                    raise TimeoutError(f"agent budget exhausted before: {command[:120]}")
+                return 124, "", "command not run: agent time budget exhausted"
+            budget = min(budget, max(1, int(remaining)))
+        prefix = "".join(f"export {shlex.quote(k)}={shlex.quote(v)}; " for k, v in (env or {}).items())
+        full = f"{prefix}cd {shlex.quote(cwd or self.cwd)} && {command}"
+
+        def _run() -> tuple[int, str, str]:
+            # text=False: commands can emit non-UTF-8 (binary diffs) that str-decode would raise on.
+            p = self.sb.exec("bash", "-lc", full, timeout=budget, text=False)
+            out = _cap(p.stdout.read().decode("utf-8", errors="replace"))
+            err = _cap(p.stderr.read().decode("utf-8", errors="replace"))
+            return p.wait(), out, err
+
+        try:
+            rc, out, err = _run_with_timeout(_run, budget + _EXEC_GRACE_SEC, f"exec({command[:80]})")
+        except TimeoutError:
+            self._record_exec_duration(t0)
+            self.exec_timeouts += 1
+            if check:
+                raise
+            return 124, "", f"command timed out after {budget}s (sandbox unresponsive)"
+        except Exception:
+            self._record_exec_duration(t0)
+            raise
+        self._record_exec_duration(t0)
+        if check and rc != 0:
+            raise RuntimeError(f"command failed (rc={rc}): {command[:120]}\n{err[-500:]}")
+        return rc, out, err
+
+    def _record_exec_duration(self, started: float) -> None:
+        elapsed = time.perf_counter() - started
+        self.exec_time += elapsed
+        # Defensive getattr keeps old pickles and test doubles usable.
+        durations = getattr(self, "exec_durations", None)
+        if durations is not None:
+            durations.append(elapsed)
+
+    def write_file(self, path: str, content) -> None:
+        # RPC, not a shell arg: patches/tarballs exceed ARG_MAX.
+        if isinstance(content, (bytes, bytearray)):
+            data, is_text = bytes(content), False
+        elif hasattr(content, "read") or self._is_pathlike(content):
+            with open(content, "rb") as fh:
+                data, is_text = fh.read(), False
+        else:
+            data, is_text = content, True
+
+        def _write() -> None:
+            if is_text:
+                self.sb.filesystem.write_text(data, path)
+            else:
+                self.sb.filesystem.write_bytes(data, path)
+
+        # Modal's filesystem write API takes no timeout, and a dead/unresponsive sandbox
+        # wedges the underlying gRPC stream with no client deadline -- a write_problem_file
+        # once hung ~3h until Modal tore the stream down, stalling the whole rollout and
+        # shipping the episode with zero usable turns. Bound it client-side so the episode
+        # fails fast (-> caught upstream, graded 0) instead of hanging.
+        _run_with_timeout(_write, self.exec_timeout, f"write_file({path})")
+
+    @staticmethod
+    def _is_pathlike(content) -> bool:
+        import os
+
+        return isinstance(content, (str, os.PathLike)) and len(str(content)) < 4096 and os.path.exists(str(content))
+
+    def read_file(self, path: str) -> str:
+        try:
+            return self.sb.filesystem.read_text(path)
+        except Exception:  # noqa: BLE001 - missing file -> empty, the env decides
+            return ""
+
+    # mini-swe Environment protocol -----------------------------------------
+    def execute(self, action: dict, cwd: str = "", *, timeout: int | None = None) -> dict:
+        rc, out, err = self.exec(action.get("command", ""), cwd=cwd or self.cwd, timeout=timeout or self.exec_timeout)
+        output = out if not err else (out + ("\n" if out else "") + err)
+        lines = output.lstrip().splitlines()
+        if lines and lines[0].strip() == SUBMIT_SENTINEL and rc == 0:
+            raise Submitted({"role": "exit", "content": "", "extra": {"exit_status": "Submitted", "submission": ""}})
+        return {"output": output, "returncode": rc, "exception_info": ""}
+
+    def get_template_vars(self, **kwargs) -> dict:
+        return {"system": "Linux", "release": "", "version": "", "machine": "x86_64", "cwd": self.cwd}
+
+    def serialize(self) -> dict:
+        return {}
+
+    def terminate(self) -> None:
+        try:
+            self.sb.terminate()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def __enter__(self) -> "Sandbox":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.terminate()
+
+
+def _run_with_timeout(fn, timeout_sec: float, what: str):
+    """Run a blocking, uninterruptible Modal RPC under a client-side wall-clock deadline.
+
+    Modal's sync filesystem writes and ``exec`` stream reads expose no client timeout,
+    and a dead/unresponsive sandbox can wedge the underlying gRPC stream indefinitely;
+    raise ``TimeoutError`` instead so the caller fails fast. The orphaned worker thread
+    is a daemon -- it can't be cancelled, but it dies with the process and only ever
+    leaks for an already-dead sandbox (torn down on episode exit)."""
+    result: dict = {}
+    done = threading.Event()
+
+    def _run() -> None:
+        try:
+            result["value"] = fn()
+        except BaseException as exc:  # noqa: BLE001 - re-raised to the caller below
+            result["error"] = exc
+        finally:
+            done.set()
+
+    threading.Thread(target=_run, name="modal-rpc", daemon=True).start()
+    if not done.wait(timeout_sec):
+        raise TimeoutError(f"{what} exceeded {timeout_sec}s; sandbox unresponsive")
+    if "error" in result:
+        raise result["error"]
+    return result.get("value")
+
+
+def _cap(text: str) -> str:
+    if len(text) <= OUTPUT_CAP:
+        return text
+    half = OUTPUT_CAP // 2
+    return f"{text[:half]}\n...[{len(text) - OUTPUT_CAP} chars elided]...\n{text[-half:]}"

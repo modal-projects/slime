@@ -9,7 +9,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from agentic_rl.retro.launch_config import build_launch_configs
+from agentic_rl.launch.launch_config import build_launch_configs
 
 
 def _env(**overrides: str) -> dict[str, str]:
@@ -106,7 +106,7 @@ def test_vanilla_mode_runs_stock_fully_async_without_retro_envs():
     )
 
     assert slime.rollout_function_path == "agentic_rl.core.fully_async.generate_rollout_fully_async"
-    assert slime.custom_generate_function_path == "agentic_rl.generate.generate"
+    assert slime.custom_generate_function_path == "agentic_rl.core.generate.generate"
     # No retro env leaks into the job: without the manifest path and the
     # RETRO_ENV_SPEC task-type stamp, episodes never attempt snapshot capture.
     assert not any(key.startswith("ASYNC_RL_RETRO") for key in slime.environment)

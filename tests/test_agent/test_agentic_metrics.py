@@ -1,7 +1,7 @@
 """The custom rollout-log hook must surface the tail/straggler + health metrics
 that made the ~3h-straggler slowness invisible on the old dashboard.
 
-``agentic_rl.metrics`` only needs numpy at module scope (its slime imports live inside
+``agentic_rl.obs.metrics`` only needs numpy at module scope (its slime imports live inside
 ``log_rollout_data``), so we exercise ``_agentic_metrics`` / ``_async_metrics`` directly
 with fake samples. numpy must be real (stubbed numpy would make every stat a MagicMock);
 any other missing dep is permissively stubbed so the import resolves on a CPU env.
@@ -35,9 +35,9 @@ def _import_with_stubs(modname: str):
 
 try:
     import numpy  # noqa: F401 - real numpy is required for meaningful stats
-    metrics = _import_with_stubs("agentic_rl.metrics")
+    metrics = _import_with_stubs("agentic_rl.obs.metrics")
 except Exception as exc:  # pragma: no cover - unsatisfiable import env
-    pytest.skip(f"agentic_rl.metrics unimportable: {exc}", allow_module_level=True)
+    pytest.skip(f"agentic_rl.obs.metrics unimportable: {exc}", allow_module_level=True)
 
 # ``_agentic_metrics`` lazily imports turn_reward, which imports torch. Preserve
 # the file's CPU-only contract even when torch is absent from the test runner.

@@ -17,14 +17,14 @@ Run from the Slime repository root:
 
 ```bash
 MODAL_ENVIRONMENT=junlin-dev \
-  uv run --with modal modal run agentic_rl/retro/modal_train.py::download_model
+  uv run --with modal modal run agentic_rl/launch/modal_train.py::download_model
 
 MODAL_ENVIRONMENT=junlin-dev \
-  uv run --with modal modal run agentic_rl/retro/modal_train.py::download_data
+  uv run --with modal modal run agentic_rl/launch/modal_train.py::download_data
 
 MODAL_ENVIRONMENT=junlin-dev \
   uv run --with modal modal run \
-  agentic_rl/retro/modal_train.py::convert_hf_to_megatron_checkpoint
+  agentic_rl/launch/modal_train.py::convert_hf_to_megatron_checkpoint
 ```
 
 The hooks use the existing Modal volumes:
@@ -41,7 +41,7 @@ The safe default is a two-node, four-group, one-update smoke:
 MODAL_ENVIRONMENT=junlin-dev WANDB_PROJECT=Modal \
 RETRO_REWARD_ARM=final \
 RETRO_TARGET_TRAJECTORY_FRACTION=0.50 \
-  uv run --with modal modal run agentic_rl/retro/modal_train.py::train
+  uv run --with modal modal run agentic_rl/launch/modal_train.py::train
 ```
 
 A full P75 Arm-A pilot:
@@ -61,7 +61,7 @@ RETRO_MIN_POLICY_AGE=0 \
 RETRO_MAX_POLICY_AGE=4 \
 RETRO_PHASE2_GROUPS=32 \
 RETRO_PHASE2_ROLLOUTS=20 \
-  uv run --with modal modal run -d agentic_rl/retro/modal_train.py::train
+  uv run --with modal modal run -d agentic_rl/launch/modal_train.py::train
 ```
 
 Use `RETRO_REWARD_ARM=best` for Arm B. Resume with the original state tag:
@@ -72,14 +72,14 @@ RETRO_REWARD_ARM=final \
 RETRO_TARGET_TRAJECTORY_FRACTION=0.75 \
 RETRO_PHASE2_GROUPS=32 \
 RETRO_PHASE2_ROLLOUTS=100 \
-  uv run --with modal modal run -d agentic_rl/retro/modal_train.py::train
+  uv run --with modal modal run -d agentic_rl/launch/modal_train.py::train
 ```
 
 Inspect the resolved config without provisioning GPUs:
 
 ```bash
 RETRO_REWARD_ARM=final RETRO_TARGET_TRAJECTORY_FRACTION=0.75 \
-  uv run --with modal modal run agentic_rl/retro/modal_train.py
+  uv run --with modal modal run agentic_rl/launch/modal_train.py
 ```
 
 ## Selected position ablations

@@ -404,7 +404,7 @@ def test_tentative_manifest_requires_activation_and_newest_pool_order(tmp_path):
 
 def test_chain_checkpoint_restores_exact_fully_masked_prefix():
     model_mod = _import_with_stubs("agentic_rl.retro.model")
-    chain_mod = _import_with_stubs("agentic_rl.model")
+    chain_mod = _import_with_stubs("agentic_rl.core.model")
     chain = chain_mod.Chain()
     chain.tokens = [11, 12, 13]
     chain.loss_mask = [0, 1, 1]

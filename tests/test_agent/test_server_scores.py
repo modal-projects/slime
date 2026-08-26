@@ -24,8 +24,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from agentic_rl.environment import rewards as rw
-from agentic_rl.environment.submissions import merge_server_submissions, parse_submissions_log
+from agentic_rl.rewards import rewards as rw
+from agentic_rl.envs.frontier_cs.submissions import merge_server_submissions, parse_submissions_log
 
 
 def _import_with_stubs(modname: str):
@@ -162,7 +162,7 @@ def test_merge_truncates_but_summary_spans_all():
 # ---------------------------------------------------------------------------
 
 try:
-    fcs_mod = _import_with_stubs("agentic_rl.environment.frontiercs")
+    fcs_mod = _import_with_stubs("agentic_rl.envs.frontier_cs.env")
 except Exception as exc:  # pragma: no cover - unsatisfiable import env
     pytest.skip(f"frontiercs unimportable: {exc}", allow_module_level=True)
 

@@ -31,17 +31,17 @@ slime fully_async_rollout ──> generate() [one call = one episode, in a worke
 
 | file | role |
 | --- | --- |
-| `model.py` | `RecordingModel`: in-process mini-swe Model; calls sglang `/generate`, records `(tokens, loss_mask, logprobs, weight_version)`, parses native tool-calls, splices the new-context delta (no assistant re-render). |
-| `sandbox.py` | Modal sandbox as mini-swe's bash `Environment` + grading executor; Dockerfile build, env injection, vm_runtime, boot retries. |
-| `generate.py` | the slime hook: dispatch by `task_type`, run one episode in a thread pool, build Sample(s). |
-| `metrics.py` | `agentic/*` episode + `async/*` off-policy-health metrics (`--custom-rollout-log-function-path`). |
-| `prompts.py` | mini-swe tool-call scaffold + `BASH_TOOL` + submit sentinel (pinned). |
-| `environment/` | the task-family abstraction (see below). |
-| `environment/convert2slime/` | dataset → slime prompt-jsonl converters. |
+| `core/model.py` | `RecordingModel`: in-process mini-swe Model; calls sglang `/generate`, records `(tokens, loss_mask, logprobs, weight_version)`, parses native tool-calls, splices the new-context delta (no assistant re-render). |
+| `core/sandbox.py` | Modal sandbox as mini-swe's bash `Environment` + grading executor; Dockerfile build, env injection, vm_runtime, boot retries. |
+| `core/generate.py` | the slime hook: dispatch by `task_type`, run one episode in a thread pool, build Sample(s). |
+| `obs/metrics.py` | `agentic/*` episode + `async/*` off-policy-health metrics (`--custom-rollout-log-function-path`). |
+| `core/prompts.py` | mini-swe tool-call scaffold + `BASH_TOOL` + submit sentinel (pinned). |
+| `envs/` | task families, one dir each (see below). |
+| `envs/<family>/convert.py` | dataset → slime prompt-jsonl converters (one per family). |
 
 ## Environment abstraction
 
-A `RolloutEnv` (`environment/base.py`) owns one task family's whole episode —
+A `RolloutEnv` (`envs/base.py`) owns one task family's whole episode —
 row validation, sandbox boot, driving the agent leg(s), and grading — while the
 `RecordingModel` + `Sandbox` are the shared tools it composes. Rows pick their
 env by `metadata.task_type`:
@@ -56,7 +56,7 @@ env by `metadata.task_type`:
 - **`swerebench`** — SWE-rebench-native single-shot tasks: capture the git diff,
   grade in a **fresh** sandbox (anti reward-hack) with pytest.
 
-`rewards.py` is the one place to design/A-B reward shapes (fractional | binary |
+`rewards/rewards.py` is the one place to design/A-B reward shapes (fractional | binary |
 thresholded) without touching envs.
 
 ## Fully-async / off-policy
@@ -96,5 +96,5 @@ points at the dir that `metadata.task_path`s resolve against (harbor/frontier_cs
 Oracle check (reference solution through the exact rollout path, reward → 1.0):
 
 ```
-python -m agentic_rl.environment.harbor out/usaco.jsonl --task-root out --limit 3
+python -m agentic_rl.envs.harbor.env out/usaco.jsonl --task-root out --limit 3
 ```

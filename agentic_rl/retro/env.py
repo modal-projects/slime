@@ -10,8 +10,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from agentic_rl.environment.base import EpisodeLimits, RewardResult
-from agentic_rl.environment.frontiercs import SUBMISSIONS_LOG, FrontierCsEnv
+from agentic_rl.envs.base import EpisodeLimits, RewardResult
+from agentic_rl.envs.frontier_cs.env import SUBMISSIONS_LOG, FrontierCsEnv
 
 from .agent import SnapshottingAgent
 from .buffer import ManifestStore
@@ -365,13 +365,13 @@ def _compatibility(md: dict[str, Any] | None = None) -> Compatibility:
 
 
 def _system_template() -> str:
-    from agentic_rl.prompts import SYSTEM_TEMPLATE
+    from agentic_rl.core.prompts import SYSTEM_TEMPLATE
 
     return SYSTEM_TEMPLATE
 
 
 def _instance_template() -> str:
-    from agentic_rl.prompts import INSTANCE_TEMPLATE
+    from agentic_rl.core.prompts import INSTANCE_TEMPLATE
 
     return INSTANCE_TEMPLATE
 

@@ -48,7 +48,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-# repo root on sys.path so `agentic_rl.environment...` imports regardless of cwd
+# repo root on sys.path so `agentic_rl.envs...` imports regardless of cwd
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
@@ -241,7 +241,7 @@ def phase_boot(args) -> None:
     os.environ["FRONTIER_CS_JUDGE_MEMORY_MB"] = str(args.judge_mem)
     os.environ.pop("FRONTIER_CS_JUDGE_URL", None)  # force a fresh boot
 
-    from agentic_rl.environment.verifier_server import autostart
+    from agentic_rl.envs.frontier_cs.judge import autostart
 
     log.info("booting judge sandbox (cpu=%s mem=%sMB env=%s)…", args.judge_cpu, args.judge_mem, args.modal_env)
     t0 = time.monotonic()

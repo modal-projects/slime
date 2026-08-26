@@ -42,7 +42,7 @@ def _scan_read_knobs() -> set[str]:
     found = set(_INDIRECT_READS)
     for path in sorted((_REPO_ROOT / "agentic_rl").rglob("*.py")):
         rel = path.relative_to(_REPO_ROOT).as_posix()
-        if "__pycache__" in rel or rel.startswith("agentic_rl/profiles/"):
+        if "__pycache__" in rel or rel.startswith(("agentic_rl/profiles/", "agentic_rl/environment/")):
             continue
         text = path.read_text()
         for pattern in _READ_PATTERNS:
@@ -53,7 +53,7 @@ def _scan_read_knobs() -> set[str]:
 
 def _scan_script_knobs() -> set[str]:
     found = set()
-    for path in sorted((_REPO_ROOT / "agentic_rl" / "slime_scripts").glob("*.sh")):
+    for path in sorted((_REPO_ROOT / "agentic_rl" / "launch").rglob("*.sh")):
         for match in re.finditer(
             r"^\s*(?:export\s+)?([A-Z][A-Z0-9_]+)=", path.read_text(), re.MULTILINE
         ):
@@ -84,7 +84,7 @@ def test_validation_flags_typos_with_suggestion():
 
 
 def test_launch_rejects_typoed_knob_end_to_end():
-    from agentic_rl.retro.launch_config import build_launch_configs
+    from agentic_rl.launch.launch_config import build_launch_configs
 
     with pytest.raises(ValueError, match="unknown environment knob"):
         build_launch_configs({"RETRO_PHASE2_GROUP": "32", "LAUNCH_STAMP": "20260826-000000"})

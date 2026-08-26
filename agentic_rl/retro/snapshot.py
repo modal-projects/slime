@@ -1,7 +1,7 @@
 """Modal directory-snapshot adapter for retro replay.
 
 All Modal imports are lazy so the metadata and selector tests remain CPU-only.
-The adapter accepts either the local ``agentic_rl.sandbox.Sandbox`` wrapper or a
+The adapter accepts either the local ``agentic_rl.core.sandbox.Sandbox`` wrapper or a
 raw ``modal.Sandbox`` handle.
 """
 

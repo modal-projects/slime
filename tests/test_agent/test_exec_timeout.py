@@ -12,7 +12,7 @@ The fix bounds the whole round-trip client-side (rc 124 on a wedge) and, while a
 agent leg is active, caps each command at the episode's remaining wall-time via
 ``Sandbox.deadline`` (armed by ``RolloutEnv.run_agent_leg``).
 
-Importing ``agentic_rl.sandbox`` pulls in ``modal`` / ``minisweagent``; on a CPU env
+Importing ``agentic_rl.core.sandbox`` pulls in ``modal`` / ``minisweagent``; on a CPU env
 we stub exactly the missing modules (never installed ones), so this runs in CI and
 locally and skips cleanly if the import still can't be satisfied.
 """
@@ -48,10 +48,10 @@ def _import_with_stubs(modname: str):
 
 
 try:
-    sandbox_mod = _import_with_stubs("agentic_rl.sandbox")
+    sandbox_mod = _import_with_stubs("agentic_rl.core.sandbox")
     Sandbox = sandbox_mod.Sandbox
 except Exception as exc:  # pragma: no cover - unsatisfiable import env
-    pytest.skip(f"agentic_rl.sandbox unimportable: {exc}", allow_module_level=True)
+    pytest.skip(f"agentic_rl.core.sandbox unimportable: {exc}", allow_module_level=True)
 
 
 class _FakeStream:
@@ -166,7 +166,7 @@ def test_records_duration_when_modal_exec_raises():
 
 def test_run_agent_leg_arms_and_clears_deadline(monkeypatch):
     """(a) end-to-end: the agent leg arms ``sandbox.deadline`` ~now+wall_time and clears it."""
-    base_mod = _import_with_stubs("agentic_rl.environment.base")
+    base_mod = _import_with_stubs("agentic_rl.envs.base")
     sb = _sandbox(_FakeProc(rc=0, out=b"ok"))
     observed: dict = {}
 

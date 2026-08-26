@@ -6,7 +6,7 @@ import copy
 from dataclasses import dataclass
 from typing import Any
 
-from agentic_rl.model import Chain
+from agentic_rl.core.model import Chain
 
 
 @dataclass(frozen=True)

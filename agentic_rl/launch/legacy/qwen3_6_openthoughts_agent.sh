@@ -15,7 +15,7 @@ cd /Users/junlin/Documents/Research/async-rl/multinode-training-guide
 # uv run --no-dev modal run slime/modal_train.py::download_data
 # Quick path — convert locally, then upload the out dir:
 # (cd ../slime && uv run --with datasets python -m \
-#   agentic_rl.environment.convert2slime.openthoughts_agent \
+#   agentic_rl.envs.legacy.openthoughts_agent_convert \
 #   --out-dir /tmp/openthoughts_agent)
 # uv run --no-dev modal volume put slime-data /tmp/openthoughts_agent /openthoughts_agent
 

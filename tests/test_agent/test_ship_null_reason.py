@@ -1,13 +1,13 @@
 """The dashboard's view of a no-usable-turn ("null") episode.
 
-Pure stdlib target (``agentic_rl.dashboard.convert``) — no modal/slime/torch
+Pure stdlib target (``agentic_rl.obs.dashboard.convert``) — no modal/slime/torch
 imports — so this runs without a GPU/sandbox. It locks the contract between
 ``generate._ship_null`` (producer) and ``convert.sample_view`` (consumer): a
 discarded episode must surface its *real* exit reason, and a rolled-back terminal
 generation must render instead of showing a blank trajectory.
 """
 
-from agentic_rl.dashboard import convert
+from agentic_rl.obs.dashboard import convert
 
 
 def _null_sample(agentic: dict) -> dict:

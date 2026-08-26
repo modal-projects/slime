@@ -5,8 +5,8 @@ each run's ``rollout_N.pt`` dumps can be inspected as agent conversations.
 
 Deploy/iterate (volume lives in the ``junlin-dev`` environment)::
 
-    MODAL_ENVIRONMENT=junlin-dev modal deploy agentic_rl/dashboard/app.py
-    MODAL_ENVIRONMENT=junlin-dev modal serve  agentic_rl/dashboard/app.py  # hot-reload
+    MODAL_ENVIRONMENT=junlin-dev modal deploy agentic_rl/obs/dashboard/app.py
+    MODAL_ENVIRONMENT=junlin-dev modal serve  agentic_rl/obs/dashboard/app.py  # hot-reload
 """
 
 import os

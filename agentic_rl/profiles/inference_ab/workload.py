@@ -10,14 +10,14 @@ production metrics describe it:
   together, so the radix cache sees the same sharing as production;
 - multi-turn episodes: each turn POSTs ``/generate`` with the full ``input_ids``
   and ``return_logprob=True`` (identical request shape to
-  ``agentic_rl.model._generate``), appends the generated ids plus a canned
+  ``agentic_rl.core.model._generate``), appends the generated ids plus a canned
   tool-observation block, sleeps a "sandbox exec" pause, and continues;
 - per-sibling ``sampling_seed`` when the deterministic arm is active, matching
   ``sglang_rollout.GenerateState.group_sampling_seeds``.
 
 A "step" is one batch of ``episodes`` episodes run under an in-flight cap of
 ``concurrency`` (production runs ~7 in-flight episodes per engine). Metrics are
-computed with the same definitions as ``agentic_rl.metrics`` where they exist
+computed with the same definitions as ``agentic_rl.obs.metrics`` where they exist
 (``decode_tok_per_s`` = episode output tokens / summed request latencies).
 """
 
@@ -32,7 +32,7 @@ from typing import Any
 # A plausible Frontier-CS tool observation (compile + run + partial score),
 # rendered the way the qwen3 template renders a tool response inside a user
 # turn. Content only matters insofar as EAGLE draft acceptance depends on
-# text predictability; structure mirrors agentic_rl.prompts.OBSERVATION_TEMPLATE.
+# text predictability; structure mirrors agentic_rl.core.prompts.OBSERVATION_TEMPLATE.
 _OBSERVATION_TEXT = """
 <tool_response>
 <returncode>0</returncode>
@@ -115,7 +115,7 @@ class Workload:
 
         # Continuation delta appended after a finished assistant turn:
         # newline + rendered observation user turn + next generation prompt
-        # (agentic_rl.model keeps the template's trailing "\n" separator).
+        # (agentic_rl.core.model keeps the template's trailing "\n" separator).
         cont = f"\n<|im_start|>user\n{_OBSERVATION_TEXT}<|im_end|>\n<|im_start|>assistant\n"
         self.obs_ids = list(tokenizer.encode(cont, add_special_tokens=False))
 

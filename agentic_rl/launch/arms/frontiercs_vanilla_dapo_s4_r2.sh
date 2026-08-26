@@ -23,4 +23,4 @@ export ROLLOUT_PREFETCH_BATCHES=4
 export FRESH_MAX_BEHAVIOR_LAG=4
 
 echo "Launching ${WANDB_GROUP}-${LAUNCH_STAMP} (vanilla DAPO replicate, prefetch 4, gate 4)"
-uv run --with modal modal run -d agentic_rl/retro/modal_train.py::train
+uv run --with modal modal run -d agentic_rl/launch/modal_train.py::train

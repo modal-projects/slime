@@ -2,7 +2,7 @@
 # LEGACY (guide-repo stack): exploratory single-checkpoint eval via the old
 # EXPERIMENT_CONFIG classes. The strict held-out avg@3 protocol now launches
 # from THIS repo — see `python -m agentic_rl.eval.frontier_cs.plan`
-# (ROLLOUT_MODE=eval -> agentic_rl/retro/modal_train.py). RUNBOOK §7 step 4.
+# (ROLLOUT_MODE=eval -> agentic_rl/launch/modal_train.py). RUNBOOK §7 step 4.
 
 set -euo pipefail
 cd "${GUIDE:-$HOME/Documents/Research/async-rl/multinode-training-guide}"

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agentic_rl.generate import generate as generate_agentic
+from agentic_rl.core.generate import generate as generate_agentic
 
 from .group import RETRO_ENV_SPEC
 

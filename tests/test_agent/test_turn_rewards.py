@@ -274,8 +274,8 @@ def test_span_clamped_to_response_length(monkeypatch):
 
 def test_recording_model_records_turn_spans_and_ts(monkeypatch):
     from ._fakes import FakeTokenizer
-    import agentic_rl.model as model_mod
-    from agentic_rl.model import RecordingModel
+    import agentic_rl.core.model as model_mod
+    from agentic_rl.core.model import RecordingModel
 
     def fake_parse(raw, **kwargs):
         uses = [{"name": "bash", "input": {"command": "echo hi"}}] if "TOOLCALL" in raw else []

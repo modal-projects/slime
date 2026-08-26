@@ -12,7 +12,7 @@ samples in the rollout_0 dump). The fix routes that path through ``_ship_null``
 (reward 0, fully masked, ``remove_sample=True``), matching the eval path and keeping
 the group at ``n_samples_per_prompt`` (slime's GRPO reshape requires it).
 
-Importing ``agentic_rl.generate`` drags in the whole slime/SGLang training stack; on a
+Importing ``agentic_rl.core.generate`` drags in the whole slime/SGLang training stack; on a
 CPU env we stub exactly the modules that aren't installed (never the ones that are), so
 this runs under CI and locally and skips cleanly if the import still can't be satisfied.
 """
@@ -47,10 +47,10 @@ def _import_with_stubs(modname: str):
 
 
 try:
-    gen = _import_with_stubs("agentic_rl.generate")
+    gen = _import_with_stubs("agentic_rl.core.generate")
     from slime.utils.types import Sample
 except Exception as exc:  # pragma: no cover - unsatisfiable import env
-    pytest.skip(f"agentic_rl.generate unimportable: {exc}", allow_module_level=True)
+    pytest.skip(f"agentic_rl.core.generate unimportable: {exc}", allow_module_level=True)
 
 
 class _FakeTok:
@@ -100,8 +100,8 @@ def test_unusable_episode_ships_masked_reward0_not_aborted(evaluation):
 
 def test_usable_prefix_still_trains_and_keeps_terminal_reason():
     """A later truncated turn is discarded without masking earlier valid turns."""
-    from agentic_rl.environment.base import RewardResult
-    from agentic_rl.model import Chain
+    from agentic_rl.envs.base import RewardResult
+    from agentic_rl.core.model import Chain
 
     chain = Chain(
         tokens=[1, 2, 3, 4],

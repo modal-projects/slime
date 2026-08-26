@@ -31,4 +31,4 @@ export RETRO_PREFETCH_BATCHES=0
 export RETRO_MAX_BEHAVIOR_LAG=1
 
 echo "Launching ${WANDB_GROUP}-${LAUNCH_STAMP} (retro path @ ratio 0, prefetch 4, gate 4, 20260810a/sglang 0.5.15.post1, det off)"
-uv run --with modal modal run -d agentic_rl/retro/modal_train.py::train
+uv run --with modal modal run -d agentic_rl/launch/modal_train.py::train

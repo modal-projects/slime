@@ -16,8 +16,8 @@ from types import SimpleNamespace
 import pytest
 from minisweagent.exceptions import LimitsExceeded
 
-import agentic_rl.model as model_mod
-from agentic_rl.model import RecordingModel
+import agentic_rl.core.model as model_mod
+from agentic_rl.core.model import RecordingModel
 
 from ._fakes import FakeTokenizer
 

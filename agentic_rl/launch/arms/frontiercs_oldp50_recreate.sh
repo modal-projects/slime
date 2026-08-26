@@ -45,4 +45,4 @@ export RETRO_PREFETCH_BATCHES=0
 export AGENTIC_QUERY_TIMEOUT=600
 
 echo "Launching ${WANDB_GROUP}-${LAUNCH_STAMP} (sequential legs, prefetch 1, ungated fresh, 20260810a/sglang 0.5.15.post1, det off)"
-uv run --with modal modal run -d agentic_rl/retro/modal_train.py::train
+uv run --with modal modal run -d agentic_rl/launch/modal_train.py::train

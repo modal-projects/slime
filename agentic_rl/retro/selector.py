@@ -13,7 +13,7 @@ import hashlib
 from dataclasses import dataclass, replace
 from enum import Enum
 
-from agentic_rl.environment.submissions import parse_submissions_log
+from agentic_rl.envs.frontier_cs.submissions import parse_submissions_log
 
 _EPS = 1e-6
 

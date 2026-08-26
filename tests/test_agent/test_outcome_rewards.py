@@ -1,4 +1,4 @@
-"""Episode-level outcome-reward interface (``agentic_rl.environment.rewards``).
+"""Episode-level outcome-reward interface (``agentic_rl.rewards.rewards``).
 
 Pure stdlib target — no modal/slime/torch imports — so this runs without a
 GPU/sandbox. Locks the contracts the reward-shaping ablations depend on:
@@ -13,7 +13,7 @@ GPU/sandbox. Locks the contracts the reward-shaping ablations depend on:
 
 import pytest
 
-from agentic_rl.environment import rewards as rw
+from agentic_rl.rewards import rewards as rw
 
 
 def _outcome(final=0.5, is_solved=False, scores=(), summary_best=None, submitted_solved=False):
