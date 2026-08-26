@@ -15,7 +15,7 @@
 # 20260810a image / sglang 0.5.15.post1 / 4xTP2 / EAGLE 3/1/4 / det off).
 # 100 updates, save every 10.
 set -euo pipefail
-cd "$(dirname "$0")/../.."
+cd "$(dirname "$0")/../../.."
 
 export MODAL_ENVIRONMENT=${MODAL_ENVIRONMENT:-junlin-dev}
 export WANDB_PROJECT=${WANDB_PROJECT:-Modal}

@@ -9,7 +9,7 @@
 # between the pair by construction; prompt order is identical (fixed seed,
 # no shuffle).
 set -euo pipefail
-cd "$(dirname "$0")/../.."
+cd "$(dirname "$0")/../../.."
 
 export MODAL_ENVIRONMENT=${MODAL_ENVIRONMENT:-junlin-dev}
 export WANDB_PROJECT=${WANDB_PROJECT:-Modal}

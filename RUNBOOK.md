@@ -86,10 +86,13 @@ slime/  (repo root — slime fork)
 │   │
 │   ├── envs/                           ✅ task families, one dir each
 │   │   ├── base.py                     ✅ RolloutEnv contract + ENVS registry (load_env)
+│   │   ├── datasets.py                 ✅ dataset-key registry (TRAIN_DATASET) + deterministic volume-side splits
 │   │   ├── README.md                   ✅ converter workflow + dataset registry guide
 │   │   ├── harbor/                     ✅ shared substrate: env.py (in-place grading, oracle CLI) + convert.py (canonical writer)
 │   │   ├── frontier_cs/                ✅ env.py (judge injection, server-side scoring) + convert.py + submissions.py + judge/ (Node+go-judge: autostart, client, server/)
 │   │   ├── swe_rebench/                ✅ convert.py (HF → harbor task dirs); env = harbor
+│   │   ├── terminal_bench/             ◐ TB 2.1 family: 89 harbor tasks published; 69/20 split pinned; smoke arm ready — Modal oracle+smoke pending
+│   │   ├── swebenchpro/                ◐ SWE-Bench Pro family: 731 harbor tasks published; 650/81 split pinned; smoke arm ready — Modal oracle+smoke pending
 │   │   └── legacy/                     🟡 quarantined: native swerebench env + openthoughts converter
 │   │
 │   ├── rewards/                        ✅ family-agnostic reward layers
@@ -113,6 +116,7 @@ slime/  (repo root — slime fork)
 │   │   ├── modal_train.py              ✅ ENTRY: modal run …::{train,download_model,download_data,post_process_data,convert_hf_to_megatron_checkpoint}
 │   │   ├── launch_config.py            ✅ env-var → full slime config compiler (RetroSlimeConfig + HeldoutEvalSlimeConfig)
 │   │   ├── arms/frontiercs_*.sh        ✅ live training arms (~30-line env-var setters)
+│   │   ├── arms/{terminalbench21,swebenchpro}_vanilla_smoke.sh  ◐ family onboarding smokes (TRAIN_DATASET switch)
 │   │   └── legacy/                     🟡 old guide-repo-stack scripts (SWE/GLM arms, exploratory eval)
 │   │
 │   ├── eval/frontier_cs/               ✅ held-out avg@3 protocol harness (fully in-repo since step 4)
@@ -501,5 +505,5 @@ Protocols at the boundary (the whole coupling surface): `ScoreTrace` (what "prog
 4. ✅ **Kill the external-repo dependency** (DONE 2026-08-26, #2): in-repo eval entrypoint (`HeldoutEvalSlimeConfig` + `ROLLOUT_MODE=eval` + `post_process_data`); results roll-up script committed (#7). This was the single highest-leverage change for "agent can start without context".
 5. ✅ **Knob registry** (DONE 2026-08-26, #3): `agentic_rl/knobs.py` — ~90 knobs with type/default/consumer/scope; launch-time validation with did-you-mean; scan-guarded by `test_knobs.py`. Family-specific knobs keep a family namespace (`FRONTIER_CS_*`).
 6. ✅ **Physical moves + retro re-abstraction (both 2026-08-26)** into the layout above — ReplayPool/Lease own every transition + snapshot GC (P2/P5 fixed), both acquisition paths route through the pool (P3), backends/ + protocols.py define the coupling surface (P4/P6 seam), renames done with shims (P7). **Deferred: P1** (splitting env.py's capture/replay dual-mode into a CaptureTap + branch runner — self-contained, do it when adding retro to a second family) — including `verifier_server/ → envs/frontier_cs/judge/` and the `pool/source/mixed/capture` split — updating every string-loaded path (contract #10) in the same commit, with temporary re-export shims (`agentic_rl/generate.py → core/generate.py`) for one deprecation window since old configs and W&B-recorded commands reference the old paths. The retro rewrite is behavior-preserving: same statuses, same JSONL format, same knobs — `tests/test_agent/test_retro.py` + `test_behavior_lag.py` are the harness.
-7. **Onboard Terminal-Bench 2.1, then SWE-Bench Pro** as the proof of the family layout: each should require only a new `envs/<family>/` dir + a dataset key + an arm script — zero edits to `core/`, `rewards/`, or `launch/` machinery. If either needs more, that's a layering bug to fix before calling the restructure done.
+7. ◐ **Onboard Terminal-Bench 2.1, then SWE-Bench Pro** (scaffolded 2026-08-26) — the layering held: both datasets were already published in harbor format (`junlin-modal/terminal-bench-2.1`: 89 tasks; `junlin-modal/swebenchpro`: 731 tasks, both `task_type: harbor` → zero env code), so onboarding = `envs/<family>/` provenance dirs + the one layering fix the runbook predicted (`TRAIN_DATASET` dataset-key knob in launch_config + `envs/datasets.py` registry with deterministic volume-side train/heldout splits — TB 69/20, SWE-Pro 650/81, seed 20260826, sha-pinned in the family READMEs) + smoke arm scripts. **Remaining (Modal):** per family — `::download_data` (pull + materialize split), the harbor oracle check (`python -m agentic_rl.envs.harbor.env … --limit 3`), then the vanilla smoke arm. Retro on these families stays gated at launch until the ScoreTrace adapter + P1 land.
 8. **(Deferred — motivation, not a plan.)** If the mechanism half ever proves out and we want it upstream: `MixedRollout` + `ReplayPool`/`Lease` + the fork delta (hooks, `RolloutFnTrainOutput`, behavior-lag gate, prefetch flags) would be the PR, and it would shrink the fork to ~zero. Until then, everything stays under `agentic_rl/retro/` — the clean boundary is its own payoff.

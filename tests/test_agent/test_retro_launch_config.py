@@ -212,6 +212,44 @@ def test_dapo_filter_zero_disables_dynamic_sampling():
     assert modal.image_env.get("DAPO_FILTER") is None  # only passed through when set
 
 
+def test_train_dataset_key_switches_the_family():
+    _, slime = build_launch_configs(
+        _env(ROLLOUT_MODE="vanilla", TRAIN_DATASET="terminal_bench_2_1")
+    )
+
+    assert slime.train_dataset == "terminal_bench_2_1"
+    assert slime.prompt_data == "/data/terminal_bench_2_1/train.split-20260826.jsonl"
+    # Family wiring: no judge for harbor-native families; naming carries the key.
+    assert "FRONTIER_CS_JUDGE_URL" not in slime.environment
+    assert "terminal-bench-2-1" in slime.run_tag
+    assert slime.custom_generate_function_path == "agentic_rl.core.generate.generate"
+
+    _, swe = build_launch_configs(_env(ROLLOUT_MODE="vanilla", TRAIN_DATASET="swebenchpro"))
+    assert swe.prompt_data == "/data/swebenchpro/train.split-20260826.jsonl"
+
+    # frontier_cs stays the default and keeps its judge wiring.
+    _, default = build_launch_configs(_env(ROLLOUT_MODE="vanilla"))
+    assert default.train_dataset == "frontier_cs"
+    assert default.prompt_data == "/data/frontier_cs/train.jsonl"
+    assert "FRONTIER_CS_JUDGE_URL" in default.environment
+
+
+def test_train_dataset_travels_to_the_container():
+    modal, _ = build_launch_configs(
+        _env(ROLLOUT_MODE="vanilla", TRAIN_DATASET="swebenchpro", AGENTIC_MAX_STEPS="50")
+    )
+    assert modal.image_env["TRAIN_DATASET"] == "swebenchpro"
+    assert modal.image_env["AGENTIC_MAX_STEPS"] == "50"
+
+
+def test_retro_mode_rejects_families_without_capture_support():
+    with pytest.raises(ValueError, match="capture env"):
+        build_launch_configs(_env(TRAIN_DATASET="terminal_bench_2_1"))
+    with pytest.raises(ValueError, match="TRAIN_DATASET must be one of"):
+        build_launch_configs(_env(ROLLOUT_MODE="vanilla", TRAIN_DATASET="mystery_bench"))
+
+
+
 def test_eval_mode_builds_the_heldout_avg3_protocol():
     modal, slime = build_launch_configs(_env(ROLLOUT_MODE="eval", FRONTIER_CS_EVAL_ARM="p50"))
 

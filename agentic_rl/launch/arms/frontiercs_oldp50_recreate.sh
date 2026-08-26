@@ -27,7 +27,7 @@
 # Old P50 ran 85 updates; this runs 100 with saves every 10 — compare at the
 # shared 70-84 window AND at 100.
 set -euo pipefail
-cd "$(dirname "$0")/../.."
+cd "$(dirname "$0")/../../.."
 
 export MODAL_ENVIRONMENT=${MODAL_ENVIRONMENT:-junlin-dev}
 export WANDB_PROJECT=${WANDB_PROJECT:-Modal}

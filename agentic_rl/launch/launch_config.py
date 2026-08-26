@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from agentic_rl.knobs import validate_environment
+from agentic_rl.envs.datasets import DATASETS, materialize_split, train_jsonl_path
 
 HF_CACHE_PATH = Path("/root/.cache/huggingface")
 DATA_PATH = Path("/data")
@@ -61,6 +62,7 @@ class _SlimeConfigBase:
         "reward_arm",
         "target_fraction",
         "rollout_mode",
+        "train_dataset",
         "arm",
         "eval_id",
         "source_run_tag",
@@ -139,12 +141,31 @@ class RetroSlimeConfig(_SlimeConfigBase):
             raise ValueError("ROLLOUT_MODE must be retro or vanilla (eval routes to HeldoutEvalSlimeConfig in build_launch_configs)")
 
         self.rollout_mode = rollout_mode
+
+        # The dataset key is the family switch (RUNBOOK §7 step 7): everything
+        # family-specific hangs off the spec — jsonl paths, judge wiring,
+        # retro capture support. frontier_cs stays the default and is
+        # byte-identical to the pre-knob behavior.
+        dataset_key = env.get("TRAIN_DATASET", "frontier_cs").strip() or "frontier_cs"
+        dataset = DATASETS.get(dataset_key)
+        if dataset is None:
+            raise ValueError(f"TRAIN_DATASET must be one of {sorted(DATASETS)}, got {dataset_key!r}")
+        if rollout_mode == "retro" and not dataset.supports_retro:
+            raise ValueError(
+                f"retro mode needs a capture env for family {dataset.family!r} "
+                f"(dataset {dataset_key!r}); only frontier_cs has one today — "
+                "use ROLLOUT_MODE=vanilla or add envs/<family>/retro support (RUNBOOK §7.1 P1/P4)"
+            )
+        self.train_dataset = dataset_key
+        self._dataset = dataset
+
         launch_stamp = env.get("LAUNCH_STAMP") or f"{datetime.now():%Y%m%d-%H%M%S}"
         fraction_tag = f"p{round(target_fraction * 100):02d}"
+        dataset_tag = dataset_key.replace("_", "-")
         if rollout_mode == "vanilla":
-            default_name = f"qwen3.6-27b-frontier-cs-vanilla-{arm}"
+            default_name = f"qwen3.6-27b-{dataset_tag}-vanilla-{arm}"
         else:
-            default_name = f"qwen3.6-27b-frontier-cs-retro-{arm}-{fraction_tag}"
+            default_name = f"qwen3.6-27b-{dataset_tag}-retro-{arm}-{fraction_tag}"
         run_tag = f"{env.get('WANDB_GROUP') or default_name}-{launch_stamp}"
         resume = env.get("RESUME")
         state_tag = resume or run_tag
@@ -199,8 +220,8 @@ class RetroSlimeConfig(_SlimeConfigBase):
             self.custom_generate_function_path = "agentic_rl.retro.generate.generate"
         self.custom_rollout_log_function_path = "agentic_rl.obs.metrics.log_rollout_data"
         self.custom_config_path = {
-            "agentic_max_steps": 75,
-            "agentic_episode_timeout": 1800,
+            "agentic_max_steps": _env_int(env, "AGENTIC_MAX_STEPS", 75),
+            "agentic_episode_timeout": _env_int(env, "AGENTIC_EPISODE_TIMEOUT", 1800),
             "agentic_eval_timeout": 600,
             # Per-turn /generate cap. At prefetch > 1 the engines run tens of
             # concurrent streams, so a max-length turn decodes several times
@@ -213,7 +234,7 @@ class RetroSlimeConfig(_SlimeConfigBase):
             "router_policy": "consistent_hashing",
         }
         self.metadata_key = "metadata"
-        self.prompt_data = f"{DATA_PATH}/frontier_cs/train.jsonl"
+        self.prompt_data = str(train_jsonl_path(dataset, DATA_PATH))
         self.input_key = "prompt"
         self.label_key = "label"
         self.apply_chat_template = False
@@ -334,13 +355,14 @@ class RetroSlimeConfig(_SlimeConfigBase):
             "ASYNC_RL_TASK_ROOT": str(DATA_PATH),
             "SLIME_AGENT_SANDBOX_CPU": "4",
             "SLIME_AGENT_SANDBOX_MEMORY_MB": "4096",
-            "FRONTIER_CS_JUDGE_URL": env.get("FRONTIER_CS_JUDGE_URL", ""),
             "ASYNC_RL_REWARD_SHAPE": env.get("ASYNC_RL_REWARD_SHAPE", "fractional"),
             "ASYNC_RL_OUTCOME_REWARD": arm,
             "ASYNC_RL_SOLVED_BONUS": "0",
             "ASYNC_RL_OUTCOME_GAMMA": env.get("ASYNC_RL_OUTCOME_GAMMA", "0.4"),
             "ASYNC_RL_ROLLOUT_PREFETCH_BATCHES": str(self.rollout_prefetch_batches),
         }
+        if dataset.needs_judge:
+            self.environment["FRONTIER_CS_JUDGE_URL"] = env.get("FRONTIER_CS_JUDGE_URL", "")
         if self.rollout_max_behavior_lag is not None:
             self.environment["ASYNC_RL_ROLLOUT_MAX_BEHAVIOR_LAG"] = str(self.rollout_max_behavior_lag)
         if rollout_mode == "retro":
@@ -406,16 +428,20 @@ class RetroSlimeConfig(_SlimeConfigBase):
         from huggingface_hub import snapshot_download
 
         snapshot_download(
-            "junlin-modal/frontier-cs",
+            self._dataset.hf_repo,
             repo_type="dataset",
             local_dir=str(DATA_PATH),
         )
-        if os.environ.get("RETRO_DOWNLOAD_USACO", "0") == "1":
+        if self.train_dataset == "frontier_cs" and os.environ.get("RETRO_DOWNLOAD_USACO", "0") == "1":
             snapshot_download(
                 "junlin-modal/usaco",
                 repo_type="dataset",
                 local_dir=str(DATA_PATH),
             )
+        if self._dataset.split is not None:
+            record = materialize_split(self._dataset, DATA_PATH)
+            print(f"[{self.train_dataset}] derived train/heldout split (deterministic):")
+            print(json.dumps(record, indent=2))
 
 
 
@@ -518,6 +544,7 @@ class HeldoutEvalSlimeConfig(_SlimeConfigBase):
             "router_policy": "consistent_hashing",
         }
         self.metadata_key = "metadata"
+        # The avg@3 protocol is frontier_cs-pinned; TRAIN_DATASET does not apply here.
         self.prompt_data = f"{DATA_PATH}/frontier_cs/train.jsonl"
         self.input_key = "prompt"
         self.label_key = "label"
@@ -755,7 +782,10 @@ def build_launch_configs(
             "ROLLOUT_PREFETCH_BATCHES",
             "FRESH_MAX_BEHAVIOR_LAG",
             "AGENTIC_QUERY_TIMEOUT",
+            "AGENTIC_MAX_STEPS",
+            "AGENTIC_EPISODE_TIMEOUT",
             "ROLLOUT_MODE",
+            "TRAIN_DATASET",
             "SGLANG_VERSION",
             "DAPO_FILTER",
         }

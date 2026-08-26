@@ -438,7 +438,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        info: [{"num_gpus": 0, "test_file": "test_agent/test_trajectory_manager_branching.py"}, {"num_gpus": 0, "test_file": "test_agent/test_adapters.py"}, {"num_gpus": 0, "test_file": "test_agent/test_harness.py"}, {"num_gpus": 0, "test_file": "test_agent/test_agent_rollout_cpu.py"}, {"num_gpus": 0, "test_file": "test_agent/test_frontier_cs_eval.py"}, {"num_gpus": 0, "test_file": "test_agent/test_retro.py"}, {"num_gpus": 0, "test_file": "test_agent/test_behavior_lag.py"}, {"num_gpus": 0, "test_file": "test_agent/test_retro_launch_config.py"}, {"num_gpus": 0, "test_file": "test_agent/test_eval_rollup.py"}, {"num_gpus": 0, "test_file": "test_agent/test_knobs.py"}, {"num_gpus": 0, "test_file": "test_agent/test_layout_shims.py"}]
+        info: [{"num_gpus": 0, "test_file": "test_agent/test_trajectory_manager_branching.py"}, {"num_gpus": 0, "test_file": "test_agent/test_adapters.py"}, {"num_gpus": 0, "test_file": "test_agent/test_harness.py"}, {"num_gpus": 0, "test_file": "test_agent/test_agent_rollout_cpu.py"}, {"num_gpus": 0, "test_file": "test_agent/test_frontier_cs_eval.py"}, {"num_gpus": 0, "test_file": "test_agent/test_retro.py"}, {"num_gpus": 0, "test_file": "test_agent/test_behavior_lag.py"}, {"num_gpus": 0, "test_file": "test_agent/test_retro_launch_config.py"}, {"num_gpus": 0, "test_file": "test_agent/test_eval_rollup.py"}, {"num_gpus": 0, "test_file": "test_agent/test_knobs.py"}, {"num_gpus": 0, "test_file": "test_agent/test_layout_shims.py"}, {"num_gpus": 0, "test_file": "test_agent/test_datasets.py"}]
     defaults:
       run:
         working-directory: ${{ github.workspace }}

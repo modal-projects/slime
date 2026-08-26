@@ -128,6 +128,15 @@ _KNOBS: list[Knob] = [
        "s1-style forced think closure on length-capped turns"),
     _k("AGENTIC_QUERY_TIMEOUT", "int", "1200", "launch/launch_config.py", "launcher",
        "Per-turn /generate cap (custom-config agentic_query_timeout)"),
+    _k("AGENTIC_MAX_STEPS", "int", "75", "launch/launch_config.py", "launcher",
+       "mini-swe step_limit per agent leg (custom-config agentic_max_steps)"),
+    _k("AGENTIC_EPISODE_TIMEOUT", "int", "1800", "launch/launch_config.py", "launcher",
+       "Wall-clock agent budget per episode, post-boot (custom-config agentic_episode_timeout)"),
+    _k("TRAIN_DATASET", "enum", "frontier_cs", "launch/launch_config.py", "launcher",
+       "Dataset key from envs/datasets.py DATASETS — the family switch: picks the "
+       "train jsonl (published or derived split), HF repo for download_data, judge "
+       "wiring, and retro support (retro mode requires frontier_cs today)",
+       ("frontier_cs", "swe_rebench_v2", "terminal_bench_2_1", "swebenchpro")),
     _k("SGLANG_VERSION", "str", None, "launch/launch_config.py", "launcher",
        "In-place sglang upgrade in the train image (torch pinned; unsatisfiable = loud build failure)"),
     _k("LAUNCH_STAMP", "str", "now()", "launch/launch_config.py", "launcher",

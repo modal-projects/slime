@@ -17,7 +17,7 @@
 # mixed path at ratio 0 (fresh-only batches but capture still on), so the pair
 # A/Bs the retro harness overhead at dose zero.
 set -euo pipefail
-cd "$(dirname "$0")/../.."
+cd "$(dirname "$0")/../../.."
 
 export MODAL_ENVIRONMENT=${MODAL_ENVIRONMENT:-junlin-dev}
 export WANDB_PROJECT=${WANDB_PROJECT:-Modal}
