@@ -58,9 +58,9 @@ def _import_with_stubs(modname: str):
 
 
 try:
-    far = _import_with_stubs("slime.rollout.fully_async_rollout")
+    far = _import_with_stubs("agentic_rl.core.fully_async")
 except Exception as exc:  # pragma: no cover - unsatisfiable import env
-    pytest.skip(f"fully_async_rollout unimportable: {exc}", allow_module_level=True)
+    pytest.skip(f"core.fully_async unimportable: {exc}", allow_module_level=True)
 
 
 # ---------------------------------------------------------------------------

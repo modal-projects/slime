@@ -15,7 +15,7 @@ of slime's defaults.
              uniformly stale batch reads 0), behavior_lag (updates-stale vs the
              TRAINER: rollout t generates under absolute weight version t+1, so
              lag = t+1 - oldest token version; this is the quantity
-             --rollout-max-behavior-lag enforces), versions_in_batch,
+             ASYNC_RL_ROLLOUT_MAX_BEHAVIOR_LAG enforces), versions_in_batch,
              sample_age_sec (gen-finish -> train dwell).
 """
 

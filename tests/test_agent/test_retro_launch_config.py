@@ -105,9 +105,7 @@ def test_vanilla_mode_runs_stock_fully_async_without_retro_envs():
         )
     )
 
-    assert slime.rollout_function_path == (
-        "slime.rollout.fully_async_rollout.generate_rollout_fully_async"
-    )
+    assert slime.rollout_function_path == "agentic_rl.core.fully_async.generate_rollout_fully_async"
     assert slime.custom_generate_function_path == "agentic_rl.generate.generate"
     # No retro env leaks into the job: without the manifest path and the
     # RETRO_ENV_SPEC task-type stamp, episodes never attempt snapshot capture.
@@ -119,6 +117,12 @@ def test_vanilla_mode_runs_stock_fully_async_without_retro_envs():
     assert slime.save_interval == 10
     assert slime.rollout_prefetch_batches == 4
     assert slime.rollout_max_behavior_lag == 4
+    # Since the de-fork the knobs travel as env vars, never as slime CLI flags.
+    assert slime.environment["ASYNC_RL_ROLLOUT_PREFETCH_BATCHES"] == "4"
+    assert slime.environment["ASYNC_RL_ROLLOUT_MAX_BEHAVIOR_LAG"] == "4"
+    cli = slime.cli_args()
+    assert "--rollout-prefetch-batches" not in cli
+    assert "--rollout-max-behavior-lag" not in cli
     assert slime.run_tag == "qwen3.6-27b-frontier-cs-vanilla-final-20260812-130000"
     assert modal.image_env["ROLLOUT_MODE"] == "vanilla"
     # The canonical 2026-08-24 inference stack rides the base image (sglang
@@ -159,6 +163,7 @@ def test_behavior_lag_gate_zero_disables_enforcement():
         )
     )
     assert slime.rollout_max_behavior_lag is None
+    assert "ASYNC_RL_ROLLOUT_MAX_BEHAVIOR_LAG" not in slime.environment
     assert "--rollout-max-behavior-lag" not in slime.cli_args()
     assert "ASYNC_RL_RETRO_MAX_BEHAVIOR_LAG" not in slime.environment
 

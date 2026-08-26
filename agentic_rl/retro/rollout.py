@@ -12,7 +12,7 @@ import uuid
 
 from slime.rollout.base_types import RolloutFnTrainOutput
 from slime.rollout.filter_hub.base_types import call_dynamic_filter
-from slime.rollout.fully_async_rollout import _generate_rollout_async, behavior_lag
+from agentic_rl.core.fully_async import _generate_rollout_async, behavior_lag, resolve_async_rl_rollout_knobs
 from slime.rollout.sglang_rollout import GenerateState, generate_and_rm_group
 from slime.utils.async_utils import run
 from slime.utils.misc import load_function
@@ -301,6 +301,7 @@ def retro_group_split(total: int, ratio: float) -> tuple[int, int]:
 
 async def _generate_retro_mixed(args, rollout_id: int, data_buffer) -> RolloutFnTrainOutput:
     rollout_started = time.perf_counter()
+    resolve_async_rl_rollout_knobs(args)
     total = int(args.rollout_batch_size)
     ratio = _env_float("ASYNC_RL_RETRO_GROUP_RATIO", 0.25)
     retro_target, fresh_target = retro_group_split(total, ratio)
@@ -321,7 +322,7 @@ async def _generate_retro_mixed(args, rollout_id: int, data_buffer) -> RolloutFn
         # Capacity guard: without an explicit prefetch the worker pool defaults
         # to the engine cap (hundreds of groups), which overwhelms the router.
         # One batch matches this path's historical behavior; raise it via
-        # --rollout-prefetch-batches once --rollout-max-behavior-lag is set.
+        # ASYNC_RL_ROLLOUT_PREFETCH_BATCHES once the behavior-lag gate is set.
         fresh_args.rollout_prefetch_batches = 1
     fresh_args.rollout_max_staleness = None  # superseded by rollout_prefetch_batches
 
@@ -508,7 +509,7 @@ def _env_int(name: str, default: int) -> int:
 
 def _retro_max_behavior_lag(args) -> int | None:
     """Retro-lane behavior-lag bound: ASYNC_RL_RETRO_MAX_BEHAVIOR_LAG when set,
-    else the fresh lane's --rollout-max-behavior-lag, else None (unbounded)."""
+    else the fresh lane's ASYNC_RL_ROLLOUT_MAX_BEHAVIOR_LAG, else None (unbounded)."""
     raw = os.environ.get("ASYNC_RL_RETRO_MAX_BEHAVIOR_LAG", "").strip()
     if raw:
         return int(raw)

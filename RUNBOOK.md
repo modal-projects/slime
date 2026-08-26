@@ -38,7 +38,7 @@ LAUNCH (per experiment arm)
         └─ 6-node H200 clustered fn: rank0 = Ray head → submit `train_async.py <flags>` as Ray job
 
 TRAINING LOOP (inside Ray job)
-  fresh lane:  slime.rollout.fully_async_rollout  ──┐
+  fresh lane:  agentic_rl.core.fully_async  ──┐
   retro lane:  agentic_rl.retro.rollout.generate_retro_mixed (retro mode only)
                                                     ├─→ agentic_rl.generate.generate   # 1 call = 1 episode
                                                     │     env = load_env(metadata.task_type)
@@ -46,7 +46,7 @@ TRAINING LOOP (inside Ray job)
                                                     │     bash ↔ Modal sandbox; submit.sh ↔ judge server
                                                     │     reward computed inline (no RM step)
                                                     └─→ Samples w/ per-turn weight_versions
-  behavior-lag gate + DAPO filter (slime/rollout/fully_async_rollout.py) → Megatron GRPO update
+  behavior-lag gate + DAPO filter (agentic_rl/core/fully_async.py) → Megatron GRPO update
   retro capture: RetroFrontierCsEnv stages /app snapshots mid-episode → manifest JSONL → replay pool
 
 EVAL (held-out avg@3, offline protocol)
@@ -66,7 +66,7 @@ Legend: ✅ live · 🟡 legacy (works, superseded) · ⚪ dead (no callers) · 
 slime/  (repo root — slime fork)
 ├── train.py, train_async.py            ✅ unmodified upstream entries (eval-only branch: train.py:35)
 ├── slime/                              ✅ the framework — LOCALLY MODIFIED, see §3.10
-│   ├── rollout/fully_async_rollout.py  ✅ +215: prefetch pool, behavior-lag gate, DAPO-at-collect, hooks
+│   ├── rollout/fully_async_rollout.py  ⬜ back at upstream (de-forked 2026-08-26 → agentic_rl/core/fully_async.py)
 │   ├── utils/arguments.py              ✅ +40: --rollout-prefetch-batches / --rollout-max-behavior-lag
 │   ├── utils/wandb_utils.py            ✅ +107: sgl-router /engine_metrics scraper
 │   └── backends/megatron_utils/…       ✅ small deltas (loss max-metric, absolute weight_version)
@@ -163,7 +163,7 @@ frontiercs_<arm>.sh  →  modal run -d agentic_rl/retro/modal_train.py::train
 ```
 
 Mode switch: `ROLLOUT_MODE=vanilla|retro` (launch_config.py:84) selects `--rollout-function-path`
-(`slime.rollout.fully_async_rollout.generate_rollout_fully_async` vs `agentic_rl.retro.rollout.generate_retro_mixed`, :129-133) and `--custom-generate-function-path` (:142-145). `DAPO_FILTER=0` disables the dynamic-sampling filter. Vanilla shares everything else, making it the true control.
+(`agentic_rl.core.fully_async.generate_rollout_fully_async` vs `agentic_rl.retro.rollout.generate_retro_mixed`, :129-133) and `--custom-generate-function-path` (:142-145). `DAPO_FILTER=0` disables the dynamic-sampling filter. Vanilla shares everything else, making it the true control.
 
 Reward is **inline** — `rm_type=None`, no `--custom-rm-path` (launch_config.py:168); slime skips its RM step because `sample.reward` is already set (`slime/rollout/sglang_rollout.py:279-283`).
 
@@ -247,12 +247,12 @@ Load-bearing facts:
 
 ### 3.8 The slime fork delta (§ the "no slime edits" claim is stale)
 
-Relative to merge-base with `main`: 10 framework files, ~+495 lines. The overlay is *mostly* hook-injected, but these are real fork edits an agent must know about:
+Relative to merge-base with `main`: 8 framework files, ~+233 lines (was 10 / ~+495 before the 2026-08-26 de-fork). The overlay is *mostly* hook-injected, but these are real fork edits an agent must know about:
 
 | File | Δ | What |
 |---|---|---|
-| `slime/rollout/fully_async_rollout.py` | +215 | prefetch pool sizing; **behavior-lag hard gate** (`behavior_lag`, `reset_group_for_regeneration` — requeue-without-reset bug fix); DAPO filter at collection; backlog accounting; `RolloutFnTrainOutput` return; `group_accept_hook/group_reject_hook` (used by retro) |
-| `slime/utils/arguments.py` | +40 | `--rollout-prefetch-batches` (capacity), `--rollout-max-behavior-lag` (guarantee), deprecated `--rollout-max-staleness` alias |
+| ~~`slime/rollout/fully_async_rollout.py`~~ | ~~+215~~ | **De-forked 2026-08-26** → `agentic_rl/core/fully_async.py` (prefetch pool sizing, behavior-lag hard gate, DAPO filter at collection, hooks, `RolloutFnTrainOutput`); slime file back at upstream |
+| ~~`slime/utils/arguments.py`~~ | ~~+40~~ | **De-forked 2026-08-26**: the knobs are now `ASYNC_RL_ROLLOUT_PREFETCH_BATCHES` / `ASYNC_RL_ROLLOUT_MAX_BEHAVIOR_LAG` env vars, normalized onto `args` by `core.fully_async.resolve_async_rl_rollout_knobs` |
 | `slime/utils/wandb_utils.py` | +107 | engine-metrics scraper |
 | `slime/backends/megatron_utils/{cp_utils,loss}.py` | +83 | MAX-reduced metric channel → `train_rollout_logprob_abs_diff_max` |
 | `slime/backends/megatron_utils/actor.py` | +5 | absolute `weight_version` across resume (lag gate correctness) |
@@ -386,7 +386,7 @@ trainer (train_async.py) ──① next batch(rollout_id)──▶ RolloutManage
 ```python
 # ========= persistent, cross-step (started once, daemon threads) =========
 
-# QUEUE 1 — fresh lane: AsyncRolloutWorker      slime/rollout/fully_async_rollout.py:189
+# QUEUE 1 — fresh lane: AsyncRolloutWorker      agentic_rl/core/fully_async.py
 while True:
     # in-flight + completed-but-unshipped ≤ POOL = min(engine_cap, prefetch × batch)  (≈96–128)
     while in_flight + output_q.size < POOL:
@@ -447,7 +447,7 @@ Three corrections to the intuitive mental model: (a) there is **no RetroManager 
 | P5 | Process-global state: prefetch singleton, per-path lock table, `_INDEX_BASE` id trick | prefetch.py:290, :57; buffer.py:12 | Pool + source instantiated once in the rollout fn's state and passed down; the pool allocates ids |
 | P6 | Backend hard-coupling: snapshot.py imports modal; checkpoint knows mini-swe `Chain` | snapshot.py:206; retro/model.py:9 | `SnapshotBackend` / `AgentCheckpoint` protocols; Modal + mini-swe impls stay project-side |
 | P7 | Names shadow the overlay: `retro/model.py`, `retro/generate.py`, `buffer.py` holding two classes | dir listing | Rename by concept: `pool.py`, `source.py`, `mixed.py`, `capture.py`, `checkpoint.py` |
-| P8 | The biggest fork file is avoidable: `slime/rollout/fully_async_rollout.py` (+215) is string-loaded via `--rollout-function-path` | §3.10 | Move to a local copy `core/fully_async.py` (vanilla arms use it too, so not `retro/`); its two CLI flags become `ASYNC_RL_*` knobs. Fork shrinks ~495→~240 lines. The `actor.py` absolute-weight_version fix (+5) cannot move — the lag gate depends on it |
+| P8 | ✅ DONE 2026-08-26. The biggest fork file was avoidable: `slime/rollout/fully_async_rollout.py` (+215) was string-loaded via `--rollout-function-path` | §3.10 | Moved to a local copy `core/fully_async.py` (vanilla arms use it too, so not `retro/`); its two CLI flags become `ASYNC_RL_*` knobs. Fork shrinks ~495→~240 lines. The `actor.py` absolute-weight_version fix (+5) cannot move — the lag gate depends on it |
 | P9 | Confusing knob names: `ASYNC_RL_RETRO_SNAPSHOT_PATH` is a sandbox-side *source dir* to photograph; `_MANIFEST_PATH` is a volume-side ledger destination | env.py:217; launch_config.py:98 | Rename to `..._SNAPSHOT_SOURCE_DIR`; make `/checkpoints/frontier_retro/<tag>/` the one volume-side retro home. A volume-tarball `SnapshotBackend` (vs Modal Images) becomes a swappable option |
 
 **All-turns capture feasibility (estimate, 2026-08-25).** Goal: keep a snapshot of *every* turn of every kept trajectory so the branch point can be chosen at lease time, not capture time. Two different quantities: the *pipeline need* is only `prefetch_batches × retro_per_step` leased snapshots (e.g. 4 × 28 = 112); the *inventory* is capture-bound: `live ≈ retention_steps × fresh_groups × 8 episodes × T turns` — with age-based GC (delete at policy age > 4) and 4 fresh groups/step, T≈50 → ~8,000 live snapshots. At /app sizes of 1–10 MiB that's 8–80 GiB ≈ $1–7/mo at the volume rate ($0.09/GiB/mo; Modal images aren't separately billed on public pricing today) — **storage cost is a non-issue**. The real constraints: (a) today's GC is consume/invalidate + 48 h TTL only — age-out deletion must be added or inventory grows ~10–20× (TTL-bound, 10⁴–10⁵ image objects); (b) ops, not bytes: `snapshot_directory` costs ~1–5 s per call (logged in `SnapshotResult.latency_seconds`), so T calls/episode adds minutes of wall-clock and ~1,600 image creations/step of registry pressure; (c) consecutive turns are ~ε different but images don't delta-share. **Recommended shape instead: keep ONE image per trajectory and put the turn history inside it** — `git init` the workspace at episode start, commit after every turn (content-addressed deltas ≈ free), snapshot once at episode end with `.git` included; branch-from-turn-t = restore + `git checkout <commit_t>`. That's all-turns choice at today's per-episode image cost, and it slots directly into the `SnapshotBackend` protocol. (Per-turn `ChainCheckpoint`s are the other axis: storing all T is O(T × context) JSON — keep them as a sidecar or in the git repo, not in the manifest JSONL.)
@@ -498,9 +498,9 @@ Protocols at the boundary (the whole coupling surface): `ScoreTrace` (what "prog
 
 **Migration order** (each step independently shippable; do moves LAST because of contract #10):
 
-1. **Docs**: land this runbook; write `SLIME_DELTA.md`; correct the README claim.
-2. **Deletions**: `async_rl_research/`, dead retro code (#4), legacy evalset path (#8), dead knobs (#10). Fix stale test + CI (#6).
-3. **De-fork the async rollout file (TODO — agreed 2026-08-25, P8)**: copy `slime/rollout/fully_async_rollout.py` → `core/fully_async.py`, point `--rollout-function-path` (and retro's imports) at it, convert its two CLI flags to `ASYNC_RL_*` knobs, and revert the slime file + `slime/utils/arguments.py` flags to upstream. Independently shippable; `tests/test_agent/test_behavior_lag.py` guards it.
+1. ✅ **Docs** (2026-08-26): land this runbook; write `SLIME_DELTA.md`; correct the README claim.
+2. ✅ **Deletions** (2026-08-26): `async_rl_research/`, dead retro code (#4), legacy evalset path (#8), dead knobs (#10). Fix stale test + CI (#6).
+3. ✅ **De-fork the async rollout file (DONE 2026-08-26, P8)**: copied `slime/rollout/fully_async_rollout.py` → `core/fully_async.py`, point `--rollout-function-path` (and retro's imports) at it, convert its two CLI flags to `ASYNC_RL_*` knobs, and revert the slime file + `slime/utils/arguments.py` flags to upstream. Independently shippable; `tests/test_agent/test_behavior_lag.py` guards it.
 4. **Kill the external-repo dependency** (#2): in-repo eval entrypoint reusing `launch_config.py` machinery; commit the results roll-up script (#7). This is the single highest-leverage change for "agent can start without context".
 5. **Knob registry** (#3): mechanical, high-payoff for discoverability; launch-time validation catches typo'd env vars. Family-specific knobs get a family namespace (`FRONTIER_CS_*` already follows this).
 6. **Physical moves + retro re-abstraction (§7.1)** into the layout above — including `verifier_server/ → envs/frontier_cs/judge/` and the `pool/source/mixed/capture` split — updating every string-loaded path (contract #10) in the same commit, with temporary re-export shims (`agentic_rl/generate.py → core/generate.py`) for one deprecation window since old configs and W&B-recorded commands reference the old paths. The retro rewrite is behavior-preserving: same statuses, same JSONL format, same knobs — `tests/test_agent/test_retro.py` + `test_behavior_lag.py` are the harness.

@@ -25,6 +25,10 @@ _YAML_CONFIG_FIELDS = ("eval_config", "custom_config_path", "sglang_config")
 _JSON_CONFIG_FIELDS = ("train_env_vars", "apply_chat_template_kwargs", "multimodal_keys")
 _SLIME_SKIP = {
     "environment",
+    # De-forked knobs: travel via self.environment as ASYNC_RL_* env vars,
+    # read by agentic_rl/core/fully_async.py — no longer slime CLI flags.
+    "rollout_prefetch_batches",
+    "rollout_max_behavior_lag",
     "async_mode",
     "slime_model_script",
     "source_hf_checkpoint",
@@ -110,12 +114,14 @@ class RetroSlimeConfig:
         self.update_weights_interval = 1
         self.update_weight_buffer_size = 2147483648
         self.async_mode = True
-        # Staleness is split into orthogonal knobs (see slime/rollout/fully_async_rollout.py):
+        # Staleness is split into orthogonal knobs (see agentic_rl/core/fully_async.py):
         # prefetch sizes the in-flight pool (capacity/throughput only), while the
         # per-lane max_behavior_lag values are HARD per-group bounds enforced at
         # batch assembly (rollout t trains only groups whose oldest token is
         # <= lag updates behind version t+1). FRESH_MAX_BEHAVIOR_LAG binds the
-        # fresh lane (slime flag); RETRO_MAX_BEHAVIOR_LAG binds retro
+        # fresh lane (exported as ASYNC_RL_ROLLOUT_MAX_BEHAVIOR_LAG since the
+        # de-fork — the knobs travel as env vars, not slime CLI flags);
+        # RETRO_MAX_BEHAVIOR_LAG binds retro
         # continuations (env, > 1 also admits mixed-version continuations).
         # Snapshot *state* age stays a separate axis (ASYNC_RL_RETRO_MIN/MAX_POLICY_AGE).
         # A value of 0 (or negative) DISABLES the corresponding hard gate —
@@ -126,9 +132,7 @@ class RetroSlimeConfig:
         self.rollout_max_behavior_lag = fresh_max_behavior_lag if fresh_max_behavior_lag > 0 else None
         retro_max_behavior_lag = _env_int(env, "RETRO_MAX_BEHAVIOR_LAG", 1)
         if rollout_mode == "vanilla":
-            self.rollout_function_path = (
-                "slime.rollout.fully_async_rollout.generate_rollout_fully_async"
-            )
+            self.rollout_function_path = "agentic_rl.core.fully_async.generate_rollout_fully_async"
         else:
             self.rollout_function_path = "agentic_rl.retro.rollout.generate_retro_mixed"
         self.use_fault_tolerance = True
@@ -285,7 +289,10 @@ class RetroSlimeConfig:
             "ASYNC_RL_OUTCOME_REWARD": arm,
             "ASYNC_RL_SOLVED_BONUS": "0",
             "ASYNC_RL_OUTCOME_GAMMA": env.get("ASYNC_RL_OUTCOME_GAMMA", "0.4"),
+            "ASYNC_RL_ROLLOUT_PREFETCH_BATCHES": str(self.rollout_prefetch_batches),
         }
+        if self.rollout_max_behavior_lag is not None:
+            self.environment["ASYNC_RL_ROLLOUT_MAX_BEHAVIOR_LAG"] = str(self.rollout_max_behavior_lag)
         if rollout_mode == "retro":
             self.environment.update(
                 {

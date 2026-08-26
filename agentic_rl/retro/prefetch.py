@@ -14,7 +14,7 @@ single behavior version per group — with two consequences:
    rlag4-vs-rlag8 arms came out as seed replicates.
 
 This module gives the retro lane the same queue-ahead structure the fresh lane
-already has (:class:`slime.rollout.fully_async_rollout.AsyncRolloutWorker`): a
+already has (:class:`agentic_rl.core.fully_async.AsyncRolloutWorker`): a
 background thread keeps a pool of pre-generated retro groups, so the step
 drains a ready queue instead of waiting on generation. Groups then age across
 weight updates, which is what makes realized retro lag tunable — the depth is
@@ -42,7 +42,7 @@ import queue
 import threading
 import uuid
 
-from slime.rollout.fully_async_rollout import behavior_lag
+from agentic_rl.core.fully_async import behavior_lag
 from slime.rollout.sglang_rollout import GenerateState, generate_and_rm_group
 from slime.utils.http_utils import get_rollout_num_engines
 from slime.utils.types import Sample
