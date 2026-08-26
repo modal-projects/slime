@@ -220,22 +220,24 @@ The fresh lane has its own pair: `--rollout-prefetch-batches` (capacity) vs `--r
 
 O3 alignment is wall-clock: `turn_ts` from model.py:221 joined to judge-server timestamps; turn advantages painted over response-relative `turn_spans` with CP-aware re-slicing (turn_advantage.py:60), degrading to pure outcome on any shape surprise. Off unless a config sets both hook paths (only the guide-repo `…_o3_turn.py` does today).
 
-### 3.6 Eval — `eval/frontier_cs/` (+ external configs)
+### 3.6 Eval — `eval/frontier_cs/` (fully in-repo since 2026-08-26)
 
-Strict held-out protocol: 38 tasks × avg@3, deterministic sampling (seed 20260802 + sample index), pinned in `arms.json` and typed by `protocol.py`. Workflow:
+Strict held-out protocol: 38 tasks × avg@3, deterministic sampling (seed 20260802 + sample index), pinned in `arms.json` and typed by `protocol.py`. Workflow (all commands run from THIS repo — the guide-repo dependency is gone, RUNBOOK §7 step 4):
 
 ```
 python -m agentic_rl.eval.frontier_cs.plan [arm …]     # prints 3 modal commands per arm
-# run them FROM THE GUIDE REPO (📦 multinode-training-guide):
-#   download_and_validate → evaluate (num_rollout=0 eval-only branch, train.py:35) → aggregate
-python -m agentic_rl.eval.frontier_cs.aggregate <rollout_eval_0.pt> --output summary.json
+#   ROLLOUT_MODE=eval … ::download_data   (pull + sha-validated 150/38 split proof)
+#   ROLLOUT_MODE=eval … ::train           (num_rollout=0 eval-only branch of slime train.py)
+#   ROLLOUT_MODE=eval … ::post_process_data  (strict avg@3 summary.json next to the dump)
+python -m agentic_rl.eval.frontier_cs.aggregate <rollout_eval_0.pt> --output summary.json  # offline re-agg
+python -m agentic_rl.eval.frontier_cs.rollup --summary p50=… --pair "p50 - base" --output results/…  # roll-up
 ```
 
 Load-bearing facts:
-- The actual eval config class is `w_qwen3_6_27b_frontier_cs_heldout_avg3.py` **in the guide repo**, which inherits the training config → same rollout code path, offline strict re-aggregation (macro mean-of-task-means, task SE, pass@3, dump SHA-256).
-- Eval image is pinned to `slimerl/slime:nightly-dev-20260529a` — the 20260810a bump (sglang 0.5.15.post1) renames ServerArgs fields and breaks the `--sglang-*` bridge (partially mitigated by the local alias fix in `slime/backends/sglang_utils/arguments.py`).
+- The eval config is `HeldoutEvalSlimeConfig` (launch_config.py), a `RetroSlimeConfig` sibling selected by `ROLLOUT_MODE=eval`; a registry arm key alone fills checkpoint identity (`FRONTIER_CS_EVAL_ARM=p50`), ad-hoc arms add `FRONTIER_CS_EVAL_RUN_TAG`. Ported attribute-for-attribute from the guide's `w_qwen3_6_27b_frontier_cs_heldout_avg3` (parity-diffed 2026-08-26); the guide copy is now legacy.
+- Eval image is pinned to `slimerl/slime:nightly-dev-20260529a` — the 20260810a bump (sglang 0.5.15.post1) renames ServerArgs fields and breaks that slime's `--sglang-*` bridge; the eval config therefore emits the OLD names (`sglang_cuda_graph_bs`, `sglang_mamba_scheduler_strategy`), never the 0.5.15 `_decode` variants.
 - Checkpoints: `/checkpoints/swe_ckpts/<run_tag>` at step 79 (74 for the O-cohort); iter_84 ckpts of 5/6 runs are unrecoverable — use 79.
-- `results/*.json` roll-ups (incl. bootstrap `paired` CIs, 50k reps, seed 20260817) are **hand-assembled**; no in-repo script reproduces them.
+- `results/*.json` roll-ups (bootstrap `paired` CIs, 50k reps, seed 20260817, unit=task) are reproduced by `eval/frontier_cs/rollup.py` (guarded by `tests/test_agent/test_eval_rollup.py`).
 - Training-time eval (`eval_interval` during RL) is the same generate path but logs only micro-average `eval/<dataset>` to W&B — the harness recomputes strictly from the dump.
 
 ### 3.7 Metrics & debugging
@@ -288,9 +290,10 @@ MODAL_ENVIRONMENT=junlin-dev uv run --with modal modal run agentic_rl/retro/moda
 MODAL_ENVIRONMENT=junlin-dev uv run --with modal modal run agentic_rl/retro/modal_train.py::download_data
 MODAL_ENVIRONMENT=junlin-dev uv run --with modal modal run agentic_rl/retro/modal_train.py::convert_hf_to_megatron_checkpoint
 
-# Held-out eval (plan → run printed commands from guide repo → aggregate)
+# Held-out eval (plan prints per-arm in-repo modal commands; aggregate/rollup post-process)
 python -m agentic_rl.eval.frontier_cs.plan
 python -m agentic_rl.eval.frontier_cs.aggregate <dump.pt> --output summary.json
+python -m agentic_rl.eval.frontier_cs.rollup --summary p50=<summary.json> --pair "p50 - base"
 
 # Oracle-check a converted dataset
 python -m agentic_rl.environment.harbor out/tasks.jsonl --task-root out --limit 3
@@ -310,12 +313,12 @@ uv run pytest tests/test_agent -x
 | # | Item | Evidence | Suggested action |
 |---|---|---|---|
 | 1 | `agentic_rl/README.md` claims "no edits to slime/" — false (+495 lines / 10 files) | §3.10 | Rewrite claim; add a `docs/SLIME_DELTA.md` and keep it in PR checklists |
-| 2 | **Dual launch stacks**: new in-repo `launch_config.py` for training vs old `EXPERIMENT_CONFIG` classes in 📦 guide repo — and the held-out eval still lives on the OLD stack | eval §3.6; `qwen3_6_frontiercs_eval.sh:4` cds into the guide repo | Port `heldout_avg3` into an in-repo eval entrypoint (an `EvalConfig` sibling of `RetroSlimeConfig` + `modal_train.py::eval`); retire guide dependency |
+| 2 | ✅ RESOLVED 2026-08-26 (step 4): held-out eval ported in-repo (`HeldoutEvalSlimeConfig`, `ROLLOUT_MODE=eval`). Old guide `EXPERIMENT_CONFIG` classes remain only as legacy history | eval §3.6; `qwen3_6_frontiercs_eval.sh:4` cds into the guide repo | Port `heldout_avg3` into an in-repo eval entrypoint (an `EvalConfig` sibling of `RetroSlimeConfig` + `modal_train.py::eval`); retire guide dependency |
 | 3 | Config spread over 4 channels (CLI flags, `ASYNC_RL_*` env, custom-config YAML, external config classes); no registry of env knobs | launch_config.py:276-337, env.py:316, rewards.py:20-21,126-128 | One `knobs.py` module: every env var with default, type, consumer; launch validates against it |
 | 4 | Dead retro code: `phase1.py`, `survey.SurveyWriter`, `generate_retro_survey` (rollout.py:30,120), `snapshot.create_from_filesystem_snapshot`, `prefetch.reset_worker`, FILESYSTEM snapshot kind | retro map §3.4 | Delete (Phase-1 study is concluded; report lives in `progress/`) |
 | 5 | `async_rl_research/` = stale predecessor copy; `dashboard/app.py:8-9` still documents old paths | root listing | Salvage `notes_remote_judge_integration.md` into `docs/`, delete the dir, fix dashboard docstring |
 | 6 | `tests/test_agent/test_frontier_cs_eval.py` asserts 4 arms, registry has 11 → fails; not in CI matrix | test:32 vs arms.json | Fix assertion, add to `.github/workflows/pr-test.yml` |
-| 7 | `results/*.json` bootstrap/paired stats not reproducible in-repo | §3.6 | Commit the roll-up + bootstrap script under `eval/frontier_cs/` |
+| 7 | ✅ RESOLVED 2026-08-26 (step 4): `eval/frontier_cs/rollup.py` reproduces the roll-up (50k reps, seed 20260817, unit=task) | §3.6 | — |
 | 8 | Legacy eval-data path: `evalset.py` + `prepare_eval_data.sh` + HF `agentic-rl-evalsets` superseded by guide `datasets.py` registry | convert2slime/README migration list | Delete after last legacy config migrates |
 | 9 | `environment/swerebench.py` env vestigial (live SWE path = harbor conversion); `openthoughts_agent.py` converter unused | env map Q6 | Move to `environment/legacy/` or delete with its two configs |
 | 10 | Dead knobs: `agentic_max_boot_retries` (set everywhere, read nowhere — boot_retries hard-coded in sandbox.py:67); `agentic_grade_timeout` only pads sandbox lifetime | env map Q6 | Wire or delete; document `agentic_eval_timeout` as the real grading budget |
@@ -501,7 +504,7 @@ Protocols at the boundary (the whole coupling surface): `ScoreTrace` (what "prog
 1. ✅ **Docs** (2026-08-26): land this runbook; write `SLIME_DELTA.md`; correct the README claim.
 2. ✅ **Deletions** (2026-08-26): `async_rl_research/`, dead retro code (#4), legacy evalset path (#8), dead knobs (#10). Fix stale test + CI (#6).
 3. ✅ **De-fork the async rollout file (DONE 2026-08-26, P8)**: copied `slime/rollout/fully_async_rollout.py` → `core/fully_async.py`, point `--rollout-function-path` (and retro's imports) at it, convert its two CLI flags to `ASYNC_RL_*` knobs, and revert the slime file + `slime/utils/arguments.py` flags to upstream. Independently shippable; `tests/test_agent/test_behavior_lag.py` guards it.
-4. **Kill the external-repo dependency** (#2): in-repo eval entrypoint reusing `launch_config.py` machinery; commit the results roll-up script (#7). This is the single highest-leverage change for "agent can start without context".
+4. ✅ **Kill the external-repo dependency** (DONE 2026-08-26, #2): in-repo eval entrypoint (`HeldoutEvalSlimeConfig` + `ROLLOUT_MODE=eval` + `post_process_data`); results roll-up script committed (#7). This was the single highest-leverage change for "agent can start without context".
 5. **Knob registry** (#3): mechanical, high-payoff for discoverability; launch-time validation catches typo'd env vars. Family-specific knobs get a family namespace (`FRONTIER_CS_*` already follows this).
 6. **Physical moves + retro re-abstraction (§7.1)** into the layout above — including `verifier_server/ → envs/frontier_cs/judge/` and the `pool/source/mixed/capture` split — updating every string-loaded path (contract #10) in the same commit, with temporary re-export shims (`agentic_rl/generate.py → core/generate.py`) for one deprecation window since old configs and W&B-recorded commands reference the old paths. The retro rewrite is behavior-preserving: same statuses, same JSONL format, same knobs — `tests/test_agent/test_retro.py` + `test_behavior_lag.py` are the harness.
 7. **Onboard Terminal-Bench 2.1, then SWE-Bench Pro** as the proof of the family layout: each should require only a new `envs/<family>/` dir + a dataset key + an arm script — zero edits to `core/`, `rewards/`, or `launch/` machinery. If either needs more, that's a layering bug to fix before calling the restructure done.

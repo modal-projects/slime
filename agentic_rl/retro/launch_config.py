@@ -48,7 +48,54 @@ class ModalLaunchConfig:
     region: str | None = None
 
 
-class RetroSlimeConfig:
+class _SlimeConfigBase:
+    """Shared launch mechanics: attribute→CLI-flag emission and node math."""
+
+    # Identity/bookkeeping fields that are not slime CLI flags.
+    _IDENTITY_SKIP = {
+        "run_tag",
+        "state_tag",
+        "launch_stamp",
+        "reward_arm",
+        "target_fraction",
+        "rollout_mode",
+        "arm",
+        "eval_id",
+        "source_run_tag",
+    }
+
+    def cli_args(self) -> list[str]:
+        out: list[str] = []
+        for key, value in vars(self).items():
+            if key.startswith("_") or key in _SLIME_SKIP or key in self._IDENTITY_SKIP:
+                continue
+            if value is None or value is False:
+                continue
+            flag = f"--{key.replace('_', '-')}"
+            if value is True:
+                out.append(flag)
+            elif isinstance(value, dict) and key in _JSON_CONFIG_FIELDS:
+                out += [flag, json.dumps(value)]
+            elif isinstance(value, list):
+                out += [flag, *[str(item) for item in value]]
+            else:
+                out += [flag, str(value)]
+        return out
+
+    def total_nodes(self) -> int:
+        training_gpus = self.actor_num_nodes * self.actor_num_gpus_per_node
+        total_gpus = training_gpus if self.colocate else training_gpus + self.rollout_num_gpus
+        if total_gpus % self.actor_num_gpus_per_node:
+            raise ValueError("launch GPU count does not fill complete Modal nodes")
+        return math.ceil(total_gpus / self.actor_num_gpus_per_node)
+
+    def download_model(self) -> None:
+        from huggingface_hub import snapshot_download
+
+        snapshot_download(self.hf_checkpoint)
+
+
+class RetroSlimeConfig(_SlimeConfigBase):
     """Concrete Slime arguments for the paired 27B retro experiment."""
 
     def __init__(self, env: Mapping[str, str]):
@@ -87,8 +134,9 @@ class RetroSlimeConfig:
         # vanilla arm is the retro stack's true no-retro control.
         rollout_mode = env.get("ROLLOUT_MODE", "retro").strip().lower()
         if rollout_mode not in ("retro", "vanilla"):
-            raise ValueError("ROLLOUT_MODE must be retro or vanilla")
+            raise ValueError("ROLLOUT_MODE must be retro or vanilla (eval routes to HeldoutEvalSlimeConfig in build_launch_configs)")
 
+        self.rollout_mode = rollout_mode
         launch_stamp = env.get("LAUNCH_STAMP") or f"{datetime.now():%Y%m%d-%H%M%S}"
         fraction_tag = f"p{round(target_fraction * 100):02d}"
         if rollout_mode == "vanilla":
@@ -352,42 +400,6 @@ class RetroSlimeConfig:
         self.reward_arm = arm
         self.target_fraction = target_fraction
 
-    def cli_args(self) -> list[str]:
-        out: list[str] = []
-        for key, value in vars(self).items():
-            if key.startswith("_") or key in _SLIME_SKIP or key in {
-                "run_tag",
-                "state_tag",
-                "launch_stamp",
-                "reward_arm",
-                "target_fraction",
-            }:
-                continue
-            if value is None or value is False:
-                continue
-            flag = f"--{key.replace('_', '-')}"
-            if value is True:
-                out.append(flag)
-            elif isinstance(value, dict) and key in _JSON_CONFIG_FIELDS:
-                out += [flag, json.dumps(value)]
-            elif isinstance(value, list):
-                out += [flag, *[str(item) for item in value]]
-            else:
-                out += [flag, str(value)]
-        return out
-
-    def total_nodes(self) -> int:
-        training_gpus = self.actor_num_nodes * self.actor_num_gpus_per_node
-        total_gpus = training_gpus if self.colocate else training_gpus + self.rollout_num_gpus
-        if total_gpus % self.actor_num_gpus_per_node:
-            raise ValueError("retro launch GPU count does not fill complete Modal nodes")
-        return math.ceil(total_gpus / self.actor_num_gpus_per_node)
-
-    def download_model(self) -> None:
-        from huggingface_hub import snapshot_download
-
-        snapshot_download(self.hf_checkpoint)
-
     def download_data(self) -> None:
         from huggingface_hub import snapshot_download
 
@@ -404,10 +416,323 @@ class RetroSlimeConfig:
             )
 
 
+
+class HeldoutEvalSlimeConfig(_SlimeConfigBase):
+    """Eval-only slime arguments for the strict Frontier-CS held-out avg@3 protocol.
+
+    Ported from the guide repo's ``w_qwen3_6_27b_frontier_cs_heldout_avg3``
+    (RUNBOOK §7 step 4), so held-out evals launch from this repo alone via
+    ``ROLLOUT_MODE=eval``. Sampling/limit pins come from
+    ``eval/frontier_cs/arms.json`` (the one protocol source of truth);
+    topology and the image pin live here. ``num_rollout=0`` +
+    ``eval_interval=1`` route slime's train.py through its eval-only branch:
+    evaluate once, dump ``rollout_eval_0.pt``, exit — no optimizer step.
+
+    Identity env vars: ``FRONTIER_CS_EVAL_ARM`` (required — a registry key
+    fills checkpoint identity automatically; an unregistered ad-hoc arm also
+    needs ``FRONTIER_CS_EVAL_RUN_TAG``), optional ``FRONTIER_CS_EVAL_ID``,
+    ``FRONTIER_CS_EVAL_CKPT_STEP``, ``FRONTIER_CS_EVAL_LOAD``,
+    ``FRONTIER_CS_EVAL_REFRESH_DATA``.
+    """
+
+    def __init__(self, env: Mapping[str, str]):
+        from agentic_rl.eval.frontier_cs.protocol import load_registry
+
+        protocol, arms = load_registry()
+        arm = env.get("FRONTIER_CS_EVAL_ARM", "").strip()
+        if not arm:
+            raise ValueError("ROLLOUT_MODE=eval requires FRONTIER_CS_EVAL_ARM")
+        spec = arms.get(arm)
+        source_run_tag = env.get("FRONTIER_CS_EVAL_RUN_TAG", "").strip() or (
+            spec.source_run_tag if spec else ""
+        )
+        if not source_run_tag:
+            raise ValueError(
+                f"arm {arm!r} is not in the registry; set FRONTIER_CS_EVAL_RUN_TAG explicitly"
+            )
+        ckpt_step = (
+            int(env["FRONTIER_CS_EVAL_CKPT_STEP"])
+            if env.get("FRONTIER_CS_EVAL_CKPT_STEP")
+            else (spec.checkpoint_step if spec else None)
+        )
+        load_override = env.get("FRONTIER_CS_EVAL_LOAD") or (spec.load_path if spec else None)
+        launch_stamp = env.get("LAUNCH_STAMP") or f"{datetime.now():%Y%m%d-%H%M%S}"
+        eval_id = env.get("FRONTIER_CS_EVAL_ID") or f"frontier-cs-heldout-avg3-{arm}-{launch_stamp}"
+        dump_dir = f"{CHECKPOINTS_PATH}/swe_rollout_dumps/frontier_cs/heldout_avg3/{eval_id}"
+
+        # Identity/bookkeeping (skipped by cli_args via _IDENTITY_SKIP).
+        self.rollout_mode = "eval"
+        self.arm = arm
+        self.eval_id = eval_id
+        self.source_run_tag = source_run_tag
+        self.run_tag = eval_id
+        self.state_tag = eval_id
+        self.launch_stamp = launch_stamp
+        self.reward_arm = "final"
+        self.target_fraction = 0.0
+
+        # Model and eval-only topology: TP4×CP2 fits the model on one train
+        # node; four TP2 rollout engines fit another (2 nodes total).
+        self.slime_model_script = "scripts/models/qwen3.5-27B.sh"
+        self.make_vocab_size_divisible_by = 32
+        self.hf_checkpoint = "Qwen/Qwen3.6-27B"
+        self.ref_load = f"{CHECKPOINTS_PATH}/Qwen3.6-27B_torch_dist"
+        self.colocate = False
+        self.actor_num_nodes = 1
+        self.actor_num_gpus_per_node = 8
+        self.rollout_num_gpus = 8
+        self.update_weights_interval = 1
+        self.update_weight_buffer_size = 2147483648
+        self.async_mode = False  # sync train.py owns the eval-only branch
+        self.sglang_server_concurrency = 16
+
+        # Eval-only branch: no rollouts, one armed eval, dummy 1-iter LR
+        # schedule so Megatron's `assert lr_decay_steps > 0` passes.
+        self.num_rollout = 0
+        self.eval_interval = 1
+        self.lr_decay_iters = 1
+        self.skip_eval_before_train = True
+
+        # Checkpoint under evaluation. One shared loading path for ordinary-RL
+        # and retro arms; load_path overrides for non-training checkpoints
+        # (e.g. the vanilla base-model torch_dist conversion).
+        self.load = load_override or f"{CHECKPOINTS_PATH}/swe_ckpts/{source_run_tag}"
+        self.ckpt_step = ckpt_step
+        self.no_load_optim = True
+        self.no_load_rng = True
+        self.override_opt_param_scheduler = True
+
+        # Agentic episode recipe — pinned by the registry protocol.
+        self.custom_generate_function_path = "agentic_rl.generate.generate"
+        self.custom_rollout_log_function_path = "agentic_rl.metrics.log_rollout_data"
+        self.custom_config_path = {
+            "agentic_max_steps": protocol.max_steps,
+            "agentic_episode_timeout": protocol.episode_timeout_seconds,
+            "agentic_eval_timeout": protocol.verifier_timeout_seconds,
+            "agentic_exec_timeout": protocol.exec_timeout_seconds,
+            "agentic_close_think_on_length": protocol.think_closure,
+            "agentic_max_think_closures": 2,
+            "agentic_think_closure_budget": 4096,
+            "router_policy": "consistent_hashing",
+        }
+        self.metadata_key = "metadata"
+        self.prompt_data = f"{DATA_PATH}/frontier_cs/train.jsonl"
+        self.input_key = "prompt"
+        self.label_key = "label"
+        self.apply_chat_template = False
+        self.rollout_shuffle = False
+        self.rm_type = None
+        self.balance_data = True
+
+        # Sampling — every pin from the shared avg@3 protocol. Deterministic
+        # inference is ON here (unlike training): arms must be re-runnable.
+        self.num_steps_per_rollout = 1
+        self.rollout_batch_size = 32
+        self.global_batch_size = 256
+        self.micro_batch_size = 1
+        self.n_samples_per_prompt = 8
+        self.n_samples_per_eval_prompt = protocol.samples_per_task
+        self.rollout_max_response_len = protocol.max_response_len
+        self.eval_max_response_len = protocol.max_response_len
+        self.rollout_max_context_len = protocol.max_context_len
+        self.rollout_temperature = protocol.temperature
+        self.rollout_top_p = protocol.top_p
+        self.rollout_top_k = protocol.top_k
+        self.eval_temperature = protocol.temperature
+        self.eval_top_p = protocol.top_p
+        self.eval_top_k = protocol.top_k
+        self.rollout_seed = protocol.rollout_seed
+        self.sglang_enable_deterministic_inference = True
+        self.eval_config = {
+            "defaults": {
+                "n_samples_per_eval_prompt": protocol.samples_per_task,
+                "temperature": protocol.temperature,
+                "top_p": protocol.top_p,
+                "top_k": protocol.top_k,
+                "max_response_len": protocol.max_response_len,
+            },
+            "datasets": [
+                {
+                    "name": "frontier_cs",
+                    "path": f"{DATA_PATH}/frontier_cs/eval.jsonl",
+                    "metadata_overrides": {"eval_dataset": "frontier_cs"},
+                }
+            ],
+        }
+        self.log_passrate = True
+
+        # SGLang engine — wave-1 image (sglang 0.5.12): the OLD ServerArgs
+        # names (cuda_graph_bs, mamba_scheduler_strategy). Do NOT use the
+        # 0.5.15 names here; the pinned image's --sglang-* bridge rejects them.
+        self.rollout_num_gpus_per_engine = 2
+        self.sglang_mem_fraction_static = 0.85
+        self.sglang_cuda_graph_bs = [1, 2, 4, 8, 16] + list(range(24, 257, 8))
+        self.sglang_mamba_scheduler_strategy = "extra_buffer"
+        self.sglang_speculative_algorithm = "EAGLE"
+        self.sglang_speculative_num_steps = 3
+        self.sglang_speculative_eagle_topk = 1
+        self.sglang_speculative_num_draft_tokens = 4
+        self.sglang_enable_dp_attention = False
+        self.sglang_disable_custom_all_reduce = False
+        self.sglang_reasoning_parser = "qwen3"
+        self.sglang_tool_call_parser = "qwen3_coder"
+        self.qwen_gdn_backend = "flashqla"
+
+        # Training-shape args slime validates even though no step runs.
+        self.tensor_model_parallel_size = 4
+        self.sequence_parallel = True
+        self.pipeline_model_parallel_size = 1
+        self.context_parallel_size = 2
+        self.expert_model_parallel_size = 1
+        self.expert_tensor_parallel_size = 1
+        self.use_dynamic_batch_size = True
+        self.max_tokens_per_gpu = 32768
+        self.log_probs_chunk_size = 1024
+        self.recompute_granularity = "full"
+        self.recompute_method = "uniform"
+        self.recompute_num_layers = 1
+        self.attention_dropout = 0.0
+        self.hidden_dropout = 0.0
+        self.accumulate_allreduce_grads_in_fp32 = True
+        self.attention_softmax_in_fp32 = True
+        self.attention_backend = "flash"
+        self.use_rollout_logprobs = True
+        self.advantage_estimator = "grpo"
+        self.use_kl_loss = False
+        self.kl_loss_coef = 0.0
+        self.kl_loss_type = "low_var_kl"
+        self.kl_coef = 0.0
+        self.entropy_coef = 0.0
+        self.eps_clip = 0.2
+        self.eps_clip_high = 0.28
+        self.optimizer = "adam"
+        self.lr = 1e-6
+        self.lr_decay_style = "constant"
+        self.weight_decay = 0.1
+        self.adam_beta1 = 0.9
+        self.adam_beta2 = 0.98
+        self.optimizer_cpu_offload = True
+        self.overlap_cpu_optimizer_d2h_h2d = True
+        self.use_precision_aware_optimizer = True
+        self.save = f"{CHECKPOINTS_PATH}/swe_ckpts/{eval_id}"
+        self.save_interval = 15
+        self.save_debug_rollout_data = f"{dump_dir}/rollout_{{rollout_id}}.pt"
+
+        self.environment = {
+            "PYTHONPATH": "/root/Megatron-LM/:/root/slime",
+            "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+            "NCCL_NVLS_ENABLE": "1",
+            "MODAL_ENVIRONMENT": env.get("MODAL_ENVIRONMENT", "junlin-dev"),
+            "ASYNC_RL_TASK_ROOT": str(DATA_PATH),
+            "SLIME_AGENT_SANDBOX_CPU": "4",
+            "SLIME_AGENT_SANDBOX_MEMORY_MB": "4096",
+            "FRONTIER_CS_JUDGE_URL": env.get("FRONTIER_CS_JUDGE_URL", ""),
+            # Protocol pins, deliberately NOT env-overridable for eval.
+            "ASYNC_RL_REWARD_SHAPE": "fractional",
+            "ASYNC_RL_OUTCOME_REWARD": "final",
+            "ASYNC_RL_SOLVED_BONUS": "0",
+            "ASYNC_RL_OUTCOME_GAMMA": "0.4",
+            "FRONTIER_CS_EVAL_ARM": arm,
+            "FRONTIER_CS_EVAL_RUN_TAG": source_run_tag,
+            "FRONTIER_CS_EVAL_ID": eval_id,
+        }
+        if ckpt_step is not None:
+            self.environment["FRONTIER_CS_EVAL_CKPT_STEP"] = str(ckpt_step)
+        if load_override:
+            self.environment["FRONTIER_CS_EVAL_LOAD"] = load_override
+
+        self.use_wandb = True
+        self.wandb_project = env.get("WANDB_PROJECT")
+        self.wandb_group = eval_id
+        self.disable_wandb_random_suffix = True
+        self._refresh_data = env.get("FRONTIER_CS_EVAL_REFRESH_DATA") == "1"
+
+    def _validated_split(self) -> dict:
+        from agentic_rl.eval.frontier_cs.protocol import load_registry
+        from agentic_rl.eval.frontier_cs.split import validate_split_files
+
+        protocol, _ = load_registry()
+        summary = validate_split_files(
+            DATA_PATH / "frontier_cs" / "train.jsonl",
+            DATA_PATH / "frontier_cs" / "eval.jsonl",
+            expected_eval_tasks=protocol.expected_tasks,
+        )
+        for key, expected in (
+            ("train_sha256", protocol.train_sha256),
+            ("eval_sha256", protocol.eval_sha256),
+        ):
+            if summary[key] != expected:
+                raise ValueError(f"Frontier-CS {key} changed: expected {expected}, got {summary[key]}")
+        return summary
+
+    def download_data(self) -> None:
+        """Pull Frontier-CS and prove the published 150/38 partition is disjoint."""
+
+        train_path = DATA_PATH / "frontier_cs" / "train.jsonl"
+        eval_path = DATA_PATH / "frontier_cs" / "eval.jsonl"
+        if self._refresh_data or not (train_path.is_file() and eval_path.is_file()):
+            from huggingface_hub import snapshot_download
+
+            snapshot_download(
+                "junlin-modal/frontier-cs", repo_type="dataset", local_dir=str(DATA_PATH)
+            )
+        else:
+            print(
+                "[frontier-cs-eval] reusing existing slime-data split; "
+                "set FRONTIER_CS_EVAL_REFRESH_DATA=1 to pull"
+            )
+        summary = self._validated_split()
+        print("[frontier-cs-eval] split validated")
+        print(json.dumps(summary, indent=2))
+
+    def post_process_data(self) -> str:
+        """Write strict avg@3 results beside ``rollout_eval_0.pt``; return the path."""
+
+        from agentic_rl.eval.frontier_cs.aggregate import aggregate_dump
+        from agentic_rl.eval.frontier_cs.protocol import load_registry
+
+        protocol, _ = load_registry()
+        split = self._validated_split()
+        dump_path = Path(self.save_debug_rollout_data.format(rollout_id="eval_0"))
+        summary = aggregate_dump(
+            dump_path,
+            samples_per_task=protocol.samples_per_task,
+            expected_tasks=protocol.expected_tasks,
+            strict=True,
+            metadata={
+                "arm": self.arm,
+                "source_run_tag": self.source_run_tag,
+                "checkpoint_step": self.ckpt_step,
+                "eval_id": self.eval_id,
+                "split": split,
+                "protocol": {
+                    "temperature": protocol.temperature,
+                    "top_p": protocol.top_p,
+                    "top_k": protocol.top_k,
+                    "max_response_len": protocol.max_response_len,
+                    "max_context_len": protocol.max_context_len,
+                    "max_steps": protocol.max_steps,
+                    "episode_timeout_seconds": protocol.episode_timeout_seconds,
+                    "verifier_timeout_seconds": protocol.verifier_timeout_seconds,
+                    "exec_timeout_seconds": protocol.exec_timeout_seconds,
+                    "think_closure": protocol.think_closure,
+                    "rollout_seed": protocol.rollout_seed,
+                },
+            },
+        )
+        output_path = dump_path.with_name("summary.json")
+        output_path.write_text(json.dumps(summary, indent=2) + "\n")
+        print(f"[frontier-cs-eval] {summary['metric']}={summary['avg_at_k']:.6f}")
+        print(output_path)
+        return str(output_path)
+
+
 def build_launch_configs(
     environ: Mapping[str, str] | None = None,
-) -> tuple[ModalLaunchConfig, RetroSlimeConfig]:
+) -> tuple[ModalLaunchConfig, _SlimeConfigBase]:
     env = dict(os.environ if environ is None else environ)
+    if env.get("ROLLOUT_MODE", "").strip().lower() == "eval":
+        return _build_eval_launch_configs(env)
     slime = RetroSlimeConfig(env)
     image_env = {
         key: value
@@ -473,6 +798,48 @@ def build_launch_configs(
         memory=(1024, int(2 * 1024 * 1024)),
         ephemeral_disk=2 * 1024 * 1024,
         image_run_commands=tuple(image_run_commands),
+        image_env=image_env,
+    )
+    return modal, slime
+
+
+
+def _build_eval_launch_configs(env: dict[str, str]) -> tuple[ModalLaunchConfig, HeldoutEvalSlimeConfig]:
+    """Held-out avg@3 eval launch (ROLLOUT_MODE=eval).
+
+    Protocol pin: every avg@3 arm must run the SAME inference stack. Wave 1
+    (2026-08-17) ran on nightly-dev-20260529a (sglang 0.5.12); the training
+    image moved to 20260810a-cu129 (sglang 0.5.15.post1) on 2026-08-24, whose
+    renamed ServerArgs fields also break this slime's --sglang-* bridge
+    (validate_args reads sglang_data_parallel_size). Keep the old image here
+    until the protocol is deliberately re-baselined.
+    """
+
+    slime = HeldoutEvalSlimeConfig(env)
+    image_env = {
+        key: value
+        for key, value in env.items()
+        if key.startswith("FRONTIER_CS_EVAL_")
+        or key in {"WANDB_PROJECT", "MODAL_ENVIRONMENT", "FRONTIER_CS_JUDGE_URL", "ROLLOUT_MODE"}
+    }
+    image_env.update(
+        {
+            "LAUNCH_STAMP": slime.launch_stamp,
+            "FRONTIER_CS_EVAL_ID": slime.eval_id,
+            "MSWEA_SILENT_STARTUP": "1",
+            "PYTHONPATH": f"/root/Megatron-LM/:{SLIME_ROOT}",
+        }
+    )
+    modal = ModalLaunchConfig(
+        docker_image="slimerl/slime:nightly-dev-20260529a",
+        gpu="H200",
+        memory=(1024, int(2 * 1024 * 1024)),
+        ephemeral_disk=2 * 1024 * 1024,
+        image_run_commands=(
+            f"rm -rf {HF_CACHE_PATH}",
+            "apt-get update && apt-get install -y --no-install-recommends rdma-core libibverbs1 ibverbs-providers",
+            "uv pip install --system modal mini-swe-agent datasets huggingface_hub pyyaml",
+        ),
         image_env=image_env,
     )
     return modal, slime

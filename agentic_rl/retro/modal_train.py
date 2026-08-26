@@ -11,6 +11,15 @@ Examples:
     RETRO_PHASE2_GROUPS=32 RETRO_PHASE2_ROLLOUTS=20 \
       uv run --with modal modal run -d agentic_rl/retro/modal_train.py::train
 
+Held-out avg@3 eval (RUNBOOK §7 step 4 — no guide repo involved; use
+``python -m agentic_rl.eval.frontier_cs.plan`` to print the full per-arm
+commands):
+
+    ROLLOUT_MODE=eval FRONTIER_CS_EVAL_ARM=p50 \
+      uv run --with modal modal run -d agentic_rl/retro/modal_train.py::train
+    ROLLOUT_MODE=eval FRONTIER_CS_EVAL_ARM=p50 FRONTIER_CS_EVAL_ID=<same id> \
+      uv run --with modal modal run agentic_rl/retro/modal_train.py::post_process_data
+
 Bootstrap hooks use the same file:
 
     uv run --with modal modal run agentic_rl/retro/modal_train.py::download_model
@@ -82,7 +91,11 @@ modal_volumes = {
     str(CHECKPOINTS_PATH): checkpoints_volume,
 }
 
-app_name = os.environ.get("MODAL_APP_NAME") or f"frontier-cs-retro-{slime_cfg.reward_arm}"
+if slime_cfg.rollout_mode == "eval":
+    _default_app_name = f"frontier-cs-heldout-{slime_cfg.arm}"
+else:
+    _default_app_name = f"frontier-cs-retro-{slime_cfg.reward_arm}"
+app_name = os.environ.get("MODAL_APP_NAME") or _default_app_name
 app = modal.App(app_name)
 
 
@@ -90,13 +103,19 @@ app = modal.App(app_name)
 def show_config() -> None:
     """Print the resolved run identity and ablation controls without launching."""
 
+    print(f"mode={slime_cfg.rollout_mode}")
     print(f"run_tag={slime_cfg.run_tag}")
     print(f"state_tag={slime_cfg.state_tag}")
+    print(f"nodes={slime_cfg.total_nodes()}")
+    if slime_cfg.rollout_mode == "eval":
+        print(f"arm={slime_cfg.arm}")
+        print(f"eval_id={slime_cfg.eval_id}")
+        print(f"checkpoint={slime_cfg.load} (step={slime_cfg.ckpt_step})")
+        return
     print(f"reward_arm={slime_cfg.reward_arm}")
     print(f"target_fraction={slime_cfg.target_fraction}")
     print(f"groups={slime_cfg.rollout_batch_size}")
     print(f"rollouts={slime_cfg.num_rollout}")
-    print(f"nodes={slime_cfg.total_nodes()}")
     for key, value in sorted(slime_cfg.environment.items()):
         if key.startswith("ASYNC_RL_RETRO_"):
             print(f"{key}={value}")
@@ -124,6 +143,22 @@ def download_data() -> None:
     data_volume.reload()
     slime_cfg.download_data()
     data_volume.commit()
+
+
+@app.function(
+    image=image,
+    volumes={str(DATA_PATH): data_volume, str(CHECKPOINTS_PATH): checkpoints_volume},
+    timeout=2 * 60 * 60,
+)
+def post_process_data() -> None:
+    """Aggregate a finished held-out eval dump into strict avg@3 summary.json."""
+
+    if slime_cfg.rollout_mode != "eval":
+        raise ValueError("post_process_data is only meaningful with ROLLOUT_MODE=eval")
+    data_volume.reload()
+    checkpoints_volume.reload()
+    slime_cfg.post_process_data()
+    checkpoints_volume.commit()
 
 
 @app.function(
@@ -416,11 +451,11 @@ async def train() -> None:
 
     client = JobSubmissionClient(f"http://127.0.0.1:{RAY_DASHBOARD_PORT}")
     job_id = client.submit_job(entrypoint=command, runtime_env=runtime_env)
-    print(
-        f"Training {slime_cfg.run_tag} on {nodes} {modal_cfg.gpu} nodes "
-        f"(arm={slime_cfg.reward_arm}, target={slime_cfg.target_fraction})",
-        flush=True,
-    )
+    if slime_cfg.rollout_mode == "eval":
+        detail = f"(held-out avg@3, arm={slime_cfg.arm}, ckpt_step={slime_cfg.ckpt_step})"
+    else:
+        detail = f"(arm={slime_cfg.reward_arm}, target={slime_cfg.target_fraction})"
+    print(f"Running {slime_cfg.run_tag} on {nodes} {modal_cfg.gpu} nodes {detail}", flush=True)
     display_env = {"env_vars": dict(runtime_env["env_vars"])}
     if "WANDB_API_KEY" in display_env["env_vars"]:
         display_env["env_vars"]["WANDB_API_KEY"] = "<redacted>"

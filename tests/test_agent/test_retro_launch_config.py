@@ -212,5 +212,66 @@ def test_dapo_filter_zero_disables_dynamic_sampling():
     assert modal.image_env.get("DAPO_FILTER") is None  # only passed through when set
 
 
+def test_eval_mode_builds_the_heldout_avg3_protocol():
+    modal, slime = build_launch_configs(_env(ROLLOUT_MODE="eval", FRONTIER_CS_EVAL_ARM="p50"))
+
+    # Protocol pin: eval must run the wave-1 image, never the training image.
+    assert modal.docker_image == "slimerl/slime:nightly-dev-20260529a"
+    assert slime.rollout_mode == "eval"
+    # The registry key alone fills checkpoint identity.
+    assert slime.source_run_tag.endswith("retro-a-final-p50-20260810-000459")
+    assert slime.ckpt_step == 79
+    assert slime.load == f"/checkpoints/swe_ckpts/{slime.source_run_tag}"
+    assert slime.eval_id == "frontier-cs-heldout-avg3-p50-20260812-130000"
+    assert slime.total_nodes() == 2
+    assert slime.async_mode is False
+
+    cli = slime.cli_args()
+    assert cli[cli.index("--num-rollout") + 1] == "0"
+    assert cli[cli.index("--eval-interval") + 1] == "1"
+    assert cli[cli.index("--n-samples-per-eval-prompt") + 1] == "3"
+    assert "--sglang-enable-deterministic-inference" in cli
+    # The pinned 0.5.12 image needs the OLD ServerArgs names.
+    assert "--sglang-cuda-graph-bs" in cli
+    assert not any("cuda-graph-bs-decode" in flag for flag in cli)
+    assert cli[cli.index("--sglang-mamba-scheduler-strategy") + 1] == "extra_buffer"
+
+    # Sampling pins come from the registry protocol.
+    assert slime.eval_max_response_len == 24576
+    assert slime.rollout_max_context_len == 65536
+    assert slime.rollout_seed == 20260802
+    assert slime.custom_config_path["agentic_max_steps"] == 75
+    assert slime.custom_config_path["agentic_close_think_on_length"] is False
+    assert slime.eval_config["datasets"][0]["path"] == "/data/frontier_cs/eval.jsonl"
+
+    # Reward pins are not env-overridable; no retro machinery leaks in.
+    assert slime.environment["ASYNC_RL_OUTCOME_REWARD"] == "final"
+    assert slime.environment["ASYNC_RL_REWARD_SHAPE"] == "fractional"
+    assert not any(key.startswith("ASYNC_RL_RETRO") for key in slime.environment)
+
+
+def test_eval_mode_base_arm_uses_registry_load_override():
+    _, slime = build_launch_configs(_env(ROLLOUT_MODE="eval", FRONTIER_CS_EVAL_ARM="base"))
+
+    assert slime.ckpt_step is None
+    assert slime.load == "/checkpoints/Qwen3.6-27B_torch_dist"
+    assert slime.environment["FRONTIER_CS_EVAL_LOAD"] == "/checkpoints/Qwen3.6-27B_torch_dist"
+
+
+def test_eval_mode_unregistered_arm_requires_explicit_run_tag():
+    with pytest.raises(ValueError, match="not in the registry"):
+        build_launch_configs(_env(ROLLOUT_MODE="eval", FRONTIER_CS_EVAL_ARM="mystery"))
+
+    _, slime = build_launch_configs(
+        _env(
+            ROLLOUT_MODE="eval",
+            FRONTIER_CS_EVAL_ARM="mystery",
+            FRONTIER_CS_EVAL_RUN_TAG="adhoc-run-tag",
+        )
+    )
+    assert slime.load == "/checkpoints/swe_ckpts/adhoc-run-tag"
+    assert slime.ckpt_step is None
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

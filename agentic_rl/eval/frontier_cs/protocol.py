@@ -9,7 +9,9 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_REGISTRY = Path(__file__).with_name("arms.json")
-CONFIG_MODULE = "frontier_cs.w_qwen3_6_27b_frontier_cs_heldout_avg3"
+# In-repo launch target since RUNBOOK §7 step 4 (was the guide repo's
+# frontier_cs.w_qwen3_6_27b_frontier_cs_heldout_avg3 EXPERIMENT_CONFIG).
+CONFIG_MODULE = "agentic_rl.retro.modal_train (ROLLOUT_MODE=eval)"
 _SAFE_TAG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
@@ -52,7 +54,7 @@ class ArmSpec:
 
     def environment(self, eval_id: str) -> dict[str, str]:
         values = {
-            "EXPERIMENT_CONFIG": CONFIG_MODULE,
+            "ROLLOUT_MODE": "eval",
             "FRONTIER_CS_EVAL_ARM": self.key,
             "FRONTIER_CS_EVAL_RUN_TAG": self.source_run_tag,
             "FRONTIER_CS_EVAL_ID": eval_id,

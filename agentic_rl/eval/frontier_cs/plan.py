@@ -1,4 +1,9 @@
-"""Print, but never execute, Modal commands for Frontier-CS held-out evals."""
+"""Print, but never execute, Modal commands for Frontier-CS held-out evals.
+
+Since RUNBOOK §7 step 4 the commands run from THIS repo (ROLLOUT_MODE=eval →
+agentic_rl/retro/modal_train.py); the guide-repo dependency is gone. Run them
+from the repo root.
+"""
 
 from __future__ import annotations
 
@@ -24,7 +29,6 @@ def build_plan(
     protocol: EvalProtocol,
     *,
     eval_id: str,
-    guide: str,
     modal_environment: str,
     wandb_project: str,
 ) -> dict[str, object]:
@@ -34,7 +38,8 @@ def build_plan(
         "WANDB_PROJECT": wandb_project,
     }
     prefix = _environment_prefix(environment)
-    modal = "uv run --no-dev modal run"
+    modal = "uv run --with modal modal run"
+    launcher = "agentic_rl/retro/modal_train.py"
     dump = f"/checkpoints/swe_rollout_dumps/frontier_cs/heldout_avg3/{eval_id}/rollout_eval_0.pt"
     summary = str(Path(dump).with_name("summary.json"))
     return {
@@ -44,12 +49,11 @@ def build_plan(
         "checkpoint_path": arm.checkpoint_path,
         "checkpoint_step": arm.checkpoint_step,
         "eval_id": eval_id,
-        "guide": guide,
         "protocol": protocol.__dict__,
         "commands": {
-            "download_and_validate": f"{prefix} {modal} slime/modal_train.py::download_data",
-            "evaluate": f"{prefix} {modal} -d slime/modal_train.py::train",
-            "aggregate": f"{prefix} {modal} slime/modal_train.py::post_process_data",
+            "download_and_validate": f"{prefix} {modal} {launcher}::download_data",
+            "evaluate": f"{prefix} {modal} -d {launcher}::train",
+            "aggregate": f"{prefix} {modal} {launcher}::post_process_data",
         },
         "dump_path": dump,
         "summary_path": summary,
@@ -62,7 +66,6 @@ def _print_shell(plan: dict[str, object]) -> None:
     print(f"# dump:       {plan['dump_path']}")
     commands = plan["commands"]
     assert isinstance(commands, dict)
-    print(f"cd {shlex.quote(str(plan['guide']))}")
     print(commands["evaluate"])
     print(commands["aggregate"])
 
@@ -72,10 +75,6 @@ def main() -> None:
     parser.add_argument("arms", nargs="*", help="Arm keys; defaults to every registered arm")
     parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY)
     parser.add_argument("--format", choices=("shell", "json"), default="shell")
-    parser.add_argument(
-        "--guide",
-        default=str(Path.home() / "Documents/Research/async-rl/multinode-training-guide"),
-    )
     parser.add_argument("--modal-environment", default="junlin-dev")
     parser.add_argument("--wandb-project", default="Modal")
     parser.add_argument("--stamp", help="Shared UTC launch stamp; defaults to current time")
@@ -92,7 +91,6 @@ def main() -> None:
             registry[key],
             protocol,
             eval_id=f"frontier-cs-heldout-avg3-{key}-{stamp}",
-            guide=args.guide,
             modal_environment=args.modal_environment,
             wandb_project=args.wandb_project,
         )
