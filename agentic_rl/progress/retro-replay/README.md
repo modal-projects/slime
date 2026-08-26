@@ -47,6 +47,16 @@ and `dynamic_sampling/completed_groups` are unusable for the rlag4/rlag8 runs
 
 ## Comparison caveats
 
+- **2026-08-25 rescore supersedes all pooled-reward comparisons in this doc.**
+  The training headline is lane-pooled (retro branches are score-selected, so
+  their slice runs 0.35-0.71 vs fresh 0.24-0.31) and survivorship-conditioned
+  (DAPO survival spans 45-75% by arm; no-outcome episodes silently excluded).
+  Lane-split backfill + protocol + verdicts live in the report's Rescore tab.
+  Headlines: depth dose-response dead (rdepth4 = train-set overfitting: best
+  on fresh train metrics, worst held-out with 0 solves); old-stack-vs-new =
+  held-out tie; P25 ~= P50 (P75-worst survives); true replicate noise floor
+  ~0.011 pre-filter fresh / ~0.015 pooled (the 0.0016 figure was an artifact).
+
 - O1 versus O2 is the clean historical reward-shaping comparison.
 - Retro A versus Retro B is matched, but resumed steps 40–84 accepted no retro
   groups and fell back to fresh-only generation.

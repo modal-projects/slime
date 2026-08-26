@@ -629,6 +629,7 @@ pre code { background: none; padding: 0; color: var(--ink-body); }
     <button class="tab-btn" data-tab="five-arm-curves">Five-arm curves</button>
     <button class="tab-btn" data-tab="position-ablation">P25 / P50 / P75</button>
     <button class="tab-btn" data-tab="staleness-ablation">Staleness ablation</button>
+    <button class="tab-btn" data-tab="rescore">Rescore (fresh lane)</button>
   </nav>
 
   <section class="tab-panel active" id="research-report" aria-labelledby="research-report-tab">
@@ -835,6 +836,7 @@ pre code { background: none; padding: 0; color: var(--ink-body); }
           </div>
           <p>O2’s late final reward was approximately 14% above baseline and 15% above O1. O1’s late peak reward was highest, but final reward matched baseline while the best-minus-final gap more than doubled.</p>
           <p class="source-note">Basis correction (2026-08-24): these three numbers are not on a common footing. O1/O2 report the shipped training batch — <em>after</em> the DAPO nonzero-std filter dropped 20.6% (O1) and 26.8% (O2) of scored groups, overwhelmingly all-zero ones (W&amp;B <code>dynamic_sampling/dropped_groups / completed_groups</code>) — while O0 ran unfiltered, so its 0.231 is an unconditioned mean. O2's own pre-filter series reads <code>dynamic_sampling/raw_reward_all</code> ≈ 0.186 (its scalar ≈ final since solves are rare), and deflating O1's final reward by its drop rate gives ≈ 0.18 (O1's logged <code>raw_reward_all</code> = 0.309 is on its best-of-trajectory training scalar, not final; the same deflation applied to its post-filter best reward, 0.397 × 32/40.5 ≈ 0.31, reproduces it — validating the method): on a common unconditioned basis <strong>O0 ≥ O2 &gt; O1</strong> — the "+14% above baseline" reverses, while the O2-over-O1 ordering survives at roughly a third the size. This mirrors the finding later formalized in the staleness tab's metric-basis audit.</p>
+          <p class="source-note"><strong>Held-out confirmation (2026-08-24, checkpoint-matched at iteration 74 — O1/O2 saved every 15 steps so 74 is the latest step all three share):</strong> avg@3 on 38 held-out tasks &times; 3 samples reads <strong>O0 0.1831 &gt; O2 0.1712 &gt; O1 0.1348</strong> — exactly the deflated ordering. Paired vs O0: O1 &minus;0.048 with 95% CI [&minus;0.099, &minus;0.003], the only significant shaping effect in the program (best-of-trajectory training <em>hurts</em>, and O1 solved zero held-out tasks); O2 &minus;0.012 [&minus;0.059, +0.037], i.e. the bonus neither helps nor pays for its post-filter appearance. Plain final-reward training (O0) is the best of the three objectives on held-out. Full stats: <code>agentic_rl/eval/frontier_cs/results/heldout-avg3-20260824.json</code>.</p>
         </div>
       </div>
 
@@ -852,7 +854,7 @@ pre code { background: none; padding: 0; color: var(--ink-body); }
           <p><a href="https://wandb.ai/junlinwang/Modal/runs/itk9izyh">Anchor W&amp;B run</a></p>
         </div>
         <div class="card">
-          <div class="card-title">O2 · final + solved bonus <span class="badge pass">preferred</span></div>
+          <div class="card-title">O2 · final + solved bonus <span class="badge warn">overturned on held-out</span></div>
           <p>Train on final + 0.3 × solved. The sparse correctness bonus improved the deliverable without O1’s submission pressure: late final reward 0.263 with 6.1 submissions per episode.</p>
           <p class="muted">90 rollout dumps · steps 0–89 · async + DAPO.</p>
           <p><a href="https://wandb.ai/junlinwang/Modal/runs/4tgxppeo">Anchor W&amp;B run</a></p>
@@ -1389,6 +1391,10 @@ pre code { background: none; padding: 0; color: var(--ink-body); }
   </section>
 
   <section class="tab-panel" id="position-ablation">
+    <div class="callout bad">
+      <div class="callout-title">Superseded by the 2026-08-25 rescore</div>
+      <p>Position-ablation rankings on pooled training reward are composition-biased (each position reshapes the retro slice; P25&rsquo;s retro lane runs 0.44). See the <strong>Rescore</strong> tab: P25 &asymp; P50 on fresh-lane and held-out metrics; P75-is-worst survives.</p>
+    </div>
     <div class="panel-heading">
       <div>
         <h2>Trajectory-position ablation: P25 / P50 / P75</h2>
@@ -1620,6 +1626,10 @@ pre code { background: none; padding: 0; color: var(--ink-body); }
   </section>
 
   <section class="tab-panel" id="staleness-ablation">
+    <div class="callout bad">
+      <div class="callout-title">Superseded by the 2026-08-25 rescore</div>
+      <p>The depth dose-response and the 0.0016 noise floor reported below are superseded &mdash; both were artifacts of the lane-pooled, survivorship-conditioned headline. See the <strong>Rescore</strong> tab for lane-split metrics: depth-4 replay overfits the train set (best on train, worst on held-out).</p>
+    </div>
     <section class="section" id="retro-depth-ablation">
       <div class="section-title"><span class="section-icon">🌀</span> Round 2 — retro-lag dose-response via prefetch depth (complete 2026-08-23)</div>
       <p class="lead">Round 1 (below) established that a retro-lane lag <em>gate</em> cannot create lag: made-to-order retro continuations are structurally ≤1 update stale, so gate arms replicate. Round 2 makes retro staleness a real treatment: the retro lane now has its own <strong>cross-step prefetch buffer</strong> (<code>agentic_rl/retro/prefetch.py</code>) — a background worker pre-generates continuation groups that age across weight updates before training, mirroring the fresh lane's queue-ahead structure. Buffer <strong>depth</strong> is the treatment; the gate is set where it cannot bind; the reported variable is <em>realized</em> retro behavior lag (<code>async/retro/behavior_lag</code>). The p50_v2 baseline doubles as the test of the round-1 hypothesis that the old-P50-vs-rlag reward gap was prefetch-driven horizon compression.</p>
@@ -1706,6 +1716,51 @@ pre code { background: none; padding: 0; color: var(--ink-body); }
         <p class="source-note">The level drops ~0.10&ndash;0.14 everywhere (the all-zero groups return to the denominator) and the story changes: the six runs are indistinguishable through step ~40, old P50 then pulls away alone, p50_v2 sits <em>above</em> the rlag arms, and the rdepth4&ndash;p50_v2 gap is replicate-sized. Fresh leg only, so this is policy quality on fresh problems &mdash; the retro lane's served continuations are excluded by construction.</p>
       </div>
 
+      <div class="verdict pursue">
+        <span class="verdict-badge">Held-out avg@3 verdict (2026-08-24)</span>
+        <h2>The tiebreak ran: retro depth <em>inverts</em> on held-out, old-vs-new stack is a tie, and the only significant treatment effects in the whole program are "RL beats the base model" and "best-of-trajectory shaping hurts".</h2>
+        <p>All remaining arms were evaluated under the wave-1 protocol (38 held-out tasks &times; 3 samples, identical sampling, same engine image — the eval config now pins <code>nightly-dev-20260529a</code> after the 2026-08-24 base-image bump to sglang 0.5.15 broke launches via the renamed <code>data_parallel_size</code> ServerArgs field). Round-2 arms at iteration 79, checkpoint-matched to the 2026-08-17 wave; the O-cohort internally matched at iteration 74 (O1/O2 saved every 15 steps and have no complete iter-79); vanilla Qwen3.6-27B evaluated from its <code>release</code> conversion as the step-0 anchor. Full numbers in <code>agentic_rl/eval/frontier_cs/results/heldout-avg3-20260824.json</code>.</p>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Arm</th><th>Checkpoint</th><th>avg@3 (38 tasks &times; 3)</th><th>pass@3</th><th>sample solve rate</th></tr></thead>
+          <tbody>
+            <tr><td>old P50</td><td>iter 79</td><td><strong>0.2153</strong></td><td>0.026</td><td>0.009</td></tr>
+            <tr><td>P25</td><td>iter 79</td><td>0.2107</td><td>0.026</td><td>0.009</td></tr>
+            <tr><td><strong>p50_v2</strong> (concurrent, depth 0)</td><td>iter 79</td><td>0.2073</td><td>0.026</td><td>0.018</td></tr>
+            <tr><td>ordinary-RL baseline (O0)</td><td>iter 79</td><td>0.1928</td><td>0.026</td><td>0.018</td></tr>
+            <tr><td><strong>rdepth2</strong></td><td>iter 79</td><td>0.1864</td><td>0.026</td><td>0.009</td></tr>
+            <tr><td>O0 baseline</td><td>iter 74</td><td>0.1831</td><td>0.026</td><td>0.009</td></tr>
+            <tr><td><strong>rdepth4</strong></td><td>iter 79</td><td>0.1752</td><td><strong>0.000</strong></td><td><strong>0.000</strong></td></tr>
+            <tr><td>O2 (final + bonus)</td><td>iter 74</td><td>0.1712</td><td>0.026</td><td>0.009</td></tr>
+            <tr><td>P75</td><td>iter 79</td><td>0.1596</td><td>0.026</td><td>0.018</td></tr>
+            <tr><td>O1 (best-of-trajectory)</td><td>iter 74</td><td>0.1348</td><td>0.000</td><td>0.000</td></tr>
+            <tr><td>vanilla Qwen3.6-27B</td><td>step 0</td><td>0.0786</td><td>0.000</td><td>0.000</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Paired comparison (same 38 tasks)</th><th>mean &Delta;</th><th>bootstrap 95% CI</th><th>W/T/L</th><th>read</th></tr></thead>
+          <tbody>
+            <tr><td>rdepth4 &minus; p50_v2</td><td>&minus;0.032</td><td>[&minus;0.083, +0.011]</td><td>15/10/13</td><td>depth 4 trends <em>harmful</em>; training said +0.017 helpful</td></tr>
+            <tr><td>rdepth2 &minus; p50_v2</td><td>&minus;0.021</td><td>[&minus;0.072, +0.022]</td><td>13/13/12</td><td>depth 2 also below depth 0</td></tr>
+            <tr><td>p50_v2 &minus; old P50</td><td>&minus;0.008</td><td>[&minus;0.050, +0.033]</td><td>11/10/17</td><td>old-vs-new stack: tie</td></tr>
+            <tr><td>p50_v2 &minus; baseline (O0@79)</td><td>+0.015</td><td>[&minus;0.036, +0.081]</td><td>15/12/11</td><td>retro program vs ordinary RL: not established</td></tr>
+            <tr><td>O1 &minus; O0@74</td><td><strong>&minus;0.048</strong></td><td><strong>[&minus;0.099, &minus;0.003]</strong></td><td>10/12/16</td><td><strong>significant</strong>: best-of-traj shaping hurts</td></tr>
+            <tr><td>O2 &minus; O0@74</td><td>&minus;0.012</td><td>[&minus;0.059, +0.037]</td><td>11/12/15</td><td>the outcome tab's "+14%" reads &minus;0.012 on held-out</td></tr>
+            <tr><td>O0@74 &minus; O0@79</td><td>&minus;0.010</td><td>[&minus;0.056, +0.040]</td><td>10/14/14</td><td>5-step scale bar for cross-wave reads</td></tr>
+            <tr><td>old P50 &minus; vanilla base</td><td><strong>+0.137</strong></td><td><strong>[+0.068, +0.217]</strong></td><td>23/12/3</td><td><strong>significant</strong>: RL is worth ~2.6&times; the base model</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout warn">
+        <div class="callout-title">Neither training basis ranked the depth arms &mdash; a replay-overfitting signature</div>
+        For the round-2 trio, post-filter training reward said rdepth4 &gt; rdepth2 &gt; p50_v2; pre-filter said rdepth4 &gt; p50_v2 &gt; rdepth2; held-out says <strong>p50_v2 &gt; rdepth2 &gt; rdepth4</strong> — the post-filter ordering is exactly inverted, and even the honest pre-filter basis mis-placed rdepth4. rdepth4 is also the only trained arm with <em>zero</em> held-out solves (its training <code>solved_frac</code> was the joint-highest at 0.032). The consistent story: training with a deep buffer of self-generated promising states raises reward on the training distribution (the policy gets better at continuing its own states) while degrading fresh-start performance on unseen problems. Depth 0 (made-to-order retro) is the best-performing retro configuration on held-out, and it is statistically indistinguishable from both old P50 and the no-retro baseline.</div>
+
       <div class="table-wrap">
         <table>
           <thead><tr><th>Arm</th><th>Realized retro lag (median)</th><th><code>reward_final</code> 70–84 (post-filter)</th><th><code>raw_reward_all</code> 70–84 (pre-filter)</th><th><code>solved_frac</code> 70–84 (post-filter)</th><th><code>budget_hit_frac</code></th><th><code>retro_seconds</code></th><th><code>step_time</code></th></tr></thead>
@@ -1727,7 +1782,7 @@ pre code { background: none; padding: 0; color: var(--ink-body); }
 
       <div class="callout">
         <div class="callout-title">The anomaly survives the audit, smaller: fractional reward and solve rate still disagree</div>
-        <code>agentic/solved_frac</code> is also post-filter (dropped all-solved groups vanish from it; dropped all-zero groups shrink its denominator). Reconstructing unconditional solve rates from the drop-reason counters: old P50 0.019, rlag4 0.023, rlag8 0.016, p50_v2 0.022, rdepth2 0.025, rdepth4 0.029. The anomaly persists on the honest basis — old P50 has the clearly-highest pre-filter fractional reward (0.2407) with the near-lowest solve rate, while rdepth4 solves ~50% more problems at 0.034 less fractional credit — but it is softer than the post-filter version suggested (rlag8 actually solves <em>less</em> than old P50 unconditionally; the earlier "32–73% more" range was conditioned). The two metrics still track genuinely different behavior between the sequential and concurrent stacks, and <strong>which one is the real objective remains the blocking question</strong> — the held-out avg@3 evaluation is the tiebreak (and is immune to this whole bias class: eval batches are unfiltered), not more training runs.
+        <code>agentic/solved_frac</code> is also post-filter (dropped all-solved groups vanish from it; dropped all-zero groups shrink its denominator). Reconstructing unconditional solve rates from the drop-reason counters: old P50 0.019, rlag4 0.023, rlag8 0.016, p50_v2 0.022, rdepth2 0.025, rdepth4 0.029. The anomaly persists on the honest basis — old P50 has the clearly-highest pre-filter fractional reward (0.2407) with the near-lowest solve rate, while rdepth4 solves ~50% more problems at 0.034 less fractional credit — but it is softer than the post-filter version suggested (rlag8 actually solves <em>less</em> than old P50 unconditionally; the earlier "32–73% more" range was conditioned). The two metrics still track genuinely different behavior between the sequential and concurrent stacks. <strong>Update 2026-08-24: the tiebreak ran</strong> — see the held-out avg@3 verdict above. Neither training metric ranked the depth arms correctly (rdepth4's high training solve rate produced <em>zero</em> held-out solves), old-vs-new stack is a held-out tie, and the only significant treatment effects are RL-beats-base and O1-hurts.
       </div>
 
       <div class="callout">
@@ -1888,8 +1943,87 @@ pre code { background: none; padding: 0; color: var(--ink-body); }
     </section>
   </section>
 
+
+  <section class="tab-panel" id="rescore">
+    <h2>Rescore (2026-08-25): the pooled training headline carried two bias layers; on clean metrics the retro story changes.</h2>
+    <p>Every training-reward number previously reported in this document (<code>agentic/outcome/reward_final/mean</code>, trailing windows, steps-70&ndash;84 means) is a <em>lane-pooled, survivorship-conditioned</em> quantity. This tab re-scores every arm on lane-split metrics backfilled from the canonical rollout dumps, with the held-out avg@3 evaluation as the verdict column.</p>
+
+    <div class="callout bad">
+      <div class="callout-title">Bias layer 1 &mdash; lane composition</div>
+      <p>Batches are 24 fresh + 8 retro groups, and retro branches are <em>selected</em> for mid-episode score in [0.1, 0.95], so the retro slice scores mechanically higher: measured on the running legacy arm, fresh 0.216 vs retro 0.469 (2.2&times;); across historical arms the retro lane runs 0.35&ndash;0.71 while fresh lanes run 0.24&ndash;0.31. Any knob that reshapes the retro slice (branch position, snapshot age, buffer depth) moves the pooled headline without the policy changing.</p>
+    </div>
+    <div class="callout bad">
+      <div class="callout-title">Bias layer 2 &mdash; episode survivorship</div>
+      <p>The headline is computed after the DAPO nonzero-std filter (survival spans 45&ndash;75% across arms and rises over training) and, additionally, only over episodes that produced an outcome dict &mdash; unusable episodes are silently excluded. The dump-based columns below count <em>every trained episode</em> (no outcome &rarr; 0), which is why they sit an arm-dependent 0.01&ndash;0.04 below the old W&amp;B headlines. Starkest consequence: the celebrated 0.0016 replicate noise floor (rlag4 vs rlag8 on the W&amp;B headline) is an artifact of those exclusions &mdash; the same pair differs by 0.0149 on the dump-pooled metric and 0.0106 on pre-filter fresh.</p>
+    </div>
+
+    <h3>Protocol</h3>
+    <ul>
+      <li><strong>Held-out avg@3</strong> (38 tasks &times; 3 samples, fixed image and sampling; 2026-08-24 wave) &mdash; the verdict. Fresh-only by construction. SE &asymp; 0.04&ndash;0.05, so only large gaps are individually significant.</li>
+      <li><strong>Fresh-lane pre-filter</strong> (<code>dynamic_sampling/raw_reward_all</code>): mean reward over <em>all</em> completed fresh groups, before the DAPO filter &mdash; the unbiased training proxy. Verified in code to accumulate after the behavior-lag gate (the rlag spin bug did not contaminate it). Only logged past step 19 for the 2026-08-18+ cohort.</li>
+      <li><strong>Fresh-lane post-filter</strong> (dumps): fresh episodes of the trained batch. Available for every arm; carries survival conditioning, so read it alongside the survival column and prefer within-cohort comparisons at similar survival.</li>
+      <li><strong>Retro lane</strong> (dumps): the composition artifact itself &mdash; a lane diagnostic, never a policy score.</li>
+      <li><strong>Window: steps 70&ndash;84</strong> (round-3 arms: last 7 logged). At 44&ndash;77 generated groups/step over a few-hundred-problem train set, an epoch is ~4&ndash;8 steps; a 15-step window covers 2&ndash;4 epochs and washes out dataset-position drift caused by arms generating at different rates. Trailing-7 remains for live curves only.</li>
+      <li><strong>Noise floors</strong> (single replicate pair rlag4/rlag8, so crude): pre-filter fresh |&Delta;| = 0.011, post-filter fresh |&Delta;| = 0.001, dump-pooled |&Delta;| = 0.015. Plan with ~0.01.</li>
+    </ul>
+
+    <h3>Rescored table (per-episode means over the window)</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>arm</th><th>window</th><th>held-out avg@3 (se)</th><th>fresh pre-filter</th><th>fresh post-filter</th><th>retro lane</th><th>pooled (dumps)</th><th>DAPO survival</th><th>fresh solved</th></tr></thead>
+        <tbody>
+          <tr><td>old P50</td><td>70&ndash;84</td><td><strong>0.2153</strong> (.049)</td><td>&mdash;<sup>a</sup></td><td><strong>0.3086</strong></td><td>0.3931</td><td>0.3297</td><td>53%</td><td>0.023</td></tr>
+          <tr><td>P25</td><td>70&ndash;84</td><td><strong>0.2107</strong> (.045)</td><td>&mdash;<sup>a</sup></td><td>0.3003</td><td>0.4420</td><td>0.3357</td><td>58%</td><td>0.027</td></tr>
+          <tr><td>P75</td><td>70&ndash;84</td><td>0.1596 (.040)</td><td>&mdash;<sup>a</sup></td><td>0.2522</td><td>0.4002</td><td>0.2892</td><td>57%</td><td>0.030</td></tr>
+          <tr><td>rlag4</td><td>70&ndash;84</td><td>&mdash;</td><td>0.1767</td><td>0.2534</td><td>0.3485</td><td>0.2771</td><td>n/a<sup>b</sup></td><td>0.039</td></tr>
+          <tr><td>rlag8</td><td>70&ndash;84</td><td>&mdash;</td><td>0.1873</td><td>0.2520</td><td>0.4127</td><td>0.2920</td><td>n/a<sup>b</sup></td><td>0.027</td></tr>
+          <tr><td>p50_v2</td><td>70&ndash;84</td><td>0.2073 (.048)</td><td>0.1974</td><td>0.2574</td><td>0.3493</td><td>0.2803</td><td>74%</td><td>0.030</td></tr>
+          <tr><td>rdepth2</td><td>70&ndash;84</td><td>0.1864 (.039)</td><td>0.1800</td><td>0.2439</td><td>0.3528</td><td>0.2711</td><td>72%</td><td>0.037</td></tr>
+          <tr><td>rdepth4</td><td>70&ndash;84</td><td>0.1752 (.046)</td><td><strong>0.2068</strong></td><td>0.2636</td><td>0.4005</td><td>0.2978</td><td>75%</td><td>0.033</td></tr>
+          <tr><td>RetroA</td><td>70&ndash;84</td><td>&mdash;</td><td>&mdash;</td><td>0.2812</td><td>none<sup>c</sup></td><td>0.2812</td><td>&mdash;</td><td>0.030</td></tr>
+          <tr><td>RetroB</td><td>70&ndash;84</td><td>&mdash;</td><td>&mdash;</td><td>0.2076</td><td>none<sup>c</sup></td><td>0.2076</td><td>&mdash;</td><td>0.036</td></tr>
+          <tr><td>r3 vanilla</td><td>18&ndash;24</td><td>pending</td><td>0.0917</td><td>0.1675</td><td>&mdash;</td><td>0.1675</td><td>45%</td><td>0.026</td></tr>
+          <tr><td>r3 retro0</td><td>22&ndash;28</td><td>pending</td><td>0.1031</td><td>0.1674</td><td>&mdash;</td><td>0.1674</td><td>51%</td><td>0.031</td></tr>
+          <tr><td>r3 legacy</td><td>18&ndash;24</td><td>pending</td><td>0.1063</td><td>0.1855</td><td>0.3701</td><td>0.2316</td><td>57%</td><td>0.040</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="muted"><sup>a</sup> the pre-2026-08-18 code stopped logging <code>raw_reward_all</code> at step 19. <sup>b</sup> counters destroyed by the requeue-spin bug. <sup>c</sup> resumed steps 40&ndash;84 accepted no retro groups (documented fallback); rows are fresh-only in the window. Round-3 rows are in-flight early-training values on shorter windows &mdash; not comparable to the 70&ndash;84 rows.</p>
+
+    <h3>What survives, what dies</h3>
+    <div class="callout bad">
+      <div class="callout-title">DIED: the round-2 depth dose-response (&ldquo;retro staleness helps&rdquo;)</div>
+      <p>Replaced by an overfitting finding. rdepth4 is the <em>best</em> arm on the train distribution (fresh pre-filter 0.207, fresh post-filter 0.264) and the <em>worst</em> on held-out (0.175, zero solves). Depth-4 replay genuinely improved train-set performance while degrading generalization &mdash; a train/held-out divergence no training-time metric can catch. rdepth2 vs p50_v2 is within noise on train; held-out favors p50_v2 (ns).</p>
+    </div>
+    <div class="callout bad">
+      <div class="callout-title">DIED: &ldquo;the old stack scores 0.049 higher&rdquo; as a policy claim</div>
+      <p>Held-out: old P50 0.2153 vs p50_v2 0.2073 &mdash; a tie (&Delta; = 0.008, ns). The remaining train-side gap (fresh post-filter +0.051) rides survival conditioning (53% vs 74%) plus train-distribution effects that do not transfer; old P50&rsquo;s pre-filter column does not exist to separate them.</p>
+    </div>
+    <div class="callout warn">
+      <div class="callout-title">CHANGED: the position ablation&rsquo;s champion</div>
+      <p>&ldquo;P50 beats P25&rdquo; narrows to a tie: fresh post-filter 0.3086 vs 0.3003 (&asymp; floor), held-out 0.2153 vs 0.2107 (&Delta; = 0.005, ns). P25&rsquo;s higher pooled number came from its retro slice (0.442, the hottest of any arm &mdash; early branches diverge most). <strong>P75-is-worst survives</strong> on both fresh post-filter (&minus;0.056) and held-out (&minus;0.056).</p>
+    </div>
+    <div class="callout good">
+      <div class="callout-title">SURVIVES: the rlag4/rlag8 null &mdash; with a corrected floor</div>
+      <p>The pair remains a config-replicate null, but its advertised 0.0016 floor was a headline artifact. Working floors: ~0.011 (pre-filter fresh), ~0.015 (dump-pooled). Effects smaller than ~0.01 on any per-step training metric should not be believed.</p>
+    </div>
+    <div class="callout good">
+      <div class="callout-title">CONFIRMED: round-3 harness parity, on the clean metric</div>
+      <p>vanilla vs retro0 fresh post-filter: 0.1675 vs 0.1674 at matched early-training windows &mdash; the retro code path at dose zero is exactly the stock path plus capture overhead, and the overhead is reward-neutral so far. legacy&rsquo;s fresh lane leads vanilla by ~0.018 at step ~24, within ~1.5&times; the floor: no verdict until the endpoint.</p>
+    </div>
+    <div class="callout">
+      <div class="callout-title">Unchanged (held-out-only adjudication)</div>
+      <p>O-cohort verdicts stand: O1 best-of-trajectory shaping hurts (&minus;0.048 vs O0, significant); O2 is a wash (&minus;0.012, ns); every trained arm clears the untrained base (0.079).</p>
+    </div>
+
+    <div class="callout warn">
+      <div class="callout-title">Method notes</div>
+      <p>Dump columns computed from <code>swe_rollout_dumps/&lt;state_tag&gt;/rollout_N.pt</code> (the trained batch; samples as dicts; lane flag at <code>metadata.agentic.retro_branch</code>, score at <code>metadata.agentic.outcome.final</code>, no-outcome counted as 0). Survival = fresh-target / <code>dynamic_sampling/completed_groups</code> (fresh leg only). <code>agentic/{fresh,retro}/outcome/reward_final/mean</code> and per-lane <code>solved_frac</code> are emitted natively by <code>agentic_rl/metrics.py</code> for all runs launched after 2026-08-25; the three in-flight round-3 runs predate the change and are covered by the dump backfill. Scripts: <code>lane_backfill.jsonl</code> / <code>rescore_table.json</code> (session scratchpad).</p>
+    </div>
+  </section>
+
   <footer class="footer">
-    <p>Built by Cursor Agent / GPT-5.6 Sol · updated 2026-08-24 (metric-basis audit: headline rewards are post-DAPO-filter batch means; pre-filter, the depth effect is replicate noise, old P50's lead is real, and horizon compression is back on the table)</p>
+    <p>Built by Cursor Agent / GPT-5.6 Sol · updated 2026-08-24 (metric-basis audit + held-out avg@3 verdict: retro depth inverts on held-out, old-vs-new stack ties, O1 shaping significantly hurts, RL is +0.10–0.14 over the vanilla base)</p>
     <p>Source artifact: <code>frontier-cs-retro-replay-plan.canvas.tsx</code> · offline rendering uses only inline CSS, JavaScript, SVG, and embedded data; links are optional navigation and are not required to render this report.</p>
   </footer>
 </main>

@@ -195,6 +195,30 @@ def _agentic_metrics(samples, args) -> dict:
         out["agentic/decode_tok_per_s/mean"] = float(np.mean([o / g for o, g in gens]))
 
     out["agentic/solved_frac"] = float(np.mean([1.0 if s.get("is_solved") else 0.0 for s in stats]))
+
+    # Per-lane policy-quality metrics. The pooled batch mixes fresh episodes
+    # with retro continuations, and retro branches are pre-selected for
+    # mid-episode score in [min_score, max_score] — their reward is
+    # mechanically shifted, so the pooled mean moves with retro composition
+    # (ratio, branch position, snapshot age, pool depth), not just with policy
+    # quality. Cross-arm comparisons of policy quality must use the FRESH lane
+    # (canonical initial-state distribution); the retro lane's numbers are a
+    # lane diagnostic only.
+    for lane_name, lane_stats in (
+        ("fresh", [s for s in stats if not s.get("retro_branch")]),
+        ("retro", [s for s in stats if s.get("retro_branch")]),
+    ):
+        out[f"agentic/{lane_name}/count"] = float(len(lane_stats))
+        if not lane_stats:
+            continue
+        out[f"agentic/{lane_name}/solved_frac"] = float(
+            np.mean([1.0 if s.get("is_solved") else 0.0 for s in lane_stats])
+        )
+        lane_outcomes = [s.get("outcome") for s in lane_stats if isinstance(s.get("outcome"), dict)]
+        if lane_outcomes:
+            out[f"agentic/{lane_name}/outcome/reward_final/mean"] = float(
+                np.mean([float(o.get("final") or 0.0) for o in lane_outcomes])
+            )
     exits = Counter(s.get("exit_status") or s.get("error") or "?" for s in stats)
     total = sum(exits.values()) or 1
     for status, c in exits.items():

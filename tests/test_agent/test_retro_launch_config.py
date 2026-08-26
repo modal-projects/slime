@@ -95,7 +95,6 @@ def test_vanilla_mode_runs_stock_fully_async_without_retro_envs():
             RETRO_PHASE2_ROLLOUTS="100",
             ROLLOUT_PREFETCH_BATCHES="4",
             FRESH_MAX_BEHAVIOR_LAG="4",
-            SGLANG_VERSION="0.5.18",
         )
     )
 
@@ -114,18 +113,29 @@ def test_vanilla_mode_runs_stock_fully_async_without_retro_envs():
     assert slime.rollout_prefetch_batches == 4
     assert slime.rollout_max_behavior_lag == 4
     assert slime.run_tag == "qwen3.6-27b-frontier-cs-vanilla-final-20260812-130000"
-    # The 0.5.18 upgrade is a pinned-torch in-place install, passed through to
-    # the container env so the remote rebuild resolves identically.
-    upgrade = [cmd for cmd in modal.image_run_commands if "sglang[all]==0.5.18" in cmd]
-    assert len(upgrade) == 1 and 'torch==$TORCH_PIN' in upgrade[0]
     assert modal.image_env["ROLLOUT_MODE"] == "vanilla"
-    assert modal.image_env["SGLANG_VERSION"] == "0.5.18"
+    # The canonical 2026-08-24 inference stack rides the base image (sglang
+    # 0.5.15.post1); no in-place sglang upgrade, deterministic off by default.
+    assert modal.docker_image == "slimerl/slime:nightly-dev-20260810a-cu129"
+    assert not any("sglang[all]" in cmd for cmd in modal.image_run_commands)
+    assert slime.sglang_enable_deterministic_inference is False
 
 
 def test_default_image_has_no_sglang_upgrade():
     modal, slime = build_launch_configs(_env(RETRO_PHASE2_GROUPS="32"))
+    assert modal.docker_image == "slimerl/slime:nightly-dev-20260810a-cu129"
     assert not any("sglang[all]" in cmd for cmd in modal.image_run_commands)
     assert slime.rollout_function_path == "agentic_rl.retro.rollout.generate_retro_mixed"
+
+
+def test_sglang_version_knob_installs_with_torch_pinned():
+    # Escape hatch for future engine probes: in-place sglang install with
+    # torch pinned to the base image's version, so an incompatible closure
+    # (e.g. 0.5.18 -> torch 2.13/cu13) fails the image build loudly.
+    modal, _ = build_launch_configs(_env(RETRO_PHASE2_GROUPS="32", SGLANG_VERSION="0.5.16"))
+    upgrade = [cmd for cmd in modal.image_run_commands if "sglang[all]==0.5.16" in cmd]
+    assert len(upgrade) == 1 and 'torch==$TORCH_PIN' in upgrade[0]
+    assert modal.image_env["SGLANG_VERSION"] == "0.5.16"
 
 
 def test_invalid_rollout_mode_fails_closed():
@@ -147,7 +157,13 @@ def test_behavior_lag_gate_zero_disables_enforcement():
 
 
 def test_oldp50_recreation_env_combo():
-    """The exact frontiercs_oldp50_recreate.sh environment, end to end."""
+    """The exact frontiercs_oldp50_recreate.sh environment, end to end.
+
+    Rollout semantics are faithful to old P50 (sequential legs, prefetch 1,
+    ungated fresh, crossed-version drop, 600s query cap); the inference stack
+    is deliberately the uniform 2026-08-24 canon (0.5.15.post1 image, det
+    OFF) shared with the vanilla/retro0 arms — NOT old P50's 0.5.12 + det on.
+    """
     modal, slime = build_launch_configs(
         _env(
             RETRO_PHASE2_GROUPS="32",
@@ -159,7 +175,6 @@ def test_oldp50_recreation_env_combo():
             RETRO_MAX_BEHAVIOR_LAG="1",
             RETRO_PREFETCH_BATCHES="0",
             AGENTIC_QUERY_TIMEOUT="600",
-            RETRO_DETERMINISTIC="1",
         )
     )
     assert slime.environment["ASYNC_RL_RETRO_SEQUENTIAL_LEGS"] == "1"
@@ -168,7 +183,18 @@ def test_oldp50_recreation_env_combo():
     assert slime.environment["ASYNC_RL_RETRO_GROUP_RATIO"] == "0.25"
     assert slime.rollout_prefetch_batches == 1
     assert slime.rollout_max_behavior_lag is None
-    assert slime.sglang_enable_deterministic_inference is True
+    assert slime.sglang_enable_deterministic_inference is False
     assert slime.custom_config_path["agentic_query_timeout"] == 600
-    # Faithful stack: no sglang upgrade on this arm.
+    assert modal.docker_image == "slimerl/slime:nightly-dev-20260810a-cu129"
     assert not any("sglang[all]" in cmd for cmd in modal.image_run_commands)
+
+
+def test_dapo_filter_zero_disables_dynamic_sampling():
+    _, slime = build_launch_configs(
+        _env(ROLLOUT_MODE="vanilla", RETRO_PHASE2_GROUPS="32", DAPO_FILTER="0")
+    )
+    assert slime.dynamic_sampling_filter_path is None
+    assert "--dynamic-sampling-filter-path" not in slime.cli_args()
+    modal, slime_on = build_launch_configs(_env(RETRO_PHASE2_GROUPS="32"))
+    assert slime_on.dynamic_sampling_filter_path is not None
+    assert modal.image_env.get("DAPO_FILTER") is None  # only passed through when set

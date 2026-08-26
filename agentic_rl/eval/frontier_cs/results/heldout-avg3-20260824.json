@@ -1,0 +1,279 @@
+{
+  "evaluation": "frontier-cs-heldout-avg3",
+  "date": "2026-08-24",
+  "notes": "Waves: eval79 (round-2 arms, checkpoint-matched to the 2026-08-17 wave), eval74 (O-cohort internal match; O1/O2 saved every 15 steps, no iter-79), base (vanilla Qwen3.6-27B release checkpoint, step 0). All arms on the wave-1 image (slimerl/slime:nightly-dev-20260529a, sglang 0.5.12) \u2014 the protocol pin added after the 2026-08-24 base-image bump broke launches. 38 held-out tasks x 3 samples, protocol identical to iteration-79.json. Bootstrap: 50000 replicates, seed 20260817, unit=task.",
+  "arms": {
+    "base": {
+      "avg_at_3": 0.07859669530475773,
+      "se": 0.021780406826381698,
+      "pass_at_3": 0.0,
+      "solve": 0.0,
+      "eval_id": "frontier-cs-heldout-avg3-base-20260824",
+      "checkpoint_step": null
+    },
+    "baseline74": {
+      "avg_at_3": 0.18305675693680032,
+      "se": 0.04223370987360395,
+      "pass_at_3": 0.02631578947368421,
+      "solve": 0.008771929824561403,
+      "eval_id": "frontier-cs-heldout-avg3-baseline74-20260824-eval74",
+      "checkpoint_step": 74
+    },
+    "o1": {
+      "avg_at_3": 0.13475170482484128,
+      "se": 0.03199249933694631,
+      "pass_at_3": 0.0,
+      "solve": 0.0,
+      "eval_id": "frontier-cs-heldout-avg3-o1-20260824-eval74",
+      "checkpoint_step": 74
+    },
+    "o2": {
+      "avg_at_3": 0.1711609423873183,
+      "se": 0.040953931093342506,
+      "pass_at_3": 0.02631578947368421,
+      "solve": 0.008771929824561403,
+      "eval_id": "frontier-cs-heldout-avg3-o2-20260824-eval74",
+      "checkpoint_step": 74
+    },
+    "rdepth2": {
+      "avg_at_3": 0.18644828954055556,
+      "se": 0.03898115401401873,
+      "pass_at_3": 0.02631578947368421,
+      "solve": 0.008771929824561403,
+      "eval_id": "frontier-cs-heldout-avg3-rdepth2-20260824-eval79",
+      "checkpoint_step": 79
+    },
+    "rdepth4": {
+      "avg_at_3": 0.17524299849823727,
+      "se": 0.045733345616303135,
+      "pass_at_3": 0.0,
+      "solve": 0.0,
+      "eval_id": "frontier-cs-heldout-avg3-rdepth4-20260824-eval79",
+      "checkpoint_step": 79
+    },
+    "p50v2": {
+      "avg_at_3": 0.20733295739800753,
+      "se": 0.04770688181231675,
+      "pass_at_3": 0.02631578947368421,
+      "solve": 0.017543859649122806,
+      "eval_id": "frontier-cs-heldout-avg3-p50-v2-20260824-eval79",
+      "checkpoint_step": 79
+    },
+    "baseline79": {
+      "avg_at_3": 0.192755570350731,
+      "se": 0.04405884324232642,
+      "pass_at_3": 0.02631578947368421,
+      "solve": 0.017543859649122806,
+      "eval_id": "frontier-cs-heldout-avg3-baseline-20260817-eval79",
+      "checkpoint_step": 79
+    },
+    "p25": {
+      "avg_at_3": 0.21070455850525202,
+      "se": 0.044700953689628786,
+      "pass_at_3": 0.02631578947368421,
+      "solve": 0.008771929824561403,
+      "eval_id": "frontier-cs-heldout-avg3-p25-20260817-eval79",
+      "checkpoint_step": 79
+    },
+    "p50": {
+      "avg_at_3": 0.21533418443936508,
+      "se": 0.04886222851130807,
+      "pass_at_3": 0.02631578947368421,
+      "solve": 0.008771929824561403,
+      "eval_id": "frontier-cs-heldout-avg3-p50-20260817-eval79",
+      "checkpoint_step": 79
+    },
+    "p75": {
+      "avg_at_3": 0.1596104523458939,
+      "se": 0.03961779620863319,
+      "pass_at_3": 0.02631578947368421,
+      "solve": 0.017543859649122806,
+      "eval_id": "frontier-cs-heldout-avg3-p75-20260817-eval79",
+      "checkpoint_step": 79
+    }
+  },
+  "paired": [
+    {
+      "pair": "rdepth2 - p50v2",
+      "mean_difference": -0.020884667857451963,
+      "paired_standard_error": 0.024145285929846102,
+      "bootstrap_95_interval": [
+        -0.07197992401253132,
+        0.02161261509994153
+      ],
+      "wins_ties_losses": [
+        13,
+        13,
+        12
+      ]
+    },
+    {
+      "pair": "rdepth4 - p50v2",
+      "mean_difference": -0.03208995889977027,
+      "paired_standard_error": 0.024371669564332125,
+      "bootstrap_95_interval": [
+        -0.08307779049515455,
+        0.010498960454177109
+      ],
+      "wins_ties_losses": [
+        15,
+        10,
+        13
+      ]
+    },
+    {
+      "pair": "rdepth4 - rdepth2",
+      "mean_difference": -0.0112052910423183,
+      "paired_standard_error": 0.025913285584999356,
+      "bootstrap_95_interval": [
+        -0.05835933629908104,
+        0.04254906526683373
+      ],
+      "wins_ties_losses": [
+        14,
+        10,
+        14
+      ]
+    },
+    {
+      "pair": "p50v2 - p50",
+      "mean_difference": -0.008001227041357554,
+      "paired_standard_error": 0.021335115360310256,
+      "bootstrap_95_interval": [
+        -0.05000077377635755,
+        0.03273477200220969
+      ],
+      "wins_ties_losses": [
+        11,
+        10,
+        17
+      ]
+    },
+    {
+      "pair": "p50v2 - baseline79",
+      "mean_difference": 0.014577387047276532,
+      "paired_standard_error": 0.030621607396766153,
+      "bootstrap_95_interval": [
+        -0.03634456667035086,
+        0.08106223529657478
+      ],
+      "wins_ties_losses": [
+        15,
+        12,
+        11
+      ]
+    },
+    {
+      "pair": "rdepth4 - baseline79",
+      "mean_difference": -0.01751257185249373,
+      "paired_standard_error": 0.037935666721096405,
+      "bootstrap_95_interval": [
+        -0.08823889109267752,
+        0.06046920895530492
+      ],
+      "wins_ties_losses": [
+        13,
+        13,
+        12
+      ]
+    },
+    {
+      "pair": "o1 - baseline74",
+      "mean_difference": -0.04830505211195906,
+      "paired_standard_error": 0.024560067296448593,
+      "bootstrap_95_interval": [
+        -0.09889386176900584,
+        -0.0033243972063742746
+      ],
+      "wins_ties_losses": [
+        10,
+        12,
+        16
+      ]
+    },
+    {
+      "pair": "o2 - baseline74",
+      "mean_difference": -0.011895814549482037,
+      "paired_standard_error": 0.024982929945478186,
+      "bootstrap_95_interval": [
+        -0.058821914974736864,
+        0.037372653401746045
+      ],
+      "wins_ties_losses": [
+        11,
+        12,
+        15
+      ]
+    },
+    {
+      "pair": "o2 - o1",
+      "mean_difference": 0.03640923756247702,
+      "paired_standard_error": 0.024509196685318018,
+      "bootstrap_95_interval": [
+        -0.008763647358157897,
+        0.08565633887024643
+      ],
+      "wins_ties_losses": [
+        15,
+        12,
+        11
+      ]
+    },
+    {
+      "pair": "baseline74 - baseline79",
+      "mean_difference": -0.009698813413930663,
+      "paired_standard_error": 0.024672266794118637,
+      "bootstrap_95_interval": [
+        -0.055790730531913114,
+        0.04010966602652464
+      ],
+      "wins_ties_losses": [
+        10,
+        14,
+        14
+      ]
+    },
+    {
+      "pair": "baseline74 - base",
+      "mean_difference": 0.1044600616320426,
+      "paired_standard_error": 0.030359882249976433,
+      "bootstrap_95_interval": [
+        0.049735250624152044,
+        0.16761617245075602
+      ],
+      "wins_ties_losses": [
+        19,
+        16,
+        3
+      ]
+    },
+    {
+      "pair": "p50 - base",
+      "mean_difference": 0.13673748913460734,
+      "paired_standard_error": 0.03876756350854776,
+      "bootstrap_95_interval": [
+        0.06755792901633251,
+        0.2174302962869883
+      ],
+      "wins_ties_losses": [
+        23,
+        12,
+        3
+      ]
+    },
+    {
+      "pair": "p50v2 - base",
+      "mean_difference": 0.1287362620932498,
+      "paired_standard_error": 0.0375404006683522,
+      "bootstrap_95_interval": [
+        0.06291792253740185,
+        0.20767555188015874
+      ],
+      "wins_ties_losses": [
+        22,
+        12,
+        4
+      ]
+    }
+  ]
+}

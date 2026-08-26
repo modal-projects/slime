@@ -192,8 +192,11 @@ class RetroSlimeConfig:
         # SGLang engine.
         self.rollout_num_gpus_per_engine = 2
         self.sglang_mem_fraction_static = 0.85
-        self.sglang_cuda_graph_bs = [1, 2, 4, 8, 16] + list(range(24, 257, 8))
-        self.sglang_mamba_scheduler_strategy = "extra_buffer"
+        # sglang 0.5.15 split cuda_graph_bs into decode/prefill lists; this is
+        # the old decode-capture coverage (prefill graphs keep their default).
+        # It also removed mamba_scheduler_strategy ("extra_buffer" here since
+        # the knob study) — the reworked mamba radix-cache defaults replace it.
+        self.sglang_cuda_graph_bs_decode = [1, 2, 4, 8, 16] + list(range(24, 257, 8))
         self.sglang_speculative_algorithm = "EAGLE"
         self.sglang_speculative_num_steps = 3
         self.sglang_speculative_eagle_topk = 1
@@ -202,10 +205,17 @@ class RetroSlimeConfig:
         self.sglang_disable_custom_all_reduce = False
         self.qwen_gdn_backend = "flashqla"
 
-        # DAPO is disabled for the four-group engineering smoke.
+        # DAPO is disabled for the four-group engineering smoke. DAPO_FILTER=0
+        # disables it for a full run (plain GRPO: every generated group trains;
+        # zero-std groups contribute zero advantage — safe, the group
+        # normalization is mean-centered before the std+1e-6 division — but
+        # dilute the batch instead of costing extra generation). Note with the
+        # filter off, dynamic_sampling/* metrics (incl. raw_reward_all) are not
+        # logged; rollout/raw_reward is then itself the unbiased pre-filter
+        # mean, since nothing is filtered.
         self.dynamic_sampling_filter_path = (
             "slime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std"
-            if full_topology
+            if full_topology and env.get("DAPO_FILTER", "1") != "0"
             else None
         )
 
@@ -413,6 +423,7 @@ def build_launch_configs(
             "AGENTIC_QUERY_TIMEOUT",
             "ROLLOUT_MODE",
             "SGLANG_VERSION",
+            "DAPO_FILTER",
         }
     }
     image_env.update(
