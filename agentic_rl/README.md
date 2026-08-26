@@ -2,7 +2,10 @@
 
 Fully-async RL on agentic coding/competitive-programming tasks with the
 mini-swe-agent harness, Modal sandboxes for execution, and slime for training.
-Injected entirely via slime's hooks — **no edits to `slime/`**.
+Injected via slime's hooks, plus a small audited set of real `slime/` edits —
+see [`docs/SLIME_DELTA.md`](docs/SLIME_DELTA.md) for the inventory (any PR
+touching `slime/` must update it). Start with the repo-root `RUNBOOK.md` for
+the full map: workflow, directory guide, contracts, and the restructure plan.
 
 ## Design (first principles)
 
