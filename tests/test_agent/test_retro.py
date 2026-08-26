@@ -9,6 +9,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from pathlib import Path as _Path
+
+_REPO_ROOT = _Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 from agentic_rl.retro.buffer import ManifestStore, RetroBuffer
 from agentic_rl.retro.manifest import (
     Compatibility,
@@ -23,7 +29,6 @@ from agentic_rl.retro.selector import (
     assign_event_type,
 )
 from agentic_rl.retro.snapshot import sandbox_compute_cost, snapshot_sandbox
-from agentic_rl.retro.survey import BranchOutcome, BranchSurveyGroup, summarize_groups
 
 
 def _import_with_stubs(modname: str):
@@ -397,43 +402,6 @@ def test_tentative_manifest_requires_activation_and_newest_pool_order(tmp_path):
     assert leased is not None and leased.snapshot_id == "im-new"
 
 
-def test_branchability_metrics_require_eight_and_summarize():
-    outcomes = tuple(
-        BranchOutcome(
-            reward=reward,
-            best_reward=reward,
-            output_tokens=100,
-            sandbox_seconds=10,
-            judge_calls=1,
-            weight_versions=("v1",),
-        )
-        for reward in (0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 1.0)
-    )
-    group = BranchSurveyGroup(
-        snapshot_id="im-1",
-        selector="recovery",
-        inherited_score=0.3,
-        inherited_best=0.6,
-        outcomes=outcomes,
-    )
-    metrics = group.metrics()
-    assert metrics["nondegenerate"]
-    assert metrics["solve_at_8"]
-    assert metrics["single_behavior_version"]
-    summary = summarize_groups([group])
-    assert summary["groups"] == 1
-    assert summary["nondegenerate_rate"] == 1.0
-
-    with pytest.raises(ValueError, match="8 siblings"):
-        BranchSurveyGroup(
-            snapshot_id="im-2",
-            selector="x",
-            inherited_score=0,
-            inherited_best=0,
-            outcomes=outcomes[:7],
-        )
-
-
 def test_chain_checkpoint_restores_exact_fully_masked_prefix():
     model_mod = _import_with_stubs("agentic_rl.retro.model")
     chain_mod = _import_with_stubs("agentic_rl.model")
@@ -472,3 +440,7 @@ def test_chain_checkpoint_restores_exact_fully_masked_prefix():
     assert restored.logprobs == [0.0, 0.0, 0.0]
     assert restored.versions == []
     assert restored.seen_msgs == 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))

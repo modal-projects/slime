@@ -2,6 +2,13 @@ from __future__ import annotations
 
 import pytest
 
+import sys
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 from agentic_rl.eval.frontier_cs.aggregate import aggregate_samples
 from agentic_rl.eval.frontier_cs.protocol import load_registry
 from agentic_rl.eval.frontier_cs.split import validate_split_rows
@@ -29,7 +36,7 @@ def _sample(instance_id: str, index: int, reward: float) -> dict:
 def test_frontier_cs_registry_pins_common_avg3_protocol():
     protocol, arms = load_registry()
 
-    assert list(arms) == ["baseline", "p25", "p50", "p75"]
+    # The protocol is a shared pin: every arm must be measured under it.
     assert protocol.expected_tasks == 38
     assert protocol.samples_per_task == 3
     assert protocol.max_response_len == 24576
@@ -39,17 +46,31 @@ def test_frontier_cs_registry_pins_common_avg3_protocol():
     assert protocol.think_closure is False
     assert len(protocol.train_sha256) == 64
     assert len(protocol.eval_sha256) == 64
+
+    # The registry grows as arms are added; the founding round-1 arms must
+    # stay pinned exactly as first measured.
+    assert {"baseline", "p25", "p50", "p75"} <= set(arms)
     assert arms["baseline"].checkpoint_path.endswith(
         "qwen3.6-27b-frontier-cs-noncolocate-5n-baseline-20260710-125341"
     )
     assert arms["p75"].checkpoint_path.endswith(
         "qwen3.6-27b-frontier-cs-retro-a-final-p75-20260810-000459"
     )
-    assert arms["baseline"].checkpoint_step == 79
-    assert arms["p25"].checkpoint_step == 79
-    assert arms["p50"].checkpoint_step == 79
-    assert arms["p75"].checkpoint_step == 79
+    for key in ("baseline", "p25", "p50", "p75"):
+        assert arms[key].checkpoint_step == 79
     assert arms["p50"].environment("eval-id")["FRONTIER_CS_EVAL_CKPT_STEP"] == "79"
+
+
+def test_frontier_cs_registry_arms_are_launchable():
+    _, arms = load_registry()
+
+    for key, arm in arms.items():
+        env = arm.environment("eval-id")
+        assert env["FRONTIER_CS_EVAL_ARM"] == key
+        assert arm.checkpoint_path.startswith("/checkpoints/")
+        # A trained arm pins its step; a raw-release arm pins a load_path instead.
+        if arm.checkpoint_step is None:
+            assert arm.load_path, f"arm {key!r} has neither checkpoint_step nor load_path"
 
 
 def test_split_validation_proves_disjoint_instance_and_problem_ids():
@@ -114,3 +135,7 @@ def test_avg3_rejects_incomplete_or_duplicate_attempts():
             samples_per_task=3,
             expected_tasks=1,
         )
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))

@@ -159,6 +159,12 @@ def download_data(self):
 
 ## Migration / cleanup (your HF token)
 
+> 2026-08-26: the in-repo legacy producer (`agentic_rl/evalset.py`,
+> `slime_scripts/prepare_eval_data.sh`, `slime_scripts/qwen3_swe_eval.sh`) was
+> deleted in the restructure (RUNBOOK §7 step 2). The published
+> `agentic-rl-evalsets` HF repo still exists for the un-migrated guide-repo
+> configs below; recover the producer from git history if a rebuild is ever needed.
+
 1. Publish each dataset to its own repo (above) + register in `configs/datasets.py`.
 2. **Migrate the remaining configs** that still import the legacy `HF_EVAL_REPO`
    shim + read `evalsets/v0` (`w_qwen3_6_openthoughts_agent_2n`,

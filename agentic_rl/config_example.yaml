@@ -13,7 +13,6 @@ agentic_max_steps: 30           # mini-swe step_limit per agent leg
 agentic_episode_timeout: 1800   # wall-clock agent budget per episode (post-boot)
 agentic_exec_timeout: 120       # per bash command in the sandbox
 agentic_grade_timeout: 1800     # grading sandbox lifetime / per grade
-agentic_eval_timeout: 600       # per harbor test.sh command
+agentic_eval_timeout: 600       # per harbor test.sh command — the real grading budget
 agentic_query_timeout: 600      # per-turn /generate cap (bounds hung generations)
 agentic_max_empty_turns: 3      # consecutive no-tool-call turns before ending the episode
-agentic_max_boot_retries: 3     # ABORTED retries before shipping a masked reward-0 sample

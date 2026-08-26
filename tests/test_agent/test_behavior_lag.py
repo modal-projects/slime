@@ -32,6 +32,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from pathlib import Path as _Path
+
+_REPO_ROOT = _Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 
 def _import_with_stubs(modname: str):
     """Import ``modname``, stubbing each *missing* dependency (permissively) and
@@ -478,3 +484,7 @@ def test_retro_mixed_sequential_legs_restores_old_schedule(monkeypatch, tmp_path
     assert len(buffer_built_at) == 1
     assert buffer_built_at[0] >= fresh_end
     assert out.metrics["retro/staleness/sequential_legs"] == 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))

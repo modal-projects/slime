@@ -157,7 +157,6 @@ class RetroSlimeConfig:
             "agentic_max_think_closures": 2,
             "agentic_think_closure_budget": 4096,
             "router_policy": "consistent_hashing",
-            "agentic_max_boot_retries": 3,
         }
         self.metadata_key = "metadata"
         self.prompt_data = f"{DATA_PATH}/frontier_cs/train.jsonl"

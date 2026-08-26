@@ -2,6 +2,13 @@ from __future__ import annotations
 
 import pytest
 
+import sys
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 from agentic_rl.retro.launch_config import build_launch_configs
 
 
@@ -198,3 +205,7 @@ def test_dapo_filter_zero_disables_dynamic_sampling():
     modal, slime_on = build_launch_configs(_env(RETRO_PHASE2_GROUPS="32"))
     assert slime_on.dynamic_sampling_filter_path is not None
     assert modal.image_env.get("DAPO_FILTER") is None  # only passed through when set
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))

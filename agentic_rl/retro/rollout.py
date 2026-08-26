@@ -1,4 +1,4 @@
-"""Phase-1 debug rollout: evaluate eight siblings from saved snapshots."""
+"""Retro-mixed rollout: fresh async lane + retro branch-replay lane in one batch."""
 
 from __future__ import annotations
 
@@ -25,102 +25,6 @@ from .prefetch import drain_ready_groups, get_worker as get_prefetch_worker, ret
 from .snapshot import delete_snapshot
 
 logger = logging.getLogger("agentic_rl.retro")
-
-
-async def _generate_retro_survey(args, rollout_id: int) -> RolloutFnTrainOutput:
-    manifest_path = os.environ.get("ASYNC_RL_RETRO_MANIFEST_PATH")
-    if not manifest_path:
-        raise ValueError("ASYNC_RL_RETRO_MANIFEST_PATH is required for the retro survey")
-
-    store = ManifestStore(manifest_path)
-    buffer = RetroBuffer(max_items=max(1, int(getattr(args, "rollout_batch_size", 1)) * 4), store=store)
-    target = int(getattr(args, "rollout_batch_size", 1))
-    state = GenerateState(args)
-    leased = []
-    groups = []
-    for group_offset in range(target):
-        consumer_id = f"survey-{rollout_id}-{group_offset}-{uuid.uuid4().hex[:8]}"
-        manifest = buffer.lease(consumer_id)
-        if manifest is None:
-            break
-        leased.append(manifest)
-        try:
-            template = template_from_manifest(manifest)
-            groups.append(
-                make_branch_group(
-                    template,
-                    manifest,
-                    group_index=group_offset,
-                    first_sample_index=group_offset * 8,
-                )
-            )
-        except Exception:
-            buffer.release(manifest.snapshot_id)
-            raise
-
-    if not groups:
-        raise ValueError(f"no available retro manifests in {manifest_path}")
-    logger.info("retro survey rollout %d: generating %d snapshot groups", rollout_id, len(groups))
-
-    tasks = [
-        asyncio.create_task(
-            generate_and_rm_group(
-                args,
-                group,
-                sampling_params=state.sampling_params.copy(),
-                evaluation=False,
-            )
-        )
-        for group in groups
-    ]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    completed = []
-    for manifest, result in zip(leased, results, strict=True):
-        if isinstance(result, BaseException):
-            buffer.release(manifest.snapshot_id)
-            logger.error("retro survey snapshot %s: %s", manifest.snapshot_id, result)
-            continue
-        if not isinstance(result, list) or len(result) != 8:
-            buffer.release(manifest.snapshot_id)
-            logger.error(
-                "retro survey snapshot %s returned %s siblings",
-                manifest.snapshot_id,
-                len(result) if isinstance(result, list) else type(result).__name__,
-            )
-            continue
-        versions = {
-            str(version)
-            for sample in result
-            for version in getattr(sample, "weight_versions", ())
-            if version is not None
-        }
-        if len(versions) > 1:
-            buffer.release(manifest.snapshot_id)
-            logger.warning(
-                "retro survey snapshot %s crossed behavior versions %s; dropping group",
-                manifest.snapshot_id,
-                sorted(versions),
-            )
-            continue
-        buffer.consume(manifest.snapshot_id, rollout_id)
-        completed.append(result)
-
-    if not completed:
-        raise RuntimeError("retro survey produced no valid eight-sibling groups")
-    return RolloutFnTrainOutput(
-        samples=completed,
-        metrics={
-            "retro/survey/requested_groups": len(groups),
-            "retro/survey/completed_groups": len(completed),
-        },
-    )
-
-
-def generate_retro_survey(args, rollout_id, _data_buffer, evaluation: bool = False):
-    if evaluation:
-        raise ValueError("retro survey rollout does not support evaluation mode")
-    return run(_generate_retro_survey(args, rollout_id))
 
 
 async def _generate_retro_groups(

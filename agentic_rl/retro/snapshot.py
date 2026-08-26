@@ -1,4 +1,4 @@
-"""Modal filesystem/directory snapshot adapter for retro replay.
+"""Modal directory-snapshot adapter for retro replay.
 
 All Modal imports are lazy so the metadata and selector tests remain CPU-only.
 The adapter accepts either the local ``agentic_rl.sandbox.Sandbox`` wrapper or a
@@ -52,30 +52,19 @@ def snapshot_sandbox(
     estimated_bytes, estimated_files = workspace_stats(sandbox, path)
     started = time.perf_counter()
     try:
-        if kind == SnapshotKind.DIRECTORY:
-            try:
-                image = raw.snapshot_directory(path, timeout=timeout_seconds, ttl=ttl_seconds)
-                ttl_enforced = True
-            except TypeError as exc:
-                if "unexpected keyword argument" not in str(exc):
-                    raise
-                image = raw.snapshot_directory(path)
-                ttl_enforced = False
-        elif kind == SnapshotKind.FILESYSTEM:
-            try:
-                image = raw.snapshot_filesystem(timeout=timeout_seconds, ttl=ttl_seconds)
-                ttl_enforced = True
-            except TypeError as exc:
-                if "unexpected keyword argument" not in str(exc):
-                    raise
-                image = raw.snapshot_filesystem(timeout=timeout_seconds)
-                ttl_enforced = False
-        else:  # pragma: no cover - enum prevents this outside malformed callers
+        if kind != SnapshotKind.DIRECTORY:  # pragma: no cover - enum has one member
             raise ValueError(f"unsupported snapshot kind {kind!r}")
+        try:
+            image = raw.snapshot_directory(path, timeout=timeout_seconds, ttl=ttl_seconds)
+            ttl_enforced = True
+        except TypeError as exc:
+            if "unexpected keyword argument" not in str(exc):
+                raise
+            image = raw.snapshot_directory(path)
+            ttl_enforced = False
         snapshot_id = image.object_id
     except Exception as exc:  # noqa: BLE001 - normalize an external SDK boundary
-        operation = "snapshot_directory" if kind == SnapshotKind.DIRECTORY else "snapshot_filesystem"
-        raise RuntimeError(f"{operation}: {exc}") from exc
+        raise RuntimeError(f"snapshot_directory: {exc}") from exc
     if not snapshot_id:
         raise RuntimeError(f"snapshot_{kind.value}: Modal returned an empty image id")
     return SnapshotResult(
@@ -130,38 +119,6 @@ def restore_directory(
         mount_path=mount_path,
         target_path=target_path,
     )
-
-
-def create_from_filesystem_snapshot(
-    snapshot_id: str,
-    *,
-    app: Any,
-    command: tuple[str, ...] = ("sleep", "infinity"),
-    timeout_seconds: int = 1800,
-    cpu: float | None = None,
-    memory_mb: int | None = None,
-    secrets: list[Any] | None = None,
-) -> Any:
-    """Create a raw Modal Sandbox from a filesystem snapshot Image."""
-
-    if not snapshot_id:
-        raise ValueError("create_from_filesystem_snapshot requires snapshot_id")
-    modal = _modal()
-    kwargs: dict[str, Any] = {
-        "app": app,
-        "image": modal.Image.from_id(snapshot_id),
-        "timeout": timeout_seconds,
-    }
-    if cpu is not None:
-        kwargs["cpu"] = cpu
-    if memory_mb is not None:
-        kwargs["memory"] = memory_mb
-    if secrets:
-        kwargs["secrets"] = secrets
-    try:
-        return modal.Sandbox.create(*command, **kwargs)
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(f"Sandbox.create from snapshot: {exc}") from exc
 
 
 def delete_snapshot(snapshot_id: str) -> None:

@@ -29,7 +29,6 @@ _SECRET_KEYS = {
 
 class SnapshotKind(str, Enum):
     DIRECTORY = "directory"
-    FILESYSTEM = "filesystem"
 
 
 class SnapshotStatus(str, Enum):

@@ -302,16 +302,6 @@ def get_worker(args, *, manifest_path: str) -> RetroPrefetchWorker | None:
         return _worker
 
 
-def reset_worker() -> None:
-    """Tear the worker down (tests)."""
-
-    global _worker
-    with _worker_lock:
-        if _worker is not None:
-            _worker.stop()
-            _worker = None
-
-
 def drain_ready_groups(
     worker: RetroPrefetchWorker,
     *,
