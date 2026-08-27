@@ -1,0 +1,187 @@
+{
+  "utc": "2026-08-27T06:06:48.389324+00:00",
+  "turns": 75,
+  "driver": {
+    "turns": 75,
+    "rsync_seconds": {
+      "p50": 0.07087196900000059,
+      "p95": 0.07314965800000017,
+      "max": 0.10610004299999998,
+      "total": 5.347040386000001
+    },
+    "app_usage": {
+      "logical_bytes": 13092335,
+      "physical_bytes": 13092335
+    },
+    "staging_usage": {
+      "logical_bytes": 705075498,
+      "physical_bytes": 30542360
+    },
+    "sampled_turns": [
+      0,
+      7,
+      14,
+      21,
+      28,
+      35,
+      42,
+      49,
+      56,
+      63,
+      70,
+      74
+    ],
+    "staged_mismatches": [],
+    "chmod_turns": 5,
+    "chmod_only_propagated": true
+  },
+  "sequential_seconds": {
+    "p50": 1.593,
+    "p95": 1.996
+  },
+  "restore_seconds": 5.836,
+  "verifier": {
+    "restored_mismatches": [],
+    "restored_usage": {
+      "logical_bytes": 705075498,
+      "physical_bytes": 705075498
+    }
+  },
+  "branch_copy_seconds": 0.137,
+  "q1_hardlinks": {
+    "staging_dedup_x": 23.09,
+    "restored_dedup_x": 1.0,
+    "survived": false
+  },
+  "tarballs": {
+    "gzip": {
+      "pack_seconds": 0.767,
+      "bytes": 11652451
+    },
+    "zstd": {
+      "pack_seconds": 0.563,
+      "bytes": 11462086
+    }
+  },
+  "tarball_verifier": {
+    "restored_mismatches": [],
+    "restored_usage": {
+      "logical_bytes": 705075498,
+      "physical_bytes": 30542360
+    }
+  },
+  "tarball_roundtrip": {
+    "restore_seconds": 0.879,
+    "unpack_seconds": 0.49,
+    "branch_copy_seconds": 0.132,
+    "extracted_dedup_x": 23.09
+  },
+  "concurrent_seconds": [
+    0.837,
+    1.003,
+    1.185,
+    2.048
+  ],
+  "gc_seconds_total": 1.002,
+  "gc_images": 18,
+  "snapshots": [
+    {
+      "label": "staging-root",
+      "seconds": 2.264,
+      "physical_bytes": 30689280,
+      "files": 18426,
+      "snapshot_id": "im-01M10X8KR7YSJ6YEP2NTY89QA8"
+    },
+    {
+      "label": "pad-100MiB",
+      "seconds": 2.726,
+      "physical_bytes": 104857600,
+      "files": 26,
+      "snapshot_id": "im-01M10X8QSW6FDFRQQF5QFXW9TS"
+    },
+    {
+      "label": "pad-400MiB",
+      "seconds": 3.567,
+      "physical_bytes": 419430400,
+      "files": 101,
+      "snapshot_id": "im-01M10X8XEP61GEPCHP6SCABZ96"
+    },
+    {
+      "label": "sequential",
+      "seconds": 1.6,
+      "physical_bytes": 30689280,
+      "files": 18426,
+      "snapshot_id": "im-01M10X8ZRYQRCHWQ1KZWPWYFN8"
+    },
+    {
+      "label": "sequential",
+      "seconds": 1.498,
+      "physical_bytes": 30689280,
+      "files": 18426,
+      "snapshot_id": "im-01M10X920SGK9WH6TB776R9FYC"
+    },
+    {
+      "label": "sequential",
+      "seconds": 1.536,
+      "physical_bytes": 30689280,
+      "files": 18426,
+      "snapshot_id": "im-01M10X949JG1AARVG8TBX5ASEQ"
+    },
+    {
+      "label": "sequential",
+      "seconds": 1.937,
+      "physical_bytes": 30689280,
+      "files": 18426,
+      "snapshot_id": "im-01M10X96V24NYWN9906X7KK7J6"
+    },
+    {
+      "label": "sequential",
+      "seconds": 1.649,
+      "physical_bytes": 30689280,
+      "files": 18426,
+      "snapshot_id": "im-01M10X99AEX4NZQ0MPWBZZXDFF"
+    },
+    {
+      "label": "sequential",
+      "seconds": 1.996,
+      "physical_bytes": 30689280,
+      "files": 18426,
+      "snapshot_id": "im-01M10X9C2F3PJHZFMNXAXN5S6M"
+    },
+    {
+      "label": "sequential",
+      "seconds": 1.586,
+      "physical_bytes": 30689280,
+      "files": 18426,
+      "snapshot_id": "im-01M10X9ECT2FQ4QCFV73XH2C7V"
+    },
+    {
+      "label": "sequential",
+      "seconds": 1.983,
+      "physical_bytes": 30689280,
+      "files": 18426,
+      "snapshot_id": "im-01M10X9H0HBZMBQC7MTWAMDSX8"
+    },
+    {
+      "label": "sequential",
+      "seconds": 1.494,
+      "physical_bytes": 30689280,
+      "files": 18426,
+      "snapshot_id": "im-01M10X9KARRTFG3KF7Q66M6FXF"
+    },
+    {
+      "label": "sequential",
+      "seconds": 1.568,
+      "physical_bytes": 30689280,
+      "files": 18426,
+      "snapshot_id": "im-01M10X9NKRVBFQEMETP83KSQ97"
+    },
+    {
+      "label": "tarball-dir",
+      "seconds": 3.416,
+      "physical_bytes": 23114752,
+      "files": 3,
+      "snapshot_id": "im-01M10XA2EZTE32FDM4D3CQGNMC"
+    }
+  ]
+}

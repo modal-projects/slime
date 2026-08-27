@@ -1,0 +1,157 @@
+{
+  "utc": "2026-08-27T06:03:12.922873+00:00",
+  "turns": 75,
+  "driver": {
+    "turns": 75,
+    "rsync_seconds": {
+      "p50": 0.07697748399999993,
+      "p95": 0.08072131199999966,
+      "max": 0.12129031900000004,
+      "total": 5.827912603
+    },
+    "app_usage": {
+      "logical_bytes": 13092335,
+      "physical_bytes": 13092335
+    },
+    "staging_usage": {
+      "logical_bytes": 705075498,
+      "physical_bytes": 30542360
+    },
+    "sampled_turns": [
+      0,
+      7,
+      14,
+      21,
+      28,
+      35,
+      42,
+      49,
+      56,
+      63,
+      70,
+      74
+    ],
+    "staged_mismatches": [],
+    "chmod_turns": 5,
+    "chmod_only_propagated": true
+  },
+  "sequential_seconds": {
+    "p50": 2.403,
+    "p95": 2.552
+  },
+  "restore_seconds": 9.448,
+  "verifier": {
+    "restored_mismatches": [],
+    "restored_usage": {
+      "logical_bytes": 705075498,
+      "physical_bytes": 705075498
+    }
+  },
+  "branch_copy_seconds": 0.149,
+  "q1_hardlinks": {
+    "staging_dedup_x": 23.09,
+    "restored_dedup_x": 1.0,
+    "survived": false
+  },
+  "concurrent_seconds": [
+    0.806,
+    0.826,
+    2.489,
+    4.006
+  ],
+  "gc_seconds_total": 1.081,
+  "gc_images": 17,
+  "snapshots": [
+    {
+      "label": "staging-root",
+      "seconds": 4.033,
+      "physical_bytes": 30689280,
+      "files": 18426,
+      "snapshot_id": "im-01M10X1Z8PAFEV37CMSDGKAV11"
+    },
+    {
+      "label": "pad-100MiB",
+      "seconds": 2.729,
+      "physical_bytes": 104857600,
+      "files": 26,
+      "snapshot_id": "im-01M10X22FCGP8ZZWKXKCHVEJVE"
+    },
+    {
+      "label": "pad-400MiB",
+      "seconds": 3.319,
+      "physical_bytes": 419430400,
+      "files": 101,
+      "snapshot_id": "im-01M10X26XGQ56DPP49G8ET6PK1"
+    },
+    {
+      "label": "sequential",
+      "seconds": 2.552,
+      "physical_bytes": 30689280,
+      "files": 18426,
+      "snapshot_id": "im-01M10X29Q9TD94KV7NWPXBNVVT"
+    },
+    {
+      "label": "sequential",
+      "seconds": 2.482,
+      "physical_bytes": 30689280,
+      "files": 18426,
+      "snapshot_id": "im-01M10X2CE9393KGE1KNZ36EYBM"
+    },
+    {
+      "label": "sequential",
+      "seconds": 2.408,
+      "physical_bytes": 30689280,
+      "files": 18426,
+      "snapshot_id": "im-01M10X2F1110SAT3Y42399WC94"
+    },
+    {
+      "label": "sequential",
+      "seconds": 2.279,
+      "physical_bytes": 30689280,
+      "files": 18426,
+      "snapshot_id": "im-01M10X2HKTXRB6D6KGYZT9KCT6"
+    },
+    {
+      "label": "sequential",
+      "seconds": 2.418,
+      "physical_bytes": 30689280,
+      "files": 18426,
+      "snapshot_id": "im-01M10X2M4TQEHKTAK6ZGFVVWHZ"
+    },
+    {
+      "label": "sequential",
+      "seconds": 2.398,
+      "physical_bytes": 30689280,
+      "files": 18426,
+      "snapshot_id": "im-01M10X2PW9HGA0FD7QM45V7RAP"
+    },
+    {
+      "label": "sequential",
+      "seconds": 2.508,
+      "physical_bytes": 30689280,
+      "files": 18426,
+      "snapshot_id": "im-01M10X2SJ8WR961R0E596PZESX"
+    },
+    {
+      "label": "sequential",
+      "seconds": 2.257,
+      "physical_bytes": 30689280,
+      "files": 18426,
+      "snapshot_id": "im-01M10X2W3BY2JM54DF99BDS42Y"
+    },
+    {
+      "label": "sequential",
+      "seconds": 2.255,
+      "physical_bytes": 30689280,
+      "files": 18426,
+      "snapshot_id": "im-01M10X2YK4JVDWTEY1NW5NM9EX"
+    },
+    {
+      "label": "sequential",
+      "seconds": 2.375,
+      "physical_bytes": 30689280,
+      "files": 18426,
+      "snapshot_id": "im-01M10X314NA2HS8D2A2A92YF7Y"
+    }
+  ]
+}
