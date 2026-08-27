@@ -61,7 +61,7 @@ class Lease:
         return self.manifest.event_type
 
     async def consume(self, rollout_id: int | None = None, *, gc: bool = True) -> None:
-        """LEASED → CONSUMED, then best-effort snapshot deletion."""
+        """LEASED → CONSUMED, then best-effort snapshot + checkpoint-blob deletion."""
 
         if self._closed:
             return
@@ -69,6 +69,7 @@ class Lease:
         self._pool._buffer.consume(self.manifest.snapshot_id, rollout_id)
         if gc:
             await self._pool.gc_snapshot(self.manifest.snapshot_id)
+            _gc_blob(self.manifest, self._pool.store)
 
     def release(self) -> None:
         """LEASED → AVAILABLE (retryable later). Raises KeyError if the
@@ -202,6 +203,7 @@ async def abort_candidates(
         manifest.invalidate()
         store.append_transition(manifest)
         await gc_snapshot(manifest.snapshot_id, gc=gc)
+        _gc_blob(manifest, store)
 
 
 async def gc_snapshot(snapshot_id: str, *, gc: Callable[[str], None] | None = None) -> None:
@@ -211,6 +213,12 @@ async def gc_snapshot(snapshot_id: str, *, gc: Callable[[str], None] | None = No
         await asyncio.to_thread(gc or _default_gc, snapshot_id)
     except RuntimeError as exc:
         logger.warning("retro snapshot cleanup %s: %s", snapshot_id, exc)
+
+
+def _gc_blob(manifest: RetroSnapshotManifest, store: ManifestStore) -> None:
+    from .blobs import delete_checkpoint_blob
+
+    delete_checkpoint_blob(manifest.agent_state, store.path)
 
 
 def _candidate_manifests(group: Any) -> list[RetroSnapshotManifest]:

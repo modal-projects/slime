@@ -527,5 +527,79 @@ def test_score_trace_ignores_malformed_and_out_of_range_records():
     assert [(e["turn_index"], e["score"]) for e in trace] == [(3, 0.7)]
 
 
+# --------------------------------------------------------------------------
+# Part D: checkpoint blobs (agent_state out of the manifest JSONL)
+# --------------------------------------------------------------------------
+
+
+def test_checkpoint_blob_roundtrip_and_ledger_stays_small(tmp_path):
+    from agentic_rl.retro.blobs import load_checkpoint, write_checkpoint_blob
+
+    manifest_path = tmp_path / "manifests.jsonl"
+    payload = {"tokens": list(range(50_000)), "messages": [{"role": "user", "content": "x" * 4096}]}
+    agent_state = write_checkpoint_blob(manifest_path, "im-test123", payload)
+    assert set(agent_state) == {"checkpoint_ref", "sha256"}
+    assert len(json.dumps(agent_state)) < 200  # what lands in the JSONL row
+    assert load_checkpoint(agent_state, manifest_path) == payload
+    # legacy inline shape still resolves without any path
+    assert load_checkpoint({"checkpoint": payload}, None) == payload
+
+
+def test_checkpoint_blob_detects_corruption_and_strips_secrets(tmp_path):
+    from agentic_rl.retro.blobs import delete_checkpoint_blob, load_checkpoint, write_checkpoint_blob
+
+    manifest_path = tmp_path / "manifests.jsonl"
+    agent_state = write_checkpoint_blob(
+        manifest_path, "im-x", {"tokens": [1, 2], "authorization": "secret-token"}
+    )
+    blob_path = tmp_path / agent_state["checkpoint_ref"]
+    assert "secret-token" not in blob_path.read_text()  # same _sanitize as inline had
+    blob_path.write_bytes(blob_path.read_bytes() + b" ")
+    with pytest.raises(ValueError, match="corrupt"):
+        load_checkpoint(agent_state, manifest_path)
+    delete_checkpoint_blob(agent_state, manifest_path)
+    assert not blob_path.exists()
+    delete_checkpoint_blob(agent_state, manifest_path)  # idempotent
+
+
+def test_pool_gc_removes_blob_with_snapshot(tmp_path):
+    import asyncio
+
+    from agentic_rl.retro.blobs import write_checkpoint_blob
+    from agentic_rl.retro.manifest import Compatibility, RetroSnapshotManifest, SnapshotKind, SnapshotStatus
+    from agentic_rl.retro.pool import ReplayPool
+
+    manifest_path = tmp_path / "manifests.jsonl"
+    agent_state = write_checkpoint_blob(manifest_path, "im-gc", {"tokens": [1]})
+    manifest = RetroSnapshotManifest.create(
+        snapshot_id="im-gc",
+        snapshot_kind=SnapshotKind.DIRECTORY,
+        snapshot_path="/app",
+        ttl_seconds=3600,
+        task_type="frontier_cs",
+        instance_id="task-1",
+        problem_id="p1",
+        event_type="promising",
+        turn_index=3,
+        remaining_steps=10,
+        remaining_seconds=600,
+        source_update=1,
+        agent_state=agent_state,
+        compatibility=Compatibility(),
+        status=SnapshotStatus.AVAILABLE,
+    )
+    deleted: list[str] = []
+    pool = ReplayPool(manifest_path, gc=deleted.append)
+    pool.store.append(manifest)
+    pool.refresh()
+    blob_path = tmp_path / agent_state["checkpoint_ref"]
+    assert blob_path.exists()
+    lease = pool.lease("worker-1")
+    assert lease is not None
+    asyncio.run(lease.consume(rollout_id=7))
+    assert deleted == ["im-gc"]
+    assert not blob_path.exists(), "checkpoint blob must be GC'd with its snapshot"
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

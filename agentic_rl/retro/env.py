@@ -14,6 +14,7 @@ from agentic_rl.envs.base import EpisodeLimits, RewardResult
 from agentic_rl.envs.frontier_cs.env import SUBMISSIONS_LOG, FrontierCsEnv
 
 from .agent import SnapshottingAgent
+from .blobs import load_checkpoint, write_checkpoint_blob
 from .buffer import ManifestStore
 from .manifest import Compatibility, RetroSnapshotManifest, SnapshotKind, SnapshotStatus
 from .backends.miniswe_checkpoint import ChainCheckpoint, capture_checkpoint, restore_agent, restore_recording_model
@@ -156,7 +157,12 @@ class RetroFrontierCsEnv(FrontierCsEnv):
         checkpoint = None
         step_limit = max_steps
         if ctx.restore_manifest is not None:
-            checkpoint = ChainCheckpoint.from_dict(ctx.restore_manifest.agent_state["checkpoint"])
+            checkpoint = ChainCheckpoint.from_dict(
+                load_checkpoint(
+                    ctx.restore_manifest.agent_state,
+                    os.environ.get("ASYNC_RL_RETRO_MANIFEST_PATH"),
+                )
+            )
             restore_recording_model(model, checkpoint)
             step_limit = checkpoint.n_calls + max_steps
 
@@ -266,6 +272,15 @@ class RetroFrontierCsEnv(FrontierCsEnv):
         )
         if capture_status not in (SnapshotStatus.AVAILABLE, SnapshotStatus.TENTATIVE):
             raise ValueError("retro capture status must be available or tentative")
+        # The checkpoint payload (token ids + messages, ~0.3-1.5 MB) lives in a
+        # volume-side blob keyed by snapshot_id; the manifest row stays ~KBs.
+        # Without a manifest path (unit tests, smokes) it stays inline.
+        manifest_path = os.environ.get("ASYNC_RL_RETRO_MANIFEST_PATH")
+        checkpoint_payload = staged.checkpoint.to_dict()
+        if manifest_path:
+            agent_state = write_checkpoint_blob(manifest_path, snapshot.snapshot_id, checkpoint_payload)
+        else:
+            agent_state = {"checkpoint": checkpoint_payload}
         manifest = RetroSnapshotManifest.create(
             snapshot_id=snapshot.snapshot_id,
             snapshot_kind=kind,
@@ -291,14 +306,13 @@ class RetroFrontierCsEnv(FrontierCsEnv):
             fraction_error=selected.fraction_error,
             score=selected.score,
             best_score=selected.best_score,
-            agent_state={"checkpoint": staged.checkpoint.to_dict()},
+            agent_state=agent_state,
             sample_metadata=ctx.sample_metadata,
             compatibility=_compatibility(ctx.md),
             status=capture_status,
         )
         ctx.captures.append(manifest)
         ctx.snapshot_results.append(snapshot)
-        manifest_path = os.environ.get("ASYNC_RL_RETRO_MANIFEST_PATH")
         if manifest_path:
             ManifestStore(manifest_path).append(manifest)
 
