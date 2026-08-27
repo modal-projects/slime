@@ -175,6 +175,33 @@ class ReplayPool:
     async def gc_snapshot(self, snapshot_id: str) -> None:
         await gc_snapshot(snapshot_id, gc=self._gc)
 
+    async def gc_aged(self, *, current_update: int | None, max_age: int, lease_max_age: int | None = None) -> int:
+        """Invalidate + GC AVAILABLE snapshots past ``max_age`` (or TTL-expired).
+
+        All-turns capture makes age-out GC a prerequisite, not an option (bench:
+        48 h TTL alone leaves ~19K live images per run). Safety: another pool
+        instance (the prefetch worker's) holds its own in-memory view, so the
+        sweep age is floored to ``lease_max_age + 1`` — nothing sweepable is
+        still leasable anywhere. Only AVAILABLE manifests are touched; LEASED
+        ones are someone's live branch group.
+        """
+
+        threshold = max(int(max_age), int(lease_max_age) + 1 if lease_max_age is not None else 0)
+        swept = 0
+        for manifest in self._buffer.manifests():
+            if manifest.status != SnapshotStatus.AVAILABLE:
+                continue
+            age = manifest.policy_age(current_update)
+            aged = age is not None and age > threshold
+            if not aged and not manifest.is_expired():
+                continue
+            manifest.invalidate()
+            self.store.append_transition(manifest)
+            await gc_snapshot(manifest.snapshot_id, gc=self._gc)
+            _gc_blob(manifest, self.store)
+            swept += 1
+        return swept
+
 
 async def commit_candidates(store: ManifestStore, group: Any) -> None:
     """Batch-accept hook: every TENTATIVE candidate carried by ``group``

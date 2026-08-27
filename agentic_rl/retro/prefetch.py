@@ -48,6 +48,7 @@ from slime.utils.http_utils import get_rollout_num_engines
 from slime.utils.types import Sample
 
 from .group import make_branch_group, template_from_manifest
+from .selection import choose_branch_turn
 from .pool import Lease, ReplayPool
 
 logger = logging.getLogger("agentic_rl.retro.prefetch")
@@ -259,6 +260,7 @@ class RetroPrefetchWorker:
                                 lease.manifest,
                                 group_index=_INDEX_BASE // 8 + n,
                                 first_sample_index=_INDEX_BASE + n * 8,
+                                branch_turn=choose_branch_turn(lease.manifest),
                             )
                         except Exception:  # noqa: BLE001
                             self.release(lease)

@@ -373,6 +373,8 @@ class RetroSlimeConfig(_SlimeConfigBase):
                     "ASYNC_RL_RETRO_SNAPSHOT_KIND": env.get("RETRO_SNAPSHOT_KIND", "directory"),
                     "ASYNC_RL_RETRO_CAPTURE_MODE": env.get("RETRO_CAPTURE_MODE", "winner"),
                     "ASYNC_RL_RETRO_ARTIFACT_COMPRESSION": env.get("RETRO_ARTIFACT_COMPRESSION", "gzip"),
+                    "ASYNC_RL_RETRO_LEASE_POLICY": env.get("RETRO_LEASE_POLICY", "capture_default"),
+                    "ASYNC_RL_RETRO_GC_MAX_AGE": env.get("RETRO_GC_MAX_AGE", "0"),
                     "ASYNC_RL_RETRO_SNAPSHOT_PATH": "/app",
                     "ASYNC_RL_RETRO_SNAPSHOT_TTL": env.get(
                         "RETRO_SNAPSHOT_TTL", str(48 * 60 * 60)

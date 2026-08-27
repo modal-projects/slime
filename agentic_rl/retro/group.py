@@ -26,6 +26,7 @@ def make_branch_group(
     group_index: int,
     first_sample_index: int,
     width: int = 8,
+    branch_turn: int | None = None,
 ) -> list[Sample]:
     if width != 8:
         raise ValueError(f"initial retro design requires width=8, got {width}")
@@ -58,5 +59,9 @@ def make_branch_group(
             "retro_manifest": manifest.to_dict(),
             "retro_sibling": offset,
         }
+        if branch_turn is not None:
+            # Lease-time policy override (all-turns manifests); absent = the
+            # manifest's capture-time default branch point.
+            sample.metadata["retro_branch_turn"] = int(branch_turn)
         group.append(sample)
     return group

@@ -804,5 +804,128 @@ def test_pack_and_turn_restore_command_surfaces(monkeypatch):
     assert result.copied_to_writable
 
 
+# --------------------------------------------------------------------------
+# Part F: lease-time selection policies + age-out GC
+# --------------------------------------------------------------------------
+
+
+def _allturns_manifest(**overrides):
+    from agentic_rl.retro.manifest import Compatibility, RetroSnapshotManifest, SnapshotKind, SnapshotStatus
+
+    def rec(turn):
+        return {
+            "turn_index": turn, "token_len": 100 * turn, "seen_msgs": 2 * turn,
+            "messages_len": 2 * turn + 2, "n_calls": turn, "cost": 0.0,
+            "source_weight_version": "v42", "elapsed_seconds": 10.0 * turn,
+            "ts": 1e9 + turn, "digest": "d" * 64, "chain_seq": 0,
+            "gen_tokens": 50, "mean_logprob": -0.3,
+        }
+
+    fields = dict(
+        snapshot_id="im-sel",
+        snapshot_kind=SnapshotKind.DIRECTORY,
+        snapshot_path="/app",
+        ttl_seconds=3600,
+        task_type="frontier_cs",
+        instance_id="task-1",
+        problem_id="p1",
+        event_type="promising",
+        turn_index=5,
+        remaining_steps=5,
+        remaining_seconds=500,
+        source_update=40,
+        source_total_turns=10,
+        source_total_seconds=1000.0,
+        target_fraction=0.5,
+        status=SnapshotStatus.AVAILABLE,
+        compatibility=Compatibility(),
+        turns=[rec(t) for t in range(1, 10)],
+        score_trace=[
+            {"turn_index": 2, "submission_index": 0, "score": 0.2},
+            {"turn_index": 3, "submission_index": 1, "score": 0.1},   # regression at 3
+            {"turn_index": 8, "submission_index": 2, "score": 0.7},   # big late gain
+        ],
+        artifact={"member": "turns.tgz", "compression": "gzip", "member_root": "retro_turns"},
+    )
+    fields.update(overrides)
+    return RetroSnapshotManifest.create(**{k: v for k, v in fields.items() if k != "ttl_seconds"}, ttl_seconds=fields["ttl_seconds"])
+
+
+def test_lease_policies_choose_expected_turns(monkeypatch):
+    from agentic_rl.retro.selection import choose_branch_turn
+
+    manifest = _allturns_manifest()
+    # parity: no override
+    assert choose_branch_turn(manifest, "capture_default") is None
+    # target_fraction 0.5 over 10 total turns → turn 5 == capture default → None (no stamp)
+    monkeypatch.setenv("ASYNC_RL_RETRO_TARGET_TRAJECTORY_FRACTION", "0.5")
+    assert choose_branch_turn(manifest, "target_fraction") is None
+    # re-target to 0.25 over existing inventory → turn 2 (no recapture needed)
+    monkeypatch.setenv("ASYNC_RL_RETRO_TARGET_TRAJECTORY_FRACTION", "0.25")
+    assert choose_branch_turn(manifest, "target_fraction") == 2
+    # hindsight: max future-vs-past gain — before the 0.7 at turn 8, past best 0.2
+    # → every turn in [2,7] gains 0.5; earliest wins → 2; turns ≥8 gain 0
+    assert choose_branch_turn(manifest, "hindsight_gain") == 2
+    # winner-mode manifests (no artifact/turns) are never overridden
+    winner = _allturns_manifest(turns=[], score_trace=[], artifact={})
+    assert choose_branch_turn(winner, "hindsight_gain") is None
+    assert choose_branch_turn(winner, "target_fraction") is None
+    with pytest.raises(ValueError, match="lease policy"):
+        choose_branch_turn(manifest, "best_vibes")
+
+
+def test_hindsight_gain_falls_back_when_no_realized_improvement():
+    from agentic_rl.retro.selection import choose_branch_turn
+
+    flat = _allturns_manifest(score_trace=[{"turn_index": 2, "submission_index": 0, "score": 0.4}])
+    assert choose_branch_turn(flat, "hindsight_gain") is None  # nothing gained after any turn
+
+
+def test_branch_group_stamps_policy_turn():
+    from agentic_rl.retro.group import make_branch_group, template_from_manifest
+
+    manifest = _allturns_manifest(sample_metadata={"_retro_prompt": "p", "_retro_label": "l", "instance_id": "task-1"})
+    template = template_from_manifest(manifest)
+    stamped = make_branch_group(template, manifest, group_index=1, first_sample_index=8, branch_turn=2)
+    assert all(sample.metadata["retro_branch_turn"] == 2 for sample in stamped)
+    plain = make_branch_group(template, manifest, group_index=2, first_sample_index=16)
+    assert all("retro_branch_turn" not in sample.metadata for sample in plain)
+
+
+def test_gc_aged_sweeps_only_old_available_snapshots(tmp_path):
+    import asyncio
+
+    from agentic_rl.retro.blobs import write_checkpoint_blob
+    from agentic_rl.retro.manifest import SnapshotStatus
+    from agentic_rl.retro.pool import ReplayPool
+
+    manifest_path = tmp_path / "manifests.jsonl"
+    deleted: list[str] = []
+    pool = ReplayPool(manifest_path, gc=deleted.append)
+    rows = {"im-old": (30, "promising"), "im-young": (39, "promising"), "im-leased": (28, "recovery")}
+    for snapshot_id, (source_update, event_type) in rows.items():
+        agent_state = write_checkpoint_blob(manifest_path, snapshot_id, {"tokens": [1]})
+        pool.store.append(
+            _allturns_manifest(
+                snapshot_id=snapshot_id, source_update=source_update,
+                event_type=event_type, agent_state=agent_state,
+            )
+        )
+    pool.refresh()
+    held = pool.lease("w1", event_type="recovery")  # deterministically im-leased
+    assert held is not None and held.snapshot_id == "im-leased"
+    # current_update 41 → ages: old=11, young=2, leased=13; threshold = max(8, 4+1) = 8
+    swept = asyncio.run(pool.gc_aged(current_update=41, max_age=8, lease_max_age=4))
+    statuses = {m.snapshot_id: m.status for m in pool.manifests()}
+    assert swept == 1
+    assert statuses["im-old"] == SnapshotStatus.INVALID
+    assert statuses["im-young"] == SnapshotStatus.AVAILABLE
+    assert statuses["im-leased"] == SnapshotStatus.LEASED, "LEASED snapshots must never be swept"
+    assert deleted == ["im-old"]
+    assert not (tmp_path / "blobs" / "im-old.checkpoint.json").exists()
+    assert (tmp_path / "blobs" / "im-young.checkpoint.json").exists()
+    assert (tmp_path / "blobs" / "im-leased.checkpoint.json").exists()
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

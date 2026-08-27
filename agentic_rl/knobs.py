@@ -118,6 +118,13 @@ _KNOBS: list[Knob] = [
     _k("RETRO_ARTIFACT_COMPRESSION", "enum", "gzip", "launch/launch_config.py", "launcher",
        "all_turns tarball compression (zstd falls back to gzip when the task image lacks it) "
        "→ ASYNC_RL_RETRO_ARTIFACT_COMPRESSION", ("gzip", "zstd")),
+    _k("RETRO_LEASE_POLICY", "enum", "capture_default", "launch/launch_config.py", "launcher",
+       "branch-point policy over all-turns manifests at group-build time "
+       "→ ASYNC_RL_RETRO_LEASE_POLICY", ("capture_default", "target_fraction", "hindsight_gain")),
+    _k("RETRO_GC_MAX_AGE", "int", "0", "launch/launch_config.py", "launcher",
+       "age-out GC: invalidate+delete AVAILABLE snapshots older than this many updates "
+       "(0 = TTL-only; floored to RETRO_MAX_POLICY_AGE+1; required at all_turns scale) "
+       "→ ASYNC_RL_RETRO_GC_MAX_AGE"),
     _k("RETRO_SNAPSHOT_TTL", "int", "172800", "launch/launch_config.py", "launcher",
        "Snapshot TTL seconds → ASYNC_RL_RETRO_SNAPSHOT_TTL"),
     _k("RETRO_DETERMINISTIC", "bool", "0", "launch/launch_config.py", "launcher",
@@ -226,6 +233,11 @@ _KNOBS: list[Knob] = [
        "lacks rsync/tar/gzip)", ("winner", "all_turns")),
     _k("ASYNC_RL_RETRO_ARTIFACT_COMPRESSION", "enum", "gzip", "retro/env.py", "runtime",
        "all_turns tarball compression", ("gzip", "zstd")),
+    _k("ASYNC_RL_RETRO_LEASE_POLICY", "enum", "capture_default", "retro/selection.py", "runtime",
+       "branch-point policy over all-turns manifests",
+       ("capture_default", "target_fraction", "hindsight_gain")),
+    _k("ASYNC_RL_RETRO_GC_MAX_AGE", "int", "0", "retro/rollout.py", "runtime",
+       "age-out GC sweep threshold in updates (0 = TTL-only)"),
     _k("ASYNC_RL_RETRO_SNAPSHOT_PATH", "path", "/app", "retro/env.py", "runtime",
        "Sandbox-side SOURCE dir to photograph (P9: rename to _SNAPSHOT_SOURCE_DIR)"),
     _k("ASYNC_RL_RETRO_SNAPSHOT_TTL", "int", "172800", "retro/env.py", "runtime",

@@ -20,6 +20,7 @@ from slime.utils.types import Sample
 
 from .buffer import ManifestStore
 from .group import make_branch_group, template_from_manifest
+from .selection import choose_branch_turn
 from .pool import ReplayPool, abort_candidates, commit_candidates
 from .prefetch import drain_ready_groups, get_worker as get_prefetch_worker, retro_prefetch_groups
 
@@ -69,6 +70,14 @@ async def _generate_retro_groups(
     min_policy_age = _env_int("ASYNC_RL_RETRO_MIN_POLICY_AGE", 0)
     max_policy_age = _env_int("ASYNC_RL_RETRO_MAX_POLICY_AGE", 4)
     current_update = rollout_id + 1
+    gc_max_age = _env_int("ASYNC_RL_RETRO_GC_MAX_AGE", 0)
+    if gc_max_age > 0:
+        # Age-out sweep once per step (0 = TTL-only, today's behavior). Floored
+        # inside gc_aged to the lease window so the prefetch pool's separate
+        # in-memory view can never lease a swept snapshot.
+        stats["gc_aged"] = await pool.gc_aged(
+            current_update=current_update, max_age=gc_max_age, lease_max_age=max_policy_age
+        )
     snapshot_policy_ages: list[int] = []
     synthetic_base = 1_000_000_000 + rollout_id * 1_000_000
     max_attempts = max(target, target * _env_int("ASYNC_RL_RETRO_MAX_ATTEMPTS", 3))
@@ -145,6 +154,7 @@ async def _generate_retro_groups(
                         lease.manifest,
                         group_index=synthetic_base // 8 + group_number,
                         first_sample_index=synthetic_base + group_number * 8,
+                        branch_turn=choose_branch_turn(lease.manifest),
                     )
                 )
             except Exception:
