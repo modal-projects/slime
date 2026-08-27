@@ -209,31 +209,66 @@ def turn_dir(staging_root: str, turn_index: int) -> str:
     return f"{staging_root.rstrip('/')}/{turn_index:04d}"
 
 
-def score_trace_from_logs(turn_logs: list[tuple[int, str]]) -> list[dict[str, Any]]:
+class ScoreTraceBuilder:
     """Attribute submission scores to the post-tool boundary where they first appeared.
 
-    ``turn_logs`` is [(turn_index, cumulative submissions-log text observed at
-    that boundary), ...] in boundary order. A score belongs to the turn at whose
-    boundary it first appeared — the same attribution ``EventSelector.observe_log``
-    uses (its ``_seen_scored`` cursor), so lease-time policies replaying this
-    trace see exactly what in-episode selection saw. Scores come from the
-    sandbox log and stay selection-only; reward remains server-side.
+    A score belongs to the turn at whose boundary it first appeared — the same
+    attribution ``EventSelector.observe_log`` uses (its ``_seen_scored``
+    cursor), so lease-time policies replaying a stored trace see exactly what
+    in-episode selection saw. Scores come from the sandbox log and stay
+    selection-only; reward remains server-side.
     """
 
-    events: list[dict[str, Any]] = []
-    seen = 0
-    for turn_index, text in turn_logs:
-        scores = valid_score_trace(text)
-        for submission_index in range(seen, len(scores)):
-            events.append(
+    def __init__(self) -> None:
+        self.events: list[dict[str, Any]] = []
+        self._seen = 0
+
+    def observe(self, turn_index: int, log_text: str) -> None:
+        scores = valid_score_trace(log_text)
+        for submission_index in range(self._seen, len(scores)):
+            self.events.append(
                 {
                     "turn_index": int(turn_index),
                     "submission_index": submission_index,
                     "score": float(scores[submission_index]),
                 }
             )
-        seen = max(seen, len(scores))
-    return events
+        self._seen = max(self._seen, len(scores))
+
+
+def score_trace_from_logs(turn_logs: list[tuple[int, str]]) -> list[dict[str, Any]]:
+    """One-shot form of :class:`ScoreTraceBuilder` over recorded boundary logs."""
+
+    builder = ScoreTraceBuilder()
+    for turn_index, text in turn_logs:
+        builder.observe(turn_index, text)
+    return builder.events
+
+
+def probe_capture_tools(sandbox: Any) -> dict[str, bool]:
+    """Which staging/packing tools the task image actually ships.
+
+    Task images are converter-built app images, not ours — rsync in particular
+    is not guaranteed. all_turns capture requires rsync + tar (+gzip); when the
+    probe fails the episode degrades to winner-mode capture and a metric flags
+    it, never a crash.
+    """
+
+    tools = ("rsync", "tar", "gzip", "zstd")
+    checks = " ; ".join(f"command -v {tool} >/dev/null 2>&1 && echo {tool}" for tool in tools)
+    rc, out, _ = sandbox.exec(checks, check=False, timeout=30)
+    present = set((out or "").split())
+    return {tool: tool in present for tool in tools}
+
+
+def branch_budget(
+    record: TurnRecord, *, total_turns: int | None, total_seconds: float | None
+) -> tuple[int, int]:
+    """(remaining_steps, remaining_seconds) when branching at ``record``."""
+
+    steps = max(1, int(total_turns or 0) - record.turn_index) if total_turns else 1
+    seconds = max(1, int((total_seconds or 0.0) - record.elapsed_seconds)) if total_seconds else 1
+    return steps, seconds
 
 
 def _token_bytes(tokens: list[int]) -> bytes:

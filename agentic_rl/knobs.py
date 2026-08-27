@@ -111,6 +111,13 @@ _KNOBS: list[Knob] = [
        "→ ASYNC_RL_RETRO_MAX_ATTEMPTS"),
     _k("RETRO_SNAPSHOT_KIND", "enum", "directory", "launch/launch_config.py", "launcher",
        "→ ASYNC_RL_RETRO_SNAPSHOT_KIND", ("directory",)),
+    _k("RETRO_CAPTURE_MODE", "enum", "winner", "launch/launch_config.py", "launcher",
+       "winner = snapshot one selected branch point (today); all_turns = stage every post-tool "
+       "boundary, ONE tarball artifact + per-turn records, branch point chosen at lease time "
+       "→ ASYNC_RL_RETRO_CAPTURE_MODE", ("winner", "all_turns")),
+    _k("RETRO_ARTIFACT_COMPRESSION", "enum", "gzip", "launch/launch_config.py", "launcher",
+       "all_turns tarball compression (zstd falls back to gzip when the task image lacks it) "
+       "→ ASYNC_RL_RETRO_ARTIFACT_COMPRESSION", ("gzip", "zstd")),
     _k("RETRO_SNAPSHOT_TTL", "int", "172800", "launch/launch_config.py", "launcher",
        "Snapshot TTL seconds → ASYNC_RL_RETRO_SNAPSHOT_TTL"),
     _k("RETRO_DETERMINISTIC", "bool", "0", "launch/launch_config.py", "launcher",
@@ -214,6 +221,11 @@ _KNOBS: list[Knob] = [
        "Volume-side manifest JSONL ledger; REQUIRED for retro mode"),
     _k("ASYNC_RL_RETRO_SNAPSHOT_KIND", "enum", "directory", "retro/env.py", "runtime",
        "Snapshot mechanism", ("directory",)),
+    _k("ASYNC_RL_RETRO_CAPTURE_MODE", "enum", "winner", "retro/env.py", "runtime",
+       "winner | all_turns (all-turns snapshot store; degrades to winner when the task image "
+       "lacks rsync/tar/gzip)", ("winner", "all_turns")),
+    _k("ASYNC_RL_RETRO_ARTIFACT_COMPRESSION", "enum", "gzip", "retro/env.py", "runtime",
+       "all_turns tarball compression", ("gzip", "zstd")),
     _k("ASYNC_RL_RETRO_SNAPSHOT_PATH", "path", "/app", "retro/env.py", "runtime",
        "Sandbox-side SOURCE dir to photograph (P9: rename to _SNAPSHOT_SOURCE_DIR)"),
     _k("ASYNC_RL_RETRO_SNAPSHOT_TTL", "int", "172800", "retro/env.py", "runtime",

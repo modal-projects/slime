@@ -95,6 +95,18 @@ class RetroSnapshotManifest:
     sample_metadata: dict[str, Any] = field(default_factory=dict)
     compatibility: Compatibility = field(default_factory=Compatibility)
 
+    # All-turns capture (RETRO_CAPTURE_MODE=all_turns) — additive, default-empty
+    # so winner-mode rows are unchanged. ``turns`` holds TurnRecord dicts (every
+    # post-tool boundary of the source trajectory), ``score_trace`` the
+    # boundary-attributed submission scores, and ``artifact`` describes the
+    # packed staging tarball inside the snapshot ({"member", "compression",
+    # "member_root"}); empty artifact = plain directory snapshot (winner mode).
+    # ``turn_index``/``remaining_*`` stay the DEFAULT branch point (parity with
+    # winner selection); a lease-time policy may override via retro_branch_turn.
+    turns: list = field(default_factory=list)
+    score_trace: list = field(default_factory=list)
+    artifact: dict[str, Any] = field(default_factory=dict)
+
     status: SnapshotStatus = SnapshotStatus.AVAILABLE
     leased_by: str = ""
     consumed_by_rollout: int | None = None

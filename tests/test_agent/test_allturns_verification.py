@@ -57,18 +57,33 @@ except ImportError:  # pragma: no cover - CI path
 
     _exc.FormatError = _FormatError
     _exc.LimitsExceeded = _LimitsExceeded
+    for _exc_name in ("Submitted", "InterruptAgentFlow", "NonTerminatingException"):
+        setattr(_exc, _exc_name, type(_exc_name, (Exception,), {}))
     _actions = types.ModuleType("minisweagent.models.utils.actions_toolcall")
     _actions.format_toolcall_observation_messages = lambda **kwargs: []
     _actions.BASH_TOOL = {"name": "bash", "input_schema": {}}
+    _default = types.ModuleType("minisweagent.agents.default")
+    _default.DefaultAgent = type("DefaultAgent", (object,), {})  # subclassable; never instantiated here
     for _name, _mod in {
         "minisweagent": types.ModuleType("minisweagent"),
         "minisweagent.exceptions": _exc,
+        "minisweagent.agents": types.ModuleType("minisweagent.agents"),
+        "minisweagent.agents.default": _default,
         "minisweagent.models": types.ModuleType("minisweagent.models"),
         "minisweagent.models.utils": types.ModuleType("minisweagent.models.utils"),
         "minisweagent.models.utils.actions_toolcall": _actions,
     }.items():
         _mod.__path__ = []
         sys.modules[_name] = _mod
+try:  # pragma: no cover - retro/env.py's import chain reaches core.sandbox
+    import modal  # noqa: F401
+except ImportError:  # pragma: no cover - CI path
+    from unittest.mock import MagicMock
+
+    _modal_stub = types.ModuleType("modal")
+    _modal_stub.__path__ = []
+    _modal_stub.__getattr__ = lambda name: MagicMock()
+    sys.modules["modal"] = _modal_stub
 try:  # pragma: no cover
     import jinja2  # noqa: F401
 except ImportError:  # pragma: no cover - CI path
@@ -599,6 +614,194 @@ def test_pool_gc_removes_blob_with_snapshot(tmp_path):
     asyncio.run(lease.consume(rollout_id=7))
     assert deleted == ["im-gc"]
     assert not blob_path.exists(), "checkpoint blob must be GC'd with its snapshot"
+
+
+# --------------------------------------------------------------------------
+# Part E: all-turns capture mode (RETRO_CAPTURE_MODE=all_turns) in retro/env.py
+# --------------------------------------------------------------------------
+
+
+class _CaptureSandbox:
+    """Fake env-side sandbox: records exec commands, serves the submissions log."""
+
+    def __init__(self, tools: str = "rsync\ntar\ngzip\n"):
+        self.tools = tools
+        self.log_text = ""
+        self.exec_log: list[str] = []
+
+    def exec(self, cmd: str, **kwargs):
+        self.exec_log.append(cmd)
+        if cmd.startswith("command -v"):
+            return 0, self.tools, ""
+        return 0, "", ""
+
+    def read_file(self, path: str) -> str:
+        return self.log_text
+
+
+def _drive_all_turns_episode(monkeypatch, tmp_path, *, sandbox=None, n_turns=4, event_turn=2):
+    """Run n_turns through the REAL query loop + the REAL retro-env turn callback."""
+    import agentic_rl.retro.env as retro_env_mod
+    from agentic_rl.retro.env import RetroFrontierCsEnv, _EpisodeContext
+    from agentic_rl.retro.selector import EventSelector, SelectionConfig
+
+    manifest_path = tmp_path / "manifests.jsonl"
+    monkeypatch.setenv("ASYNC_RL_RETRO_MANIFEST_PATH", str(manifest_path))
+    tok = FakeTokenizer()
+    _stub_parser(monkeypatch)
+    model = _make_model(tok)
+    _script_generate(model, tok, [f"work TOOLCALL {t}" for t in range(n_turns)])
+    agent = SimpleNamespace(
+        messages=list(_MESSAGES),
+        n_calls=0,
+        cost=0.0,
+        extra_template_vars={},
+        config=SimpleNamespace(step_limit=75),
+        model=model,
+    )
+    sandbox = sandbox if sandbox is not None else _CaptureSandbox()
+    env = RetroFrontierCsEnv()
+    ctx = _EpisodeContext(
+        md={"instance_id": "task-1", "verifier": {"env": {"PROBLEM_ID": "p1"}}},
+        sample_metadata={"instance_id": "task-1"},
+        source={"rollout_id": 3, "group_index": 1, "sample_index": 2},
+        restore_manifest=None,
+        selector=EventSelector(SelectionConfig(min_turn=1, target_fraction=0.5, max_fraction_error=1.0)),
+        capture_mode="all_turns",
+    )
+    env._local.context = ctx
+    started = time.monotonic()
+    callback = env._turn_callback(model, sandbox, 1800, started)
+    for t in range(1, n_turns + 1):
+        msg = model.query(agent.messages)
+        agent.messages.append(msg)
+        agent.n_calls += 1
+        agent.messages.append({"role": "user", "content": f"obs {t}"})
+        if t == event_turn:
+            sandbox.log_text = _log(_done("a", 0.4))  # qualifying new best
+        callback(agent, msg, None)
+    return env, ctx, agent, model, sandbox, manifest_path
+
+
+def test_all_turns_capture_offers_one_artifact_manifest(monkeypatch, tmp_path):
+    import agentic_rl.retro.env as retro_env_mod
+    from agentic_rl.retro.backends.modal_snapshot import SnapshotResult
+    from agentic_rl.retro.manifest import SnapshotKind
+
+    env, ctx, agent, model, sandbox, manifest_path = _drive_all_turns_episode(monkeypatch, tmp_path)
+    assert ctx.capture_mode == "all_turns" and ctx.tools["rsync"]
+    assert len(ctx.recorder.records) == 4
+    staging_cmds = [cmd for cmd in sandbox.exec_log if "rsync -a --checksum" in cmd]
+    assert len(staging_cmds) == 4 and "--link-dest" not in staging_cmds[0] and "--link-dest" in staging_cmds[1]
+    assert [e["turn_index"] for e in ctx.trace.events] == [2]
+
+    packed: list[str] = []
+    monkeypatch.setattr(retro_env_mod, "pack_staging", lambda sb, root, **kw: packed.append(root) or
+                        {"member": "turns.tgz", "compression": "gzip", "member_root": "retro_turns"})
+    monkeypatch.setattr(retro_env_mod, "snapshot_sandbox", lambda sb, **kw: SnapshotResult(
+        snapshot_id="im-allturns", kind=SnapshotKind.DIRECTORY, path=kw.get("path", ""),
+        latency_seconds=0.5, ttl_seconds=kw.get("ttl_seconds"), ttl_enforced_by_sdk=True))
+    env._finalize_capture(agent, model, sandbox, total_seconds=100.0)
+
+    assert packed == ["/tmp/retro_turns"]
+    assert len(ctx.captures) == 1
+    manifest = ctx.captures[0]
+    assert manifest.artifact["member"] == "turns.tgz"
+    assert len(manifest.turns) == 4
+    assert [e["turn_index"] for e in manifest.score_trace] == [2]
+    assert manifest.turn_index == 2  # parity default = the selector's winner turn
+    assert set(manifest.agent_state) == {"checkpoint_ref", "sha256"}  # blob, not inline
+    assert (manifest_path.parent / manifest.agent_state["checkpoint_ref"]).exists()
+    assert manifest_path.exists()  # offered to the ledger
+
+
+def test_all_turns_branch_budget_matches_winner_semantics(monkeypatch, tmp_path):
+    """For the parity-default turn, deriving the budget from the TurnRecord must
+    equal the manifest's remaining_steps/seconds — the winner-mode numbers."""
+    import agentic_rl.retro.env as retro_env_mod
+    from agentic_rl.retro.backends.modal_snapshot import SnapshotResult
+    from agentic_rl.retro.env import _find_turn_record
+    from agentic_rl.retro.manifest import SnapshotKind
+    from agentic_rl.retro.turns import branch_budget
+
+    env, ctx, agent, model, sandbox, _ = _drive_all_turns_episode(monkeypatch, tmp_path)
+    monkeypatch.setattr(retro_env_mod, "pack_staging", lambda sb, root, **kw:
+                        {"member": "turns.tgz", "compression": "gzip", "member_root": "retro_turns"})
+    monkeypatch.setattr(retro_env_mod, "snapshot_sandbox", lambda sb, **kw: SnapshotResult(
+        snapshot_id="im-b", kind=SnapshotKind.DIRECTORY, path="", latency_seconds=0.1,
+        ttl_seconds=None, ttl_enforced_by_sdk=True))
+    env._finalize_capture(agent, model, sandbox, total_seconds=100.0)
+    manifest = ctx.captures[0]
+    record = _find_turn_record(manifest.turns, manifest.turn_index)
+    steps, seconds = branch_budget(
+        record, total_turns=manifest.source_total_turns, total_seconds=manifest.source_total_seconds
+    )
+    assert steps == manifest.remaining_steps
+    assert abs(seconds - manifest.remaining_seconds) <= 1  # elapsed vs int truncation
+    # and the stored final checkpoint derives exactly at the default branch turn
+    from agentic_rl.retro.backends.miniswe_checkpoint import ChainCheckpoint
+    from agentic_rl.retro.blobs import load_checkpoint
+    from agentic_rl.retro.turns import derive_checkpoint
+
+    final = ChainCheckpoint.from_dict(
+        load_checkpoint(manifest.agent_state, tmp_path / "manifests.jsonl")
+    )
+    derived = derive_checkpoint(final, record)
+    assert derived.n_calls == manifest.turn_index
+
+
+def test_missing_tools_degrade_to_winner_capture(monkeypatch, tmp_path):
+    env, ctx, agent, model, sandbox, _ = _drive_all_turns_episode(
+        monkeypatch, tmp_path, sandbox=_CaptureSandbox(tools="tar\ngzip\n")
+    )
+    assert ctx.capture_mode == "winner"
+    assert "rsync" in ctx.capture_disabled_reason
+    assert ctx.recorder.records == []  # no per-turn records in degraded mode
+    # the event still staged via the winner cp path, WITH a live checkpoint
+    assert len(ctx.staged) == 1 and ctx.staged[0].checkpoint is not None
+    assert any("cp -a" in cmd and "retro_candidates" in cmd for cmd in sandbox.exec_log)
+
+
+def test_pack_and_turn_restore_command_surfaces(monkeypatch):
+    import agentic_rl.retro.backends.modal_snapshot as snap_mod
+
+    class _RawSandbox:
+        def __init__(self):
+            self.cmds: list[str] = []
+            self.mounts: list[tuple[str, object]] = []
+
+        def exec(self, *args, text=True):
+            self.cmds.append(args[-1])
+            return SimpleNamespace(
+                stdout=SimpleNamespace(read=lambda: ""),
+                stderr=SimpleNamespace(read=lambda: ""),
+                wait=lambda: 0,
+            )
+
+        def mount_image(self, path, image):
+            self.mounts.append((path, image))
+
+        def unmount_image(self, path):
+            pass
+
+    raw = _RawSandbox()
+    artifact = snap_mod.pack_staging(raw, "/tmp/retro_turns", compression="gzip")
+    assert artifact == {"member": "turns.tgz", "compression": "gzip", "member_root": "retro_turns"}
+    assert "tar -z -cf /tmp/retro_artifact/turns.tgz -C /tmp retro_turns" in raw.cmds[-1]
+    with pytest.raises(ValueError, match="compression"):
+        snap_mod.pack_staging(raw, "/tmp/retro_turns", compression="lz4")
+
+    monkeypatch.setattr(snap_mod, "_modal", lambda: SimpleNamespace(
+        Image=SimpleNamespace(from_id=lambda snapshot_id: f"image:{snapshot_id}")))
+    result = snap_mod.restore_turn_from_artifact(
+        raw, "im-42", artifact=artifact, turn_index=42, target_path="/app"
+    )
+    assert raw.mounts[-1] == ("/mnt/retro_snapshot", "image:im-42")
+    restore_cmd = raw.cmds[-1]
+    assert "tar -xf /mnt/retro_snapshot/turns.tgz" in restore_cmd
+    assert "/tmp/retro_extract/retro_turns/0042" in restore_cmd
+    assert "cp -a /tmp/retro_extract/retro_turns/0042/. /app/" in restore_cmd
+    assert result.copied_to_writable
 
 
 if __name__ == "__main__":

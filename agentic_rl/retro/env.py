@@ -19,16 +19,36 @@ from .buffer import ManifestStore
 from .manifest import Compatibility, RetroSnapshotManifest, SnapshotKind, SnapshotStatus
 from .backends.miniswe_checkpoint import ChainCheckpoint, capture_checkpoint, restore_agent, restore_recording_model
 from .selector import BranchEvent, EventSelector, SelectionConfig, assign_event_type
-from .backends.modal_snapshot import RestoreResult, SnapshotResult, restore_directory, snapshot_sandbox
+from .backends.modal_snapshot import (
+    RestoreResult,
+    SnapshotResult,
+    pack_staging,
+    restore_directory,
+    restore_turn_from_artifact,
+    snapshot_sandbox,
+)
+from .turns import (
+    ScoreTraceBuilder,
+    TurnRecord,
+    TurnRecorder,
+    branch_budget,
+    derive_checkpoint,
+    probe_capture_tools,
+    staging_command,
+    turn_dir,
+)
 
 RETRO_MANIFEST_KEY = "retro_manifest"
+RETRO_BRANCH_TURN_KEY = "retro_branch_turn"
 _STAGING_ROOT = "/tmp/retro_candidates"
+_TURNS_ROOT = "/tmp/retro_turns"
+_ARTIFACT_DIR = "/tmp/retro_artifact"
 
 
 @dataclass(frozen=True)
 class _StagedCandidate:
     event: BranchEvent
-    checkpoint: ChainCheckpoint
+    checkpoint: ChainCheckpoint | None  # None in all_turns mode (derived at restore)
     workspace_path: str
 
 
@@ -39,10 +59,19 @@ class _EpisodeContext:
     source: dict[str, Any]
     restore_manifest: RetroSnapshotManifest | None
     selector: EventSelector | None
+    capture_mode: str = "winner"
     staged: list[_StagedCandidate] = field(default_factory=list)
     captures: list[RetroSnapshotManifest] = field(default_factory=list)
     snapshot_results: list[SnapshotResult] = field(default_factory=list)
     restore_result: RestoreResult | None = None
+    # all_turns capture state
+    recorder: TurnRecorder = field(default_factory=TurnRecorder)
+    trace: ScoreTraceBuilder = field(default_factory=ScoreTraceBuilder)
+    tools: dict[str, bool] | None = None
+    staged_prev_turn: int | None = None
+    capture_disabled_reason: str = ""
+    # branch-side: the boundary record replay continues from (all_turns manifests)
+    branch_record: TurnRecord | None = None
 
 
 class RetroFrontierCsEnv(FrontierCsEnv):
@@ -61,8 +90,10 @@ class RetroFrontierCsEnv(FrontierCsEnv):
         md["_retro_sample_metadata"] = {
             key: value
             for key, value in source_metadata.items()
-            if key not in (RETRO_MANIFEST_KEY, "retro_sibling", "agentic")
+            if key not in (RETRO_MANIFEST_KEY, RETRO_BRANCH_TURN_KEY, "retro_sibling", "agentic")
         }
+        branch_turn = source_metadata.get(RETRO_BRANCH_TURN_KEY)
+        md["_retro_branch_turn"] = int(branch_turn) if branch_turn is not None else None
         md["_retro_sample_metadata"]["_retro_prompt"] = sample.prompt
         md["_retro_sample_metadata"]["_retro_label"] = sample.label
         md["_retro_source"] = {
@@ -82,16 +113,32 @@ class RetroFrontierCsEnv(FrontierCsEnv):
             source=source,
             restore_manifest=restore_manifest,
             selector=selector,
+            capture_mode=_capture_mode() if restore_manifest is None else "winner",
         )
         self._local.context = ctx
         branch_limits = limits
         if restore_manifest is not None:
             restore_manifest.compatibility.assert_matches(_compatibility(md))
-            branch_limits = replace(
-                limits,
-                max_steps=restore_manifest.remaining_steps,
-                episode_timeout=restore_manifest.remaining_seconds,
-            )
+            if restore_manifest.artifact and restore_manifest.turns:
+                # All-turns manifest: the branch point is the lease-time choice
+                # (retro_branch_turn) or the capture-time parity default.
+                requested = md.get("_retro_branch_turn")
+                ctx.branch_record = _find_turn_record(
+                    restore_manifest.turns,
+                    restore_manifest.turn_index if requested is None else requested,
+                )
+                steps, seconds = branch_budget(
+                    ctx.branch_record,
+                    total_turns=restore_manifest.source_total_turns,
+                    total_seconds=restore_manifest.source_total_seconds,
+                )
+                branch_limits = replace(limits, max_steps=steps, episode_timeout=seconds)
+            else:
+                branch_limits = replace(
+                    limits,
+                    max_steps=restore_manifest.remaining_steps,
+                    episode_timeout=restore_manifest.remaining_seconds,
+                )
         try:
             result = super().rollout(md, model=model, limits=branch_limits)
             extra = dict(result.extra)
@@ -103,11 +150,20 @@ class RetroFrontierCsEnv(FrontierCsEnv):
                     "estimated_bytes": sum(item.estimated_bytes or 0 for item in ctx.snapshot_results),
                     "estimated_files": sum(item.estimated_files or 0 for item in ctx.snapshot_results),
                 }
+            if ctx.capture_mode == "all_turns" or ctx.capture_disabled_reason:
+                extra["retro_all_turns"] = {
+                    "mode": ctx.capture_mode,
+                    "recorded_turns": len(ctx.recorder.records),
+                    "trace_events": len(ctx.trace.events),
+                    "chain_resets": ctx.recorder.chain_seq,
+                    "disabled_reason": ctx.capture_disabled_reason,
+                }
             if restore_manifest is not None:
                 extra["retro_branch"] = {
                     "snapshot_id": restore_manifest.snapshot_id,
                     "event_type": restore_manifest.event_type,
                     "turn_index": restore_manifest.turn_index,
+                    "branch_turn": ctx.branch_record.turn_index if ctx.branch_record else None,
                     "inherited_score": restore_manifest.score,
                     "inherited_best": restore_manifest.best_score,
                     "source_weight_version": restore_manifest.source_weight_version,
@@ -137,11 +193,20 @@ class RetroFrontierCsEnv(FrontierCsEnv):
                 "retro filesystem restore is not enabled in the agent path; "
                 "select directory snapshots after the Phase-0 smoke"
             )
-        ctx.restore_result = restore_directory(
-            sandbox,
-            manifest.snapshot_id,
-            target_path=manifest.snapshot_path,
-        )
+        if ctx.branch_record is not None:
+            ctx.restore_result = restore_turn_from_artifact(
+                sandbox,
+                manifest.snapshot_id,
+                artifact=manifest.artifact,
+                turn_index=ctx.branch_record.turn_index,
+                target_path=manifest.snapshot_path,
+            )
+        else:
+            ctx.restore_result = restore_directory(
+                sandbox,
+                manifest.snapshot_id,
+                target_path=manifest.snapshot_path,
+            )
         return sandbox
 
     def _pre_agent_setup(self, sb, task_dir: Path, md: dict[str, Any]) -> None:
@@ -163,6 +228,10 @@ class RetroFrontierCsEnv(FrontierCsEnv):
                     os.environ.get("ASYNC_RL_RETRO_MANIFEST_PATH"),
                 )
             )
+            if ctx.branch_record is not None:
+                # All-turns manifest stores ONE final checkpoint; the turn-t
+                # state is derived by digest-verified truncation.
+                checkpoint = derive_checkpoint(checkpoint, ctx.branch_record)
             restore_recording_model(model, checkpoint)
             step_limit = checkpoint.n_calls + max_steps
 
@@ -191,6 +260,7 @@ class RetroFrontierCsEnv(FrontierCsEnv):
             if checkpoint is None and not getattr(model, "aborted", False):
                 self._finalize_capture(
                     agent,
+                    model,
                     sandbox,
                     total_seconds=time.monotonic() - started,
                 )
@@ -205,17 +275,61 @@ class RetroFrontierCsEnv(FrontierCsEnv):
             ctx = self._context()
             if ctx.selector is None:
                 return
+            if ctx.capture_mode == "all_turns" and ctx.tools is None:
+                ctx.tools = probe_capture_tools(sandbox)
+                missing = [tool for tool in ("rsync", "tar", "gzip") if not ctx.tools.get(tool)]
+                if missing:
+                    # Task images are converter-built; degrade to winner capture
+                    # rather than losing the episode (surfaces in retro_all_turns).
+                    ctx.capture_mode = "winner"
+                    ctx.capture_disabled_reason = f"missing tools: {','.join(missing)}"
+            log_text = sandbox.read_file(SUBMISSIONS_LOG)
+            elapsed = time.monotonic() - started
             event = ctx.selector.observe_log(
-                sandbox.read_file(SUBMISSIONS_LOG),
+                log_text,
                 turn_index=agent.n_calls,
                 max_steps=agent.config.step_limit,
-                elapsed_seconds=time.monotonic() - started,
+                elapsed_seconds=elapsed,
                 wall_time_seconds=wall_time_sec,
             )
-            if event is not None:
+            if ctx.capture_mode == "all_turns":
+                self._stage_turn(agent, model, sandbox, event, log_text=log_text, elapsed=elapsed)
+            elif event is not None:
                 self._stage_candidate(agent, model, sandbox, event)
 
         return callback
+
+    def _stage_turn(self, agent, model, sandbox, event: BranchEvent | None, *, log_text: str, elapsed: float) -> None:
+        """all_turns: stage EVERY post-tool boundary; selection happens later."""
+
+        ctx = self._context()
+        turn = int(agent.n_calls)
+        source_path = os.environ.get("ASYNC_RL_RETRO_SNAPSHOT_PATH", "/app")
+        try:
+            sandbox.exec(
+                staging_command(source_path, _TURNS_ROOT, turn, prev_turn_index=ctx.staged_prev_turn),
+                cwd="/",
+                check=True,
+                timeout=120,
+            )
+        except Exception as exc:  # noqa: BLE001 - capture must never kill an episode
+            ctx.capture_mode = "winner"
+            ctx.capture_disabled_reason = f"staging failed at turn {turn}: {exc}"
+            # Prior all_turns candidates carry no checkpoint (it would have been
+            # derived from the final blob) — unusable once degraded to winner.
+            ctx.staged = [candidate for candidate in ctx.staged if candidate.checkpoint is not None]
+            if event is not None:
+                self._stage_candidate(agent, model, sandbox, event)
+            return
+        ctx.staged_prev_turn = turn
+        ctx.recorder.record(agent, model, turn_index=turn, elapsed_seconds=elapsed, ts=time.time())
+        ctx.trace.observe(turn, log_text)
+        if event is not None:
+            # Lightweight candidate: the turn dir already exists and the
+            # checkpoint is derived at restore time from the final blob.
+            ctx.staged.append(
+                _StagedCandidate(event=event, checkpoint=None, workspace_path=turn_dir(_TURNS_ROOT, turn))
+            )
 
     def _stage_candidate(self, agent, model, sandbox, event: BranchEvent) -> None:
         ctx = self._context()
@@ -238,7 +352,7 @@ class RetroFrontierCsEnv(FrontierCsEnv):
             )
         )
 
-    def _finalize_capture(self, agent, sandbox, *, total_seconds: float) -> None:
+    def _finalize_capture(self, agent, model, sandbox, *, total_seconds: float) -> None:
         ctx = self._context()
         if ctx.selector is None or not ctx.staged:
             return
@@ -248,6 +362,9 @@ class RetroFrontierCsEnv(FrontierCsEnv):
             total_seconds=total_seconds,
         )
         if selected is None:
+            return
+        if ctx.capture_mode == "all_turns":
+            self._finalize_all_turns(agent, model, sandbox, selected)
             return
         staged = next(
             candidate
@@ -316,15 +433,110 @@ class RetroFrontierCsEnv(FrontierCsEnv):
         if manifest_path:
             ManifestStore(manifest_path).append(manifest)
 
+    def _finalize_all_turns(self, agent, model, sandbox, selected: BranchEvent) -> None:
+        """all_turns: ONE tarball artifact + ONE final checkpoint per trajectory.
+
+        The manifest's turn_index/remaining_* stay the parity default (the same
+        branch point winner mode would have snapshotted), so arms that never
+        set a lease-time policy reproduce today's behavior on the new store.
+        """
+
+        ctx = self._context()
+        records = [record for record in ctx.recorder.records if record.chain_seq == ctx.recorder.chain_seq]
+        if not records:
+            return
+        by_turn = {record.turn_index: record for record in records}
+        default = by_turn.get(selected.turn_index)
+        if default is None:
+            return  # a chain reset invalidated the default branch point
+        final_checkpoint = capture_checkpoint(agent, model)
+        compression = os.environ.get("ASYNC_RL_RETRO_ARTIFACT_COMPRESSION", "gzip")
+        if compression == "zstd" and not (ctx.tools or {}).get("zstd"):
+            compression = "gzip"
+        artifact = pack_staging(sandbox, _TURNS_ROOT, archive_dir=_ARTIFACT_DIR, compression=compression)
+        ttl = _env_int("ASYNC_RL_RETRO_SNAPSHOT_TTL", 48 * 60 * 60)
+        snapshot = snapshot_sandbox(
+            sandbox,
+            kind=SnapshotKind.DIRECTORY,
+            path=_ARTIFACT_DIR,
+            ttl_seconds=ttl,
+        )
+        capture_status = SnapshotStatus(
+            os.environ.get("ASYNC_RL_RETRO_CAPTURE_STATUS", SnapshotStatus.AVAILABLE.value)
+        )
+        if capture_status not in (SnapshotStatus.AVAILABLE, SnapshotStatus.TENTATIVE):
+            raise ValueError("retro capture status must be available or tentative")
+        manifest_path = os.environ.get("ASYNC_RL_RETRO_MANIFEST_PATH")
+        checkpoint_payload = final_checkpoint.to_dict()
+        if manifest_path:
+            agent_state = write_checkpoint_blob(manifest_path, snapshot.snapshot_id, checkpoint_payload)
+        else:
+            agent_state = {"checkpoint": checkpoint_payload}
+        source_version = default.source_weight_version
+        manifest = RetroSnapshotManifest.create(
+            snapshot_id=snapshot.snapshot_id,
+            snapshot_kind=SnapshotKind.DIRECTORY,
+            snapshot_path=os.environ.get("ASYNC_RL_RETRO_SNAPSHOT_PATH", "/app"),
+            ttl_seconds=ttl,
+            task_type="frontier_cs",
+            instance_id=str(ctx.md["instance_id"]),
+            problem_id=str((ctx.md.get("verifier") or {}).get("env", {}).get("PROBLEM_ID") or ""),
+            event_type=selected.event_type.value,
+            turn_index=selected.turn_index,
+            remaining_steps=selected.remaining_steps,
+            remaining_seconds=selected.remaining_seconds,
+            source_run_tag=os.environ.get("ASYNC_RL_RETRO_RUN_TAG", ""),
+            source_rollout_id=ctx.source.get("rollout_id"),
+            source_group_index=ctx.source.get("group_index"),
+            source_sample_index=ctx.source.get("sample_index"),
+            source_weight_version=source_version,
+            source_update=_version_number(source_version),
+            source_total_turns=selected.source_total_turns,
+            source_total_seconds=selected.source_total_seconds,
+            target_fraction=ctx.selector.config.target_fraction,
+            trajectory_fraction=selected.trajectory_fraction,
+            fraction_error=selected.fraction_error,
+            score=selected.score,
+            best_score=selected.best_score,
+            agent_state=agent_state,
+            sample_metadata=ctx.sample_metadata,
+            compatibility=_compatibility(ctx.md),
+            status=capture_status,
+            turns=[record.to_dict() for record in records],
+            score_trace=list(ctx.trace.events),
+            artifact=artifact,
+        )
+        ctx.captures.append(manifest)
+        ctx.snapshot_results.append(snapshot)
+        if manifest_path:
+            ManifestStore(manifest_path).append(manifest)
+
     @staticmethod
     def _cleanup_staging(sandbox) -> None:
-        sandbox.exec(f"rm -rf {shlex.quote(_STAGING_ROOT)}", cwd="/", check=False, timeout=60)
+        roots = " ".join(shlex.quote(root) for root in (_STAGING_ROOT, _TURNS_ROOT, _ARTIFACT_DIR))
+        sandbox.exec(f"rm -rf {roots}", cwd="/", check=False, timeout=60)
 
     def _context(self) -> _EpisodeContext:
         ctx = getattr(self._local, "context", None)
         if ctx is None:
             raise RuntimeError("retro episode context is unavailable")
         return ctx
+
+
+def _capture_mode() -> str:
+    mode = os.environ.get("ASYNC_RL_RETRO_CAPTURE_MODE", "winner").strip().lower() or "winner"
+    if mode not in ("winner", "all_turns"):
+        raise ValueError(f"ASYNC_RL_RETRO_CAPTURE_MODE must be winner or all_turns, got {mode!r}")
+    return mode
+
+
+def _find_turn_record(turns: list, turn_index: int) -> TurnRecord:
+    for value in turns:
+        record = TurnRecord.from_dict(value) if isinstance(value, dict) else value
+        if record.turn_index == int(turn_index):
+            return record
+    known = sorted(int(value["turn_index"]) if isinstance(value, dict) else value.turn_index for value in turns)
+    raise ValueError(f"branch turn {turn_index} is not among the manifest's recorded turns {known[:8]}…")
 
 
 def _selection_config(source: dict[str, Any]) -> SelectionConfig:

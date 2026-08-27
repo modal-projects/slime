@@ -121,6 +121,92 @@ def restore_directory(
     )
 
 
+def pack_staging(
+    sandbox: Any,
+    staging_root: str,
+    *,
+    archive_dir: str = "/tmp/retro_artifact",
+    compression: str = "gzip",
+    timeout_seconds: int = 300,
+) -> dict[str, str]:
+    """Pack the per-turn staging root into ONE tarball ready to snapshot.
+
+    The bench (profiles/retro_snapshot_bench) showed hardlink dedup does NOT
+    survive snapshot_directory → mount (23x expansion); tar stores hardlinks as
+    link entries and compresses, so the trajectory artifact must be a single
+    opaque file. Returns the manifest ``artifact`` dict.
+    """
+
+    if compression == "zstd":
+        flag, ext = "--zstd", "tzst"
+    elif compression == "gzip":
+        flag, ext = "-z", "tgz"
+    else:
+        raise ValueError(f"unsupported artifact compression {compression!r}")
+    root = staging_root.rstrip("/")
+    parent, member_root = root.rsplit("/", 1)
+    member = f"turns.{ext}"
+    _exec_checked(
+        sandbox,
+        f"rm -rf {_q(archive_dir)} && mkdir -p {_q(archive_dir)} && "
+        f"tar {flag} -cf {_q(archive_dir + '/' + member)} -C {_q(parent or '/')} {_q(member_root)}",
+        timeout=timeout_seconds,
+    )
+    return {"member": member, "compression": compression, "member_root": member_root}
+
+
+def restore_turn_from_artifact(
+    sandbox: Any,
+    snapshot_id: str,
+    *,
+    artifact: dict[str, Any],
+    turn_index: int,
+    target_path: str = "/app",
+    mount_path: str = DEFAULT_DIRECTORY_MOUNT,
+    timeout_seconds: int = 300,
+) -> RestoreResult:
+    """Mount the artifact snapshot, unpack the tarball, install one turn dir.
+
+    Bench timings: mount+cp of the single tarball ~0.9 s, unpack ~0.5 s, turn
+    copy ~0.15 s — faster than restoring an expanded staging directory.
+    """
+
+    if not snapshot_id:
+        raise ValueError("restore_turn_from_artifact requires snapshot_id")
+    member = str(artifact.get("member") or "")
+    member_root = str(artifact.get("member_root") or "")
+    if not member or not member_root:
+        raise ValueError(f"artifact dict is incomplete: {artifact!r}")
+    modal = _modal()
+    raw = _raw_sandbox(sandbox)
+    turn_dir = f"/tmp/retro_extract/{member_root}/{turn_index:04d}"
+    started = time.perf_counter()
+    try:
+        raw.mount_image(mount_path, modal.Image.from_id(snapshot_id))
+        _exec_checked(
+            sandbox,
+            f"rm -rf /tmp/retro_extract && mkdir -p /tmp/retro_extract && "
+            f"tar -xf {_q(mount_path + '/' + member)} -C /tmp/retro_extract && "
+            f"test -d {_q(turn_dir)} && "
+            f"rm -rf {_q(target_path)} && mkdir -p {_q(target_path)} && "
+            f"cp -a {_q(turn_dir)}/. {_q(target_path)}/ && "
+            f"rm -rf /tmp/retro_extract",
+            timeout=timeout_seconds,
+        )
+        try:
+            raw.unmount_image(mount_path)
+        except Exception:  # noqa: BLE001 - copied state is already usable
+            pass
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"restore_turn_from_artifact(turn={turn_index}): {exc}") from exc
+    return RestoreResult(
+        latency_seconds=time.perf_counter() - started,
+        copied_to_writable=True,
+        mount_path=mount_path,
+        target_path=target_path,
+    )
+
+
 def delete_snapshot(snapshot_id: str) -> None:
     if not snapshot_id:
         return
@@ -181,9 +267,12 @@ def _exec(sandbox: Any, command: str) -> tuple[int, str, str]:
     return process.wait(), stdout, stderr
 
 
-def _exec_checked(sandbox: Any, command: str) -> None:
+def _exec_checked(sandbox: Any, command: str, timeout: int | None = None) -> None:
     if hasattr(sandbox, "exec") and hasattr(sandbox, "sb"):
-        sandbox.exec(command, cwd="/", check=True)
+        if timeout is None:
+            sandbox.exec(command, cwd="/", check=True)
+        else:
+            sandbox.exec(command, cwd="/", check=True, timeout=timeout)
         return
     process = sandbox.exec("bash", "-lc", command, text=True)
     stdout = process.stdout.read()

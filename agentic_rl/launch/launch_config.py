@@ -371,6 +371,8 @@ class RetroSlimeConfig(_SlimeConfigBase):
                     "ASYNC_RL_RETRO_RUN_TAG": state_tag,
                     "ASYNC_RL_RETRO_MANIFEST_PATH": manifest_path,
                     "ASYNC_RL_RETRO_SNAPSHOT_KIND": env.get("RETRO_SNAPSHOT_KIND", "directory"),
+                    "ASYNC_RL_RETRO_CAPTURE_MODE": env.get("RETRO_CAPTURE_MODE", "winner"),
+                    "ASYNC_RL_RETRO_ARTIFACT_COMPRESSION": env.get("RETRO_ARTIFACT_COMPRESSION", "gzip"),
                     "ASYNC_RL_RETRO_SNAPSHOT_PATH": "/app",
                     "ASYNC_RL_RETRO_SNAPSHOT_TTL": env.get(
                         "RETRO_SNAPSHOT_TTL", str(48 * 60 * 60)
