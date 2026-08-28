@@ -28,6 +28,8 @@ from collections import Counter
 
 import numpy as np
 
+from agentic_rl.obs import metric_filter
+
 logger = logging.getLogger("agentic_rl")
 
 _MEAN_KEYS = ("turns", "format_errors", "output_tokens", "response_tokens", "chains")
@@ -490,6 +492,11 @@ def _async_metrics(samples, now: float, trainer_version: int | None = None) -> d
 def log_rollout_data(rollout_id, args, samples, rollout_extra_metrics, rollout_time) -> bool:
     from slime.ray.rollout import compute_rollout_step
     from slime.utils import logging_utils
+
+    # First call happens before the RolloutManager logs its core rollout/perf
+    # dict, so this puts the rating-1 metric filter in front of every rollout-
+    # side W&B write plus the sgl_engine scraper (no slime edits needed).
+    metric_filter.install()
 
     # Rollout t generates under absolute weight version t + 1 (the updater
     # increments before publishing; resumes preserve absolute numbering).
