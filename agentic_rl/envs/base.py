@@ -120,7 +120,11 @@ class RolloutEnv(ABC):
         archive = f"/tmp/.upload_{abs(hash(str(host_dir))) % 10**8}.tgz"
         sb.write_file(archive, buf.getvalue())
         q = shlex.quote
-        sb.exec(f"rm -rf {q(sandbox_dir)} && mkdir -p {q(sandbox_dir)} && tar -xzf {q(archive)} -C {q(sandbox_dir)}", check=True, timeout=120)
+        sb.exec(
+            f"rm -rf {q(sandbox_dir)} && mkdir -p {q(sandbox_dir)} && tar -xzf {q(archive)} -C {q(sandbox_dir)}",
+            check=True,
+            timeout=120,
+        )
 
 
 def coerce_prompt(prompt) -> str:

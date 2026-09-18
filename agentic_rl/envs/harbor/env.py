@@ -61,7 +61,9 @@ def _meets_min_reward(rewards: dict[str, Any] | None, min_reward: float | dict[s
     if min_reward is None:
         return True
     if isinstance(min_reward, dict):
-        return all(rewards is not None and k in rewards and float(rewards[k]) >= float(v) for k, v in min_reward.items())
+        return all(
+            rewards is not None and k in rewards and float(rewards[k]) >= float(v) for k, v in min_reward.items()
+        )
     return rewards is not None and "reward" in rewards and float(rewards["reward"]) >= float(min_reward)
 
 
@@ -142,7 +144,15 @@ class HarborEnv(RolloutEnv):
     def _step_specs(self, md: dict[str, Any]) -> list[dict[str, Any]]:
         if md["steps"]:
             return md["steps"]
-        return [{"name": None, "instruction": md["problem_statement"], "tests_path": "tests", "verifier": md["verifier"], "min_reward": None}]
+        return [
+            {
+                "name": None,
+                "instruction": md["problem_statement"],
+                "tests_path": "tests",
+                "verifier": md["verifier"],
+                "min_reward": None,
+            }
+        ]
 
     def rollout(self, md: dict[str, Any], *, model, limits: EpisodeLimits) -> RewardResult:
         def agent_leg(sb, instruction: str, budget_sec: int) -> dict:
@@ -162,7 +172,9 @@ class HarborEnv(RolloutEnv):
         t0 = time.monotonic()
         artifacts: dict[str, Any] = {}
         sandbox_exec: dict[str, int] = {}
-        with self._sandbox(md, lifetime=agent_budget_sec + limits.grade_timeout + 300, exec_timeout=limits.exec_timeout) as sb:
+        with self._sandbox(
+            md, lifetime=agent_budget_sec + limits.grade_timeout + 300, exec_timeout=limits.exec_timeout
+        ) as sb:
             timer.record("boot", sb.boot_time)
             workdir = md["workdir"] or self._detect_workdir(sb)
             q = shlex.quote
@@ -176,7 +188,9 @@ class HarborEnv(RolloutEnv):
             for step in steps:
                 remaining = int(deadline - time.monotonic())
                 if remaining <= 0:
-                    logger.warning("[harbor] %s: agent budget exhausted before step %r", md["instance_id"], step["name"])
+                    logger.warning(
+                        "[harbor] %s: agent budget exhausted before step %r", md["instance_id"], step["name"]
+                    )
                     break
                 leg_md = {**md, "workdir": workdir}
                 with timer.phase("prep"):
@@ -206,9 +220,15 @@ class HarborEnv(RolloutEnv):
                         logger.exception("[harbor] %s: grading failed (%s)", md["instance_id"], grading_status)
                         break
                 shaped = rewards_mod.shape(signal, rewards_mod.resolve_shape(md))
-                step_results.append({"name": step["name"], "rewards": rewards, "reward": shaped, "is_solved": signal.is_solved})
+                step_results.append(
+                    {"name": step["name"], "rewards": rewards, "reward": shaped, "is_solved": signal.is_solved}
+                )
                 if not _meets_min_reward(rewards, step.get("min_reward")):
-                    logger.info("[harbor] %s: step %r below min_reward; aborting remaining steps", md["instance_id"], step["name"])
+                    logger.info(
+                        "[harbor] %s: step %r below min_reward; aborting remaining steps",
+                        md["instance_id"],
+                        step["name"],
+                    )
                     break
 
             # Pull post-episode artifacts off the still-live sandbox (the env tears
@@ -228,7 +248,9 @@ class HarborEnv(RolloutEnv):
             }
 
         reward = self._aggregate(steps, step_results, md["reward_strategy"])
-        is_solved = bool(step_results) and len(step_results) == len(steps) and all(r.get("is_solved") for r in step_results)
+        is_solved = (
+            bool(step_results) and len(step_results) == len(steps) and all(r.get("is_solved") for r in step_results)
+        )
         # Episode-level outcome shaping (rewards.py): fold the mid-episode judge
         # submissions (frontier_cs artifacts) into the training scalar per the
         # ASYNC_RL_OUTCOME_REWARD / ASYNC_RL_SOLVED_BONUS switches. Defaults are
@@ -279,19 +301,40 @@ class HarborEnv(RolloutEnv):
         record (``md`` carries its per-episode attribution id)."""
         return {}
 
-    def _verify(self, sb, *, tests_dir: Path, workdir: str, verifier: dict[str, Any], eval_timeout_sec: int | None, instance_id: str) -> dict[str, Any] | None:
+    def _verify(
+        self,
+        sb,
+        *,
+        tests_dir: Path,
+        workdir: str,
+        verifier: dict[str, Any],
+        eval_timeout_sec: int | None,
+        instance_id: str,
+    ) -> dict[str, Any] | None:
         # A config-level agentic_eval_timeout (eval_timeout_sec) OVERRIDES the per-task
         # verifier timeout when set; otherwise fall back to the task's baked timeout_sec
         # (the converter bakes 1800s, which lets a hung test suite burn the full budget
         # and gate the whole sync step). Final fallback 600s if neither is present.
         timeout = int(eval_timeout_sec or verifier.get("timeout_sec") or 600)
         self.upload_dir(sb, tests_dir, "/tests")
-        sb.exec("chmod +x /tests/test.sh && rm -f /logs/verifier/reward.json /logs/verifier/reward.txt", check=True, timeout=60)
+        sb.exec(
+            "chmod +x /tests/test.sh && rm -f /logs/verifier/reward.json /logs/verifier/reward.txt",
+            check=True,
+            timeout=60,
+        )
         env = _resolve_env_templates(verifier.get("env"))
         q = shlex.quote
-        ec, out, err = sb.exec(f"cd {q(workdir)} && bash /tests/test.sh", env=env or None, timeout=timeout, check=False)
+        ec, out, err = sb.exec(
+            f"cd {q(workdir)} && bash /tests/test.sh", env=env or None, timeout=timeout, check=False
+        )
         if os.environ.get("HARBOR_VERIFY_DEBUG"):
-            logger.info("[harbor-verify-debug] %s: test.sh exit=%s\nstdout:\n%s\nstderr:\n%s", instance_id, ec, (out or "")[-3000:], (err or "")[-3000:])
+            logger.info(
+                "[harbor-verify-debug] %s: test.sh exit=%s\nstdout:\n%s\nstderr:\n%s",
+                instance_id,
+                ec,
+                (out or "")[-3000:],
+                (err or "")[-3000:],
+            )
         if ec in (-1, 124):
             raise TimeoutError(f"verifier timed out after {timeout}s (exit={ec})")
 
@@ -312,7 +355,9 @@ class HarborEnv(RolloutEnv):
         # No reward file: terminal-bench-style tasks end test.sh with a bare pytest run.
         if ec in (0, 1):
             return {"reward": 1.0 if ec == 0 else 0.0, "graded_from": "exit_code"}
-        logger.warning("[harbor] %s: test.sh exit=%s wrote no reward file; stderr: %s", instance_id, ec, (err or "")[-400:])
+        logger.warning(
+            "[harbor] %s: test.sh exit=%s wrote no reward file; stderr: %s", instance_id, ec, (err or "")[-400:]
+        )
         raise RuntimeError(f"verifier exited {ec} without a reward file: {(err or '')[-400:]}")
 
     # oracle check (reference solution through the exact rollout path) -------
@@ -332,12 +377,21 @@ class HarborEnv(RolloutEnv):
             self.upload_dir(sb, solution_dir, "/solution")
             q = shlex.quote
             sb.exec("chmod +x /solution/solve.sh", check=False, timeout=30)
-            ec, _, err = sb.exec(f"cd {q(md['workdir'])} && bash /solution/solve.sh", timeout=min(budget_sec, solve_timeout_sec), check=False)
+            ec, _, err = sb.exec(
+                f"cd {q(md['workdir'])} && bash /solution/solve.sh",
+                timeout=min(budget_sec, solve_timeout_sec),
+                check=False,
+            )
             if ec != 0:
                 logger.warning("[harbor-oracle] solve.sh exit=%d stderr: %s", ec, (err or "")[-400:])
             return {}
 
-        limits = EpisodeLimits(max_steps=0, episode_timeout=solve_timeout_sec * max(1, len(steps)), grade_timeout=eval_timeout_sec, eval_timeout=eval_timeout_sec)
+        limits = EpisodeLimits(
+            max_steps=0,
+            episode_timeout=solve_timeout_sec * max(1, len(steps)),
+            grade_timeout=eval_timeout_sec,
+            eval_timeout=eval_timeout_sec,
+        )
         return self._episode(md, run_leg=leg, agent_budget_sec=limits.episode_timeout, limits=limits)
 
 
@@ -345,7 +399,9 @@ def _oracle_main() -> int:
     import argparse
     from types import SimpleNamespace
 
-    parser = argparse.ArgumentParser(description="Run harbor reference solutions through the rollout path (reward should be 1.0).")
+    parser = argparse.ArgumentParser(
+        description="Run harbor reference solutions through the rollout path (reward should be 1.0)."
+    )
     parser.add_argument("jsonl", help="converted slime prompt JSONL (convert2slime/harbor.py output)")
     parser.add_argument("--task-root", help=f"task root (default: ${TASK_ROOT_ENV} or the JSONL's directory)")
     parser.add_argument("--limit", type=int, default=1)
@@ -357,7 +413,9 @@ def _oracle_main() -> int:
     if args.vm_runtime:
         os.environ["AGENTIC_SANDBOX_VM_RUNTIME"] = "1"
 
-    os.environ[TASK_ROOT_ENV] = args.task_root or os.environ.get(TASK_ROOT_ENV) or str(Path(args.jsonl).resolve().parent)
+    os.environ[TASK_ROOT_ENV] = (
+        args.task_root or os.environ.get(TASK_ROOT_ENV) or str(Path(args.jsonl).resolve().parent)
+    )
     rows = [json.loads(line) for line in open(args.jsonl, encoding="utf-8") if line.strip()]
     picked = [rows[args.index]] if args.index is not None else rows[: args.limit]
 
@@ -369,7 +427,9 @@ def _oracle_main() -> int:
         t0 = time.monotonic()
         result = env.oracle_episode(md, solve_timeout_sec=args.solve_timeout, eval_timeout_sec=args.eval_timeout)
         status = "OK " if result.is_solved else "FAIL"
-        print(f"[{status}] {md['instance_id']}: reward={result.reward:.2f} t={time.monotonic() - t0:.0f}s {result.extra}")
+        print(
+            f"[{status}] {md['instance_id']}: reward={result.reward:.2f} t={time.monotonic() - t0:.0f}s {result.extra}"
+        )
         failures += 0 if result.is_solved else 1
     return 1 if failures else 0
 

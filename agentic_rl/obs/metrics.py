@@ -68,11 +68,7 @@ def _pctl_block(prefix: str, vals, ps=(50, 90, 99), include_max=True) -> dict:
 
 
 def _timing_values(stats: list[dict], key: str) -> list[float]:
-    return [
-        float(value)
-        for stat in stats
-        if (value := (stat.get("timing") or {}).get(key)) is not None
-    ]
+    return [float(value) for stat in stats if (value := (stat.get("timing") or {}).get(key)) is not None]
 
 
 def _segment_metrics(stats: list[dict]) -> dict:
@@ -102,9 +98,7 @@ def _segment_metrics(stats: list[dict]) -> dict:
         if exec_times:
             out[f"{prefix}/exec_time_sec/mean"] = float(np.mean(exec_times))
             out |= _pctl_block(f"{prefix}/exec_time_sec", exec_times, ps=(90,))
-        out[f"{prefix}/removed_frac"] = float(
-            np.mean([1.0 if stat.get("_remove_sample") else 0.0 for stat in subset])
-        )
+        out[f"{prefix}/removed_frac"] = float(np.mean([1.0 if stat.get("_remove_sample") else 0.0 for stat in subset]))
         out[f"{prefix}/episode_exception_frac"] = float(
             np.mean([1.0 if stat.get("error") == "episode_exception" else 0.0 for stat in subset])
         )
@@ -122,9 +116,7 @@ def _retro_snapshot_metrics(stats: list[dict]) -> dict:
     if candidates:
         turns = [float(item["turn_index"]) for item in candidates if item.get("turn_index") is not None]
         fractions = [
-            float(item["trajectory_fraction"])
-            for item in candidates
-            if item.get("trajectory_fraction") is not None
+            float(item["trajectory_fraction"]) for item in candidates if item.get("trajectory_fraction") is not None
         ]
         errors = [float(item["fraction_error"]) for item in candidates if item.get("fraction_error") is not None]
         if turns:
@@ -186,7 +178,9 @@ def _agentic_metrics(samples, args) -> dict:
         if tvals:
             out[f"agentic/timing/{k}/max"] = float(np.max(tvals))
     for k in ("agent", "verifier"):
-        out |= _pctl_block(f"agentic/timing/{k}", [(s.get("timing") or {}).get(k) for s in stats], ps=(90,), include_max=False)
+        out |= _pctl_block(
+            f"agentic/timing/{k}", [(s.get("timing") or {}).get(k) for s in stats], ps=(90,), include_max=False
+        )
 
     gens = [
         (s["output_tokens"], (s.get("timing") or {}).get("generate"))
@@ -199,11 +193,11 @@ def _agentic_metrics(samples, args) -> dict:
     out["agentic/solved_frac"] = float(np.mean([1.0 if s.get("is_solved") else 0.0 for s in stats]))
     out["agentic/invalid_frac"] = float(np.mean([s["_remove_sample"] for s in stats]))
     for status in ("valid", "timeout", "infrastructure_error"):
-        out[f"agentic/grading/{status}_frac"] = float(
-            np.mean([s.get("grading_status") == status for s in stats])
-        )
+        out[f"agentic/grading/{status}_frac"] = float(np.mean([s.get("grading_status") == status for s in stats]))
     valid_stats = [s for s in stats if s.get("grading_status") == "valid" and not s["_remove_sample"]]
-    out["agentic/grading/valid_solved_frac"] = float(np.mean([bool(s.get("is_solved")) for s in valid_stats])) if valid_stats else 0.0
+    out["agentic/grading/valid_solved_frac"] = (
+        float(np.mean([bool(s.get("is_solved")) for s in valid_stats])) if valid_stats else 0.0
+    )
 
     # Per-lane policy-quality metrics. The pooled batch mixes fresh episodes
     # with retro continuations, and retro branches are pre-selected for
@@ -235,18 +229,13 @@ def _agentic_metrics(samples, args) -> dict:
     out["agentic/episode_exception_frac"] = float(
         np.mean([1.0 if s.get("error") == "episode_exception" else 0.0 for s in stats])
     )
-    context_exceeded = [
-        s for s in stats if (s.get("exit_status") or s.get("error")) == "ContextLengthExceeded"
-    ]
+    context_exceeded = [s for s in stats if (s.get("exit_status") or s.get("error")) == "ContextLengthExceeded"]
     out["agentic/context_length_exceeded_frac"] = len(context_exceeded) / len(stats)
     if context_exceeded:
         out["agentic/context_length_exceeded_removed_frac"] = float(
             np.mean([1.0 if s.get("_remove_sample") else 0.0 for s in context_exceeded])
         )
-        wasted = [
-            float((s.get("truncated_tail") or {}).get("tokens") or 0.0)
-            for s in context_exceeded
-        ]
+        wasted = [float((s.get("truncated_tail") or {}).get("tokens") or 0.0) for s in context_exceeded]
         out["agentic/context_length_wasted_tokens/mean"] = float(np.mean(wasted))
         out["agentic/context_length_wasted_tokens/max"] = float(max(wasted))
 
@@ -284,12 +273,7 @@ def _agentic_metrics(samples, args) -> dict:
     if exec_per_call:
         out["agentic/exec_time_per_call_sec/mean"] = float(np.mean(exec_per_call))
         out |= _pctl_block("agentic/exec_time_per_call_sec", exec_per_call, ps=(90,))
-    command_durations = [
-        float(value)
-        for s in stats
-        for value in (s.get("exec_durations") or ())
-        if value is not None
-    ]
+    command_durations = [float(value) for s in stats for value in (s.get("exec_durations") or ()) if value is not None]
     if command_durations:
         out["agentic/exec_call_sec/mean"] = float(np.mean(command_durations))
         out |= _pctl_block("agentic/exec_call_sec", command_durations)
@@ -331,10 +315,12 @@ def _agentic_metrics(samples, args) -> dict:
                 np.mean([1.0 if sm.get("source") == "server" else 0.0 for sm in summaries])
             )
             out["agentic/submissions/log_mismatch_frac"] = float(
-                np.mean([
-                    1.0 if ((sm.get("n_log_only") or 0) > 0 or (sm.get("n_score_mismatch") or 0) > 0) else 0.0
-                    for sm in summaries
-                ])
+                np.mean(
+                    [
+                        1.0 if ((sm.get("n_log_only") or 0) > 0 or (sm.get("n_score_mismatch") or 0) > 0) else 0.0
+                        for sm in summaries
+                    ]
+                )
             )
 
     # Outcome-reward shaping observability (harbor.py -> rewards.shape_outcome
@@ -345,12 +331,16 @@ def _agentic_metrics(samples, args) -> dict:
     outcomes = [s.get("outcome") for s in stats if isinstance(s.get("outcome"), dict)]
     if outcomes:
         finals = [float(o.get("final") or 0.0) for o in outcomes]
-        uplifts = [max(0.0, float(o.get("best_submitted") or 0.0) - f) for o, f in zip(outcomes, finals)]
+        uplifts = [max(0.0, float(o.get("best_submitted") or 0.0) - f) for o, f in zip(outcomes, finals, strict=True)]
         out["agentic/outcome/reward_final/mean"] = float(np.mean(finals))
-        out["agentic/outcome/reward_trained/mean"] = float(np.mean([float(o.get("base") or 0.0) + float(o.get("bonus") or 0.0) for o in outcomes]))
+        out["agentic/outcome/reward_trained/mean"] = float(
+            np.mean([float(o.get("base") or 0.0) + float(o.get("bonus") or 0.0) for o in outcomes])
+        )
         out["agentic/outcome/uplift/mean"] = float(np.mean(uplifts))
         out["agentic/outcome/best_gt_final_frac"] = float(np.mean([1.0 if u > 1e-9 else 0.0 for u in uplifts]))
-        out["agentic/outcome/bonus_frac"] = float(np.mean([1.0 if float(o.get("bonus") or 0.0) > 0 else 0.0 for o in outcomes]))
+        out["agentic/outcome/bonus_frac"] = float(
+            np.mean([1.0 if float(o.get("bonus") or 0.0) > 0 else 0.0 for o in outcomes])
+        )
         # Canary for performance-scored problems whose submit scores arrive in
         # non-[0,1] judge units and get discarded at ingestion (rewards.py) --
         # they'd otherwise leak unbounded values into "best" (observed: 835.76
@@ -384,6 +374,7 @@ def _agentic_metrics(samples, args) -> dict:
     # potential-based shaping would reward). Denominator = every episode in the
     # batch; a never-submitting episode has no delta by definition.
     if any(n is not None for n in subs):
+
         def has_positive_delta(entries) -> bool:
             for e in entries or ():
                 score = e.get("score")
@@ -446,11 +437,7 @@ def _async_metrics(samples, now: float, trainer_version: int | None = None) -> d
             spans = [len(set(vs)) for vs in versioned]
             out[f"{prefix}/version_span/mean"] = float(np.mean(spans))
             out[f"{prefix}/version_span/max"] = float(max(spans))
-            nums = [
-                ns
-                for ns in ([n for n in (_vnum(v) for v in vs) if n is not None] for vs in versioned)
-                if ns
-            ]
+            nums = [ns for ns in ([n for n in (_vnum(v) for v in vs) if n is not None] for vs in versioned) if ns]
             if nums:
                 freshest = max(max(ns) for ns in nums)
                 lags = [freshest - min(ns) for ns in nums]
@@ -467,8 +454,7 @@ def _async_metrics(samples, now: float, trainer_version: int | None = None) -> d
         ages = [
             now - s.metadata["agentic"]["gen_timestamp"]
             for s in segment
-            if isinstance(getattr(s, "metadata", None), dict)
-            and s.metadata.get("agentic", {}).get("gen_timestamp")
+            if isinstance(getattr(s, "metadata", None), dict) and s.metadata.get("agentic", {}).get("gen_timestamp")
         ]
         if ages:
             out[f"{prefix}/sample_age_sec/mean"] = float(np.mean(ages))

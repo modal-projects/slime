@@ -28,10 +28,11 @@ import time
 import uuid
 from typing import Any
 
+from agentic_rl.envs.base import EnvMetadataError, EpisodeLimits, RewardResult, load_env
+
 from slime.rollout.sglang_rollout import GenerateState
 from slime.utils.types import Sample
 
-from agentic_rl.envs.base import EnvMetadataError, EpisodeLimits, RewardResult, load_env
 from .model import RecordingModel
 
 logger = logging.getLogger("agentic_rl")
@@ -215,7 +216,12 @@ def _build_samples(sample, model, result, tokenizer, md, args, *, elapsed: float
     stats["timing"] = {**(stats.get("timing") or {}), "generate": round(model.gen_time, 1)}
     logger.info(
         "[agentic_rl] %s: reward=%.2f solved=%s turns=%d chains=%d elapsed=%.1fs",
-        md["instance_id"], result.reward, result.is_solved, stats["turns"], k, elapsed,
+        md["instance_id"],
+        result.reward,
+        result.is_solved,
+        stats["turns"],
+        k,
+        elapsed,
     )
 
     samples = []

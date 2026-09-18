@@ -709,9 +709,11 @@ class RolloutManager:
             rewards = torch.zeros(len(samples), dtype=torch.float)
             groups = group_by(
                 range(len(samples)),
-                lambda i: (False, samples[i].group_index)
-                if samples[i].group_index is not None
-                else (True, i // self.args.n_samples_per_prompt),
+                lambda i: (
+                    (False, samples[i].group_index)
+                    if samples[i].group_index is not None
+                    else (True, i // self.args.n_samples_per_prompt)
+                ),
             )
             for indices in groups.values():
                 valid = [i for i in indices if not samples[i].remove_sample]
@@ -727,7 +729,9 @@ class RolloutManager:
 
             return raw_rewards, rewards.tolist()
 
-        return raw_rewards, [0.0 if sample.remove_sample else reward for sample, reward in zip(samples, raw_rewards, strict=True)]
+        return raw_rewards, [
+            0.0 if sample.remove_sample else reward for sample, reward in zip(samples, raw_rewards, strict=True)
+        ]
 
     def _convert_samples_to_train_data(self, samples: list[Sample] | list[list[Sample]]):
         """

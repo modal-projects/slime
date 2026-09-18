@@ -210,7 +210,9 @@ class Sandbox:
 
     def read_file(self, path: str) -> str:
         try:
-            return _run_with_timeout(lambda: self.sb.filesystem.read_text(path), self.exec_timeout, f"read_file({path})")
+            return _run_with_timeout(
+                lambda: self.sb.filesystem.read_text(path), self.exec_timeout, f"read_file({path})"
+            )
         except (FileNotFoundError, modal.exception.SandboxFilesystemNotFoundError):
             return ""
 
@@ -235,7 +237,7 @@ class Sandbox:
         except Exception:  # noqa: BLE001
             pass
 
-    def __enter__(self) -> "Sandbox":
+    def __enter__(self) -> Sandbox:
         return self
 
     def __exit__(self, *exc) -> None:
