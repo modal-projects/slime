@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import shlex
@@ -155,6 +156,8 @@ class HarborEnv(RolloutEnv):
         steps = self._step_specs(md)
         step_results: list[dict[str, Any]] = []
         timer = PhaseTimer()
+        grading_status = "valid"
+        grading_error = None
 
         t0 = time.monotonic()
         artifacts: dict[str, Any] = {}
@@ -183,15 +186,25 @@ class HarborEnv(RolloutEnv):
                 with timer.phase("agent"):
                     run_leg(sb, step["instruction"], remaining)
                 with timer.phase("verifier"):
-                    rewards = self._verify(
-                        sb,
-                        tests_dir=task_dir / step["tests_path"],
-                        workdir=workdir,
-                        verifier={**md["verifier"], **(step.get("verifier") or {})},
-                        eval_timeout_sec=limits.eval_timeout,
-                        instance_id=md["instance_id"],
-                    )
-                signal = rewards_mod.signal_from_reward_dict(rewards)
+                    try:
+                        rewards = self._verify(
+                            sb,
+                            tests_dir=task_dir / step["tests_path"],
+                            workdir=workdir,
+                            verifier={**md["verifier"], **(step.get("verifier") or {})},
+                            eval_timeout_sec=limits.eval_timeout,
+                            instance_id=md["instance_id"],
+                        )
+                        if not rewards:
+                            raise ValueError("verifier returned no grade")
+                        signal = rewards_mod.signal_from_reward_dict(rewards)
+                        if not math.isfinite(signal.score_raw):
+                            raise ValueError("verifier returned a non-finite grade")
+                    except Exception as e:
+                        grading_status = "timeout" if isinstance(e, TimeoutError) else "infrastructure_error"
+                        grading_error = str(e)
+                        logger.exception("[harbor] %s: grading failed (%s)", md["instance_id"], grading_status)
+                        break
                 shaped = rewards_mod.shape(signal, rewards_mod.resolve_shape(md))
                 step_results.append({"name": step["name"], "rewards": rewards, "reward": shaped, "is_solved": signal.is_solved})
                 if not _meets_min_reward(rewards, step.get("min_reward")):
@@ -224,9 +237,11 @@ class HarborEnv(RolloutEnv):
         reward, outcome_info = rewards_mod.shape_outcome(outcome, rewards_mod.resolve_outcome(md))
         timer.record("episode", time.monotonic() - t0)
         return RewardResult(
-            reward=reward,
-            is_solved=is_solved,
+            reward=reward if grading_status == "valid" else 0.0,
+            is_solved=is_solved and grading_status == "valid",
+            grading_status=grading_status,
             extra={
+                "grading_error": grading_error,
                 "outcome": outcome_info,
                 "harbor_step_results": step_results,
                 "harbor_steps_completed": len(step_results),
@@ -271,12 +286,14 @@ class HarborEnv(RolloutEnv):
         # and gate the whole sync step). Final fallback 600s if neither is present.
         timeout = int(eval_timeout_sec or verifier.get("timeout_sec") or 600)
         self.upload_dir(sb, tests_dir, "/tests")
-        sb.exec("chmod +x /tests/test.sh && rm -f /logs/verifier/reward.json /logs/verifier/reward.txt", check=False, timeout=60)
+        sb.exec("chmod +x /tests/test.sh && rm -f /logs/verifier/reward.json /logs/verifier/reward.txt", check=True, timeout=60)
         env = _resolve_env_templates(verifier.get("env"))
         q = shlex.quote
         ec, out, err = sb.exec(f"cd {q(workdir)} && bash /tests/test.sh", env=env or None, timeout=timeout, check=False)
         if os.environ.get("HARBOR_VERIFY_DEBUG"):
             logger.info("[harbor-verify-debug] %s: test.sh exit=%s\nstdout:\n%s\nstderr:\n%s", instance_id, ec, (out or "")[-3000:], (err or "")[-3000:])
+        if ec in (-1, 124):
+            raise TimeoutError(f"verifier timed out after {timeout}s (exit={ec})")
 
         raw_json = sb.read_file("/logs/verifier/reward.json")
         if raw_json.strip():
@@ -296,7 +313,7 @@ class HarborEnv(RolloutEnv):
         if ec in (0, 1):
             return {"reward": 1.0 if ec == 0 else 0.0, "graded_from": "exit_code"}
         logger.warning("[harbor] %s: test.sh exit=%s wrote no reward file; stderr: %s", instance_id, ec, (err or "")[-400:])
-        return None
+        raise RuntimeError(f"verifier exited {ec} without a reward file: {(err or '')[-400:]}")
 
     # oracle check (reference solution through the exact rollout path) -------
     def oracle_episode(self, md: dict[str, Any], *, solve_timeout_sec: int, eval_timeout_sec: int) -> RewardResult:

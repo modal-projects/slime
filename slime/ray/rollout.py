@@ -706,23 +706,28 @@ class RolloutManager:
             self.args.advantage_estimator in ["grpo", "gspo", "cispo", "reinforce_plus_plus_baseline"]
             and self.args.rewards_normalization
         ):
-            # group norm
-            rewards = torch.tensor(raw_rewards, dtype=torch.float)
-            if rewards.shape[-1] == self.args.n_samples_per_prompt * self.args.rollout_batch_size:
-                rewards = rewards.reshape(-1, self.args.n_samples_per_prompt)
-            else:
-                # when samples count are not equal in each group
-                rewards = rewards.view(-1, rewards.shape[-1])
-            mean = rewards.mean(dim=-1, keepdim=True)
-            rewards = rewards - mean
+            rewards = torch.zeros(len(samples), dtype=torch.float)
+            groups = group_by(
+                range(len(samples)),
+                lambda i: (False, samples[i].group_index)
+                if samples[i].group_index is not None
+                else (True, i // self.args.n_samples_per_prompt),
+            )
+            for indices in groups.values():
+                valid = [i for i in indices if not samples[i].remove_sample]
+                if len(valid) < 2:
+                    continue
+                group_rewards = torch.tensor([raw_rewards[i] for i in valid], dtype=torch.float)
+                if group_rewards.max() == group_rewards.min():
+                    continue
+                group_rewards = group_rewards - group_rewards.mean()
+                if self.args.advantage_estimator in ["grpo", "gspo", "cispo"] and self.args.grpo_std_normalization:
+                    group_rewards = group_rewards / (group_rewards.std() + 1e-6)
+                rewards[valid] = group_rewards
 
-            if self.args.advantage_estimator in ["grpo", "gspo", "cispo"] and self.args.grpo_std_normalization:
-                std = rewards.std(dim=-1, keepdim=True)
-                rewards = rewards / (std + 1e-6)
+            return raw_rewards, rewards.tolist()
 
-            return raw_rewards, rewards.flatten().tolist()
-
-        return raw_rewards, raw_rewards
+        return raw_rewards, [0.0 if sample.remove_sample else reward for sample, reward in zip(samples, raw_rewards, strict=True)]
 
     def _convert_samples_to_train_data(self, samples: list[Sample] | list[list[Sample]]):
         """

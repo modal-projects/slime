@@ -197,6 +197,13 @@ def _agentic_metrics(samples, args) -> dict:
         out["agentic/decode_tok_per_s/mean"] = float(np.mean([o / g for o, g in gens]))
 
     out["agentic/solved_frac"] = float(np.mean([1.0 if s.get("is_solved") else 0.0 for s in stats]))
+    out["agentic/invalid_frac"] = float(np.mean([s["_remove_sample"] for s in stats]))
+    for status in ("valid", "timeout", "infrastructure_error"):
+        out[f"agentic/grading/{status}_frac"] = float(
+            np.mean([s.get("grading_status") == status for s in stats])
+        )
+    valid_stats = [s for s in stats if s.get("grading_status") == "valid" and not s["_remove_sample"]]
+    out["agentic/grading/valid_solved_frac"] = float(np.mean([bool(s.get("is_solved")) for s in valid_stats])) if valid_stats else 0.0
 
     # Per-lane policy-quality metrics. The pooled batch mixes fresh episodes
     # with retro continuations, and retro branches are pre-selected for

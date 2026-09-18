@@ -56,6 +56,7 @@ class RewardResult:
     reward: float
     is_solved: bool
     extra: dict[str, Any] = field(default_factory=dict)
+    grading_status: str = "valid"
 
 
 class RolloutEnv(ABC):

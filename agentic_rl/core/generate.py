@@ -84,13 +84,16 @@ def _session_id(sample: Sample, md: dict[str, Any]) -> str:
 
 
 def _run_episode(env, md: dict[str, Any], model: RecordingModel, limits: EpisodeLimits) -> RewardResult:
-    """Synchronous episode body run in a worker thread. Never raises: an episode
-    that errors mid-run still trains on the turns it produced (reward 0)."""
     try:
         return env.rollout(md, model=model, limits=limits)
-    except Exception:  # noqa: BLE001
+    except Exception as e:
         logger.exception("[agentic_rl] episode failed (instance=%s)", md.get("instance_id"))
-        return RewardResult(reward=0.0, is_solved=False, extra={"error": "episode_exception"})
+        return RewardResult(
+            reward=0.0,
+            is_solved=False,
+            extra={"error": "episode_exception", "grading_error": str(e)},
+            grading_status="timeout" if isinstance(e, TimeoutError) else "infrastructure_error",
+        )
 
 
 async def generate(args, sample: Sample, sampling_params: dict[str, Any], evaluation: bool = False):
@@ -174,6 +177,9 @@ def _build_samples(sample, model, result, tokenizer, md, args, *, elapsed: float
         if not evaluation:
             logger.warning("[agentic_rl] %s unusable (%s); shipping masked reward-0", key, reason)
         null = _ship_null(sample, tokenizer, md, reason, tail=tail, full_prompt=full_prompt, elapsed=elapsed)
+        if result is not None:
+            null.metadata["agentic"].update(result.extra)
+            null.metadata["agentic"]["grading_status"] = result.grading_status
         if getattr(model, "n_think_closures", 0):  # closure attempted but the episode still nulled
             null.metadata["agentic"]["think_closures"] = model.n_think_closures
         return null
@@ -193,6 +199,7 @@ def _build_samples(sample, model, result, tokenizer, md, args, *, elapsed: float
         "elapsed_sec": round(elapsed, 1),
         "is_solved": result.is_solved,
         **{key_: val for key_, val in result.extra.items() if key_ != "harbor_step_results"},
+        "grading_status": result.grading_status,
     }
     # A context-length/no-progress terminal turn is rolled back, but earlier
     # valid tool-call turns remain trainable. Preserve the terminal reason on
@@ -217,9 +224,12 @@ def _build_samples(sample, model, result, tokenizer, md, args, *, elapsed: float
         s.tokens = c.tokens
         s.response_length = len(c.tokens) - c.prompt_len
         s.loss_mask = c.loss_mask[c.prompt_len :]
+        s.remove_sample = sample.remove_sample or result.grading_status != "valid"
+        if s.remove_sample:
+            s.loss_mask = [0] * s.response_length
         s.rollout_log_probs = c.logprobs[c.prompt_len :]
         s.weight_versions = [v for v in c.versions if v is not None]
-        s.reward = result.reward / k
+        s.reward = 0.0 if s.remove_sample else result.reward / k
         s.response = tokenizer.decode(c.tokens[c.prompt_len :], skip_special_tokens=False)
         s.status = Sample.Status.COMPLETED
         s.rollout_id = sample.index  # siblings share rollout_id so reducers don't over-count
@@ -293,6 +303,11 @@ def _abort(sample: Sample, reason: str) -> Sample:
     sample.reward = 0.0
     sample.rollout_id = sample.index
     sample.status = Sample.Status.ABORTED
-    sample.metadata = {**(sample.metadata or {}), "abort_reason": reason}
+    sample.remove_sample = True
+    sample.metadata = {
+        **(sample.metadata or {}),
+        "abort_reason": reason,
+        "agentic": {"grading_status": "infrastructure_error"},
+    }
     logger.warning("[agentic_rl] aborted: %s", reason)
     return sample
