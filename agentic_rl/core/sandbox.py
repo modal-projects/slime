@@ -12,12 +12,14 @@ retries, and separate stdout/stderr with an output cap.
 from __future__ import annotations
 
 import os
+import random
 import shlex
 import threading
 import time
 from dataclasses import dataclass
 
 import modal
+from grpclib.exceptions import StreamTerminatedError
 
 from minisweagent.exceptions import Submitted
 
@@ -109,8 +111,33 @@ class Sandbox:
             except Exception as e:  # noqa: BLE001 - transient boot errors retried, then surfaced
                 last = e
                 if attempt < retries:
-                    time.sleep(2 * (attempt + 1))
+                    time.sleep(random.uniform(0.0, min(32.0, 2**attempt)))
         raise SandboxBootError(f"sandbox boot failed after {retries + 1} attempts: {last}")
+
+    @staticmethod
+    def _is_transient_rpc_error(error: Exception) -> bool:
+        if isinstance(error, AttributeError):
+            return any(attr in str(error) for attr in ("_write_appdata", "'_transport'"))
+        return isinstance(
+            error,
+            (
+                ConnectionError,
+                StreamTerminatedError,
+                modal.exception.ConnectionError,
+                modal.exception.ServiceError,
+                modal.exception.InternalError,
+            ),
+        )
+
+    @staticmethod
+    def _rpc_retry(fn):
+        for attempt in range(3):
+            try:
+                return fn()
+            except Exception as error:
+                if not Sandbox._is_transient_rpc_error(error) or attempt == 2:
+                    raise
+                time.sleep(random.uniform(0.0, min(32.0, 2**attempt)))
 
     def exec(
         self,
@@ -200,7 +227,7 @@ class Sandbox:
         # once hung ~3h until Modal tore the stream down, stalling the whole rollout and
         # shipping the episode with zero usable turns. Bound it client-side so the episode
         # fails fast (-> caught upstream, graded 0) instead of hanging.
-        _run_with_timeout(_write, self.exec_timeout, f"write_file({path})")
+        _run_with_timeout(lambda: self._rpc_retry(_write), self.exec_timeout, f"write_file({path})")
 
     @staticmethod
     def _is_pathlike(content) -> bool:
@@ -211,7 +238,9 @@ class Sandbox:
     def read_file(self, path: str) -> str:
         try:
             return _run_with_timeout(
-                lambda: self.sb.filesystem.read_text(path), self.exec_timeout, f"read_file({path})"
+                lambda: self._rpc_retry(lambda: self.sb.filesystem.read_text(path)),
+                self.exec_timeout,
+                f"read_file({path})",
             )
         except (FileNotFoundError, modal.exception.SandboxFilesystemNotFoundError):
             return ""

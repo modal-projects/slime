@@ -22,6 +22,7 @@ import json
 import logging
 import math
 import os
+import random
 import re
 import shlex
 import time
@@ -172,20 +173,14 @@ class HarborEnv(RolloutEnv):
         t0 = time.monotonic()
         artifacts: dict[str, Any] = {}
         sandbox_exec: dict[str, int] = {}
-        with self._sandbox(
-            md, lifetime=agent_budget_sec + limits.grade_timeout + 300, exec_timeout=limits.exec_timeout
-        ) as sb:
-            timer.record("boot", sb.boot_time)
-            workdir = md["workdir"] or self._detect_workdir(sb)
-            q = shlex.quote
-            with timer.phase("prep"):
-                sb.exec(f"mkdir -p {q(workdir)} /logs/agent /logs/verifier /logs/artifacts", check=True, timeout=60)
+        sb, workdir = self._prepare_sandbox(md, steps[0], agent_budget_sec, limits, timer)
+        with sb:
 
             # Start the agent clock only after boot+prep: a cold image pull can take
             # minutes, and charging it against the agent budget would exhaust the
             # window before any step runs.
             deadline = time.monotonic() + agent_budget_sec
-            for step in steps:
+            for index, step in enumerate(steps):
                 remaining = int(deadline - time.monotonic())
                 if remaining <= 0:
                     logger.warning(
@@ -193,10 +188,11 @@ class HarborEnv(RolloutEnv):
                     )
                     break
                 leg_md = {**md, "workdir": workdir}
-                with timer.phase("prep"):
-                    if self.writes_problem_statement_file:
-                        self.write_problem_file(sb, workdir, step["instruction"])
-                    self._pre_agent_setup(sb, task_dir, leg_md)
+                if index:
+                    with timer.phase("prep"):
+                        if self.writes_problem_statement_file:
+                            self.write_problem_file(sb, workdir, step["instruction"])
+                        self._pre_agent_setup(sb, task_dir, leg_md)
                 with timer.phase("agent"):
                     run_leg(sb, step["instruction"], remaining)
                 with timer.phase("verifier"):
@@ -273,6 +269,33 @@ class HarborEnv(RolloutEnv):
                 **artifacts,
             },
         )
+
+    def _prepare_sandbox(self, md, step, agent_budget_sec, limits, timer):
+        for attempt in range(3):
+            sb = None
+            try:
+                with timer.phase("boot"):
+                    sb = self._sandbox(
+                        md, lifetime=agent_budget_sec + limits.grade_timeout + 300, exec_timeout=limits.exec_timeout
+                    )
+                with timer.phase("prep"):
+                    workdir = md["workdir"] or self._detect_workdir(sb)
+                    sb.exec(
+                        f"mkdir -p {shlex.quote(workdir)} /logs/agent /logs/verifier /logs/artifacts",
+                        check=True,
+                        timeout=60,
+                    )
+                    if self.writes_problem_statement_file:
+                        self.write_problem_file(sb, workdir, step["instruction"])
+                    self._pre_agent_setup(sb, Path(md["task_dir"]), {**md, "workdir": workdir})
+                return sb, workdir
+            except Exception as error:
+                if sb is not None:
+                    sb.terminate()
+                if attempt == 2 or not (isinstance(error, TimeoutError) or Sandbox._is_transient_rpc_error(error)):
+                    raise
+                logger.warning("[harbor] %s: retrying sandbox setup: %s", md["instance_id"], error)
+                time.sleep(random.uniform(0.0, min(32.0, 2**attempt)))
 
     @staticmethod
     def _aggregate(steps: list[dict], results: list[dict], strategy: str | None) -> float:
