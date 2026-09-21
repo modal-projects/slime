@@ -11,6 +11,7 @@ retries, and separate stdout/stderr with an output cap.
 
 from __future__ import annotations
 
+import logging
 import os
 import random
 import shlex
@@ -24,6 +25,8 @@ from grpclib.exceptions import StreamTerminatedError
 from minisweagent.exceptions import Submitted
 
 from .prompts import SUBMIT_SENTINEL
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_APP = "agentic-rl-sandboxes"
 OUTPUT_CAP = 1_000_000  # per-stream char cap; oversized output is head+tail elided
@@ -53,6 +56,10 @@ def _build_image(image: str | DockerfileImage):
 
 class Sandbox:
     config = None  # mini-swe Environment protocol
+    rpc_retries_env = ("SLIME_AGENT_SANDBOX_RPC_RETRIES", "SWE_RPC_RETRIES")
+    default_rpc_retries = 6
+    rpc_backoff_base_sec = 1.0
+    rpc_backoff_cap_sec = 32.0
 
     def __init__(
         self,
@@ -66,7 +73,7 @@ class Sandbox:
         cpu: float | None = None,
         memory_mb: int | None = None,
         vm_runtime: bool = False,
-        boot_retries: int = 2,
+        boot_retries: int | None = None,
     ):
         # Default sandbox resources from env when the task doesn't size them
         # (Modal's defaults are too small for running tests/builds).
@@ -87,7 +94,9 @@ class Sandbox:
             kwargs["experimental_options"] = {"vm_runtime": True}
 
         t0 = time.perf_counter()
-        self.sb = self._create_with_retry(kwargs, boot_retries)
+        self.sb = self._create_with_retry(
+            kwargs, self._rpc_retries_from_env() - 1 if boot_retries is None else boot_retries
+        )
         self.boot_time = time.perf_counter() - t0
         self.cwd = cwd
         self.exec_timeout = exec_timeout
@@ -100,8 +109,16 @@ class Sandbox:
         # budget. None outside a leg (boot/prep/verify use their own timeouts).
         self.deadline: float | None = None
 
-    @staticmethod
-    def _create_with_retry(kwargs: dict, retries: int):
+    @classmethod
+    def _rpc_retries_from_env(cls) -> int:
+        for name in cls.rpc_retries_env:
+            value = os.environ.get(name)
+            if value is not None and value.strip():
+                return max(1, int(value))
+        return cls.default_rpc_retries
+
+    @classmethod
+    def _create_with_retry(cls, kwargs: dict, retries: int):
         # Keepalive "sleep infinity": some task images blank ENTRYPOINT, so a
         # sandbox with no foreground command exits rc128 on boot.
         last = None
@@ -109,9 +126,12 @@ class Sandbox:
             try:
                 return modal.Sandbox.create("sleep", "infinity", **kwargs)
             except Exception as e:  # noqa: BLE001 - transient boot errors retried, then surfaced
+                if not cls._is_transient_rpc_error(e):
+                    raise
                 last = e
                 if attempt < retries:
-                    time.sleep(random.uniform(0.0, min(32.0, 2**attempt)))
+                    ceiling = min(cls.rpc_backoff_cap_sec, cls.rpc_backoff_base_sec * (2**attempt))
+                    time.sleep(random.uniform(0.0, ceiling))
         raise SandboxBootError(f"sandbox boot failed after {retries + 1} attempts: {last}")
 
     @staticmethod
@@ -121,23 +141,37 @@ class Sandbox:
         return isinstance(
             error,
             (
+                TimeoutError,
                 ConnectionError,
                 StreamTerminatedError,
+                modal.exception.TimeoutError,
                 modal.exception.ConnectionError,
                 modal.exception.ServiceError,
                 modal.exception.InternalError,
             ),
         )
 
-    @staticmethod
-    def _rpc_retry(fn):
-        for attempt in range(3):
+    @classmethod
+    def _rpc_retry(cls, op_name: str, fn, *, idempotent: bool = True):
+        retries = cls._rpc_retries_from_env()
+        for attempt in range(retries):
             try:
                 return fn()
             except Exception as error:
-                if not Sandbox._is_transient_rpc_error(error) or attempt == 2:
+                if not cls._is_transient_rpc_error(error) or not idempotent or attempt + 1 == retries:
                     raise
-                time.sleep(random.uniform(0.0, min(32.0, 2**attempt)))
+                ceiling = min(cls.rpc_backoff_cap_sec, cls.rpc_backoff_base_sec * (2**attempt))
+                backoff = random.uniform(0.0, ceiling)
+                logger.debug(
+                    "[agent.sandbox] %s transient %s, retry %d/%d in %.1fs: %s",
+                    op_name,
+                    type(error).__name__,
+                    attempt + 1,
+                    retries,
+                    backoff,
+                    str(error)[:120],
+                )
+                time.sleep(backoff)
 
     def exec(
         self,
@@ -147,6 +181,7 @@ class Sandbox:
         timeout: int | None = None,
         check: bool = False,
         env: dict[str, str] | None = None,
+        idempotent: bool = False,
     ) -> tuple[int, str, str]:
         """Run ``command`` in a login shell; return ``(returncode, stdout, stderr)``.
 
@@ -181,7 +216,11 @@ class Sandbox:
             return p.wait(), out, err
 
         try:
-            rc, out, err = _run_with_timeout(_run, budget + _EXEC_GRACE_SEC, f"exec({command[:80]})")
+            rc, out, err = _run_with_timeout(
+                lambda: self._rpc_retry(f"exec({command[:80]})", _run, idempotent=idempotent),
+                budget + _EXEC_GRACE_SEC,
+                f"exec({command[:80]})",
+            )
         except TimeoutError:
             self._record_exec_duration(t0)
             self.exec_timeouts += 1
@@ -227,7 +266,9 @@ class Sandbox:
         # once hung ~3h until Modal tore the stream down, stalling the whole rollout and
         # shipping the episode with zero usable turns. Bound it client-side so the episode
         # fails fast (-> caught upstream, graded 0) instead of hanging.
-        _run_with_timeout(lambda: self._rpc_retry(_write), self.exec_timeout, f"write_file({path})")
+        _run_with_timeout(
+            lambda: self._rpc_retry(f"write_file({path})", _write), self.exec_timeout, f"write_file({path})"
+        )
 
     @staticmethod
     def _is_pathlike(content) -> bool:
@@ -238,7 +279,7 @@ class Sandbox:
     def read_file(self, path: str) -> str:
         try:
             return _run_with_timeout(
-                lambda: self._rpc_retry(lambda: self.sb.filesystem.read_text(path)),
+                lambda: self._rpc_retry(f"read_file({path})", lambda: self.sb.filesystem.read_text(path)),
                 self.exec_timeout,
                 f"read_file({path})",
             )

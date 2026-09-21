@@ -271,7 +271,8 @@ class HarborEnv(RolloutEnv):
         )
 
     def _prepare_sandbox(self, md, step, agent_budget_sec, limits, timer):
-        for attempt in range(3):
+        retries = Sandbox._rpc_retries_from_env()
+        for attempt in range(retries):
             sb = None
             try:
                 with timer.phase("boot"):
@@ -284,6 +285,7 @@ class HarborEnv(RolloutEnv):
                         f"mkdir -p {shlex.quote(workdir)} /logs/agent /logs/verifier /logs/artifacts",
                         check=True,
                         timeout=60,
+                        idempotent=True,
                     )
                     if self.writes_problem_statement_file:
                         self.write_problem_file(sb, workdir, step["instruction"])
@@ -292,10 +294,11 @@ class HarborEnv(RolloutEnv):
             except Exception as error:
                 if sb is not None:
                     sb.terminate()
-                if attempt == 2 or not (isinstance(error, TimeoutError) or Sandbox._is_transient_rpc_error(error)):
+                if attempt + 1 == retries or not Sandbox._is_transient_rpc_error(error):
                     raise
                 logger.warning("[harbor] %s: retrying sandbox setup: %s", md["instance_id"], error)
-                time.sleep(random.uniform(0.0, min(32.0, 2**attempt)))
+                ceiling = min(Sandbox.rpc_backoff_cap_sec, Sandbox.rpc_backoff_base_sec * (2**attempt))
+                time.sleep(random.uniform(0.0, ceiling))
 
     @staticmethod
     def _aggregate(steps: list[dict], results: list[dict], strategy: str | None) -> float:
